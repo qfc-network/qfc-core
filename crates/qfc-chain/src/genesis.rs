@@ -72,12 +72,24 @@ impl GenesisConfig {
             );
         }
 
-        // Dev validator address (derived from secret key [0x42; 32])
-        // This is the deterministic dev validator that produces blocks in dev mode
-        let validators = vec![GenesisValidator {
-            address: "0x10d7812fbe50096ae82569fdad35f79628bc0084".to_string(),
-            stake: "1000000".to_string(),
-        }];
+        // Dev validators (deterministic keys for testing)
+        // Key [0x42; 32] -> 0x10d7812fbe50096ae82569fdad35f79628bc0084
+        // Key [0x43; 32] -> 0xfd3dabd401f1b94789d89ce947be9345cfbf44c3
+        // Key [0x44; 32] -> 0xb6d2be7dc3b62c39e5c5a6b744076e9c4dffb552
+        let validators = vec![
+            GenesisValidator {
+                address: "0x10d7812fbe50096ae82569fdad35f79628bc0084".to_string(),
+                stake: "1000000".to_string(),
+            },
+            GenesisValidator {
+                address: "0xfd3dabd401f1b94789d89ce947be9345cfbf44c3".to_string(),
+                stake: "1000000".to_string(),
+            },
+            GenesisValidator {
+                address: "0xb6d2be7dc3b62c39e5c5a6b744076e9c4dffb552".to_string(),
+                stake: "1000000".to_string(),
+            },
+        ];
 
         Self {
             chain_id: DEFAULT_CHAIN_ID,

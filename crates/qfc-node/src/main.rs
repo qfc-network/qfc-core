@@ -253,7 +253,7 @@ async fn main() -> Result<()> {
     if is_validator {
         let producer_config = ProducerConfig {
             block_interval_ms: if args.dev { 3000 } else { 5000 },
-            produce_empty_blocks: args.dev, // Only produce empty blocks in dev mode
+            produce_empty_blocks: true, // Always produce empty blocks for testing
             ..Default::default()
         };
 

@@ -80,12 +80,8 @@ impl BlockProducer {
         epoch_seed.copy_from_slice(genesis_hash.as_bytes());
         self.consensus.start_epoch(1, epoch_seed);
 
-        // Set up initial validator set (in dev mode, just ourselves)
-        let mut validator = ValidatorNode::default();
-        validator.address = our_address;
-        validator.stake = qfc_types::U256::from_u64(1_000_000);
-        validator.contribution_score = 1000;
-        self.consensus.update_validators(vec![validator]);
+        // Validators are already loaded from genesis in chain.rs
+        // No need to override here
 
         let mut block_timer = interval(Duration::from_millis(self.config.block_interval_ms));
         let mut slot: u64 = 0;
