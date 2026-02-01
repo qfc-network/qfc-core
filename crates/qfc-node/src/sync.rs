@@ -69,9 +69,12 @@ impl SyncManager {
                 request,
                 response_tx,
             } => {
-                debug!("Handling sync request from {}: {:?}", peer_id, request);
+                info!("Handling sync request from {}: {:?}", peer_id, request);
                 let response = self.handle_sync_request(request).await;
-                let _ = response_tx.send(response);
+                info!("Sending sync response: {:?}", response);
+                if response_tx.send(response).is_err() {
+                    warn!("Failed to send sync response through channel");
+                }
             }
         }
     }
@@ -214,35 +217,42 @@ impl SyncManager {
 
         // Spawn the request to avoid recursion issues
         tokio::spawn(async move {
+            info!("Fetching block {} from peer {}", hex::encode(&missing_parent.as_bytes()[..8]), peer);
             match self_clone.network.request_block_by_hash(peer, missing_parent).await {
                 Ok(SyncResponse::Block(data)) => {
-                    debug!("Received missing block from peer");
+                    info!("Received block data ({} bytes)", data.len());
                     // Parse and try to import the block
-                    if let Ok(block) = borsh::from_slice::<Block>(&data) {
-                        let block_number = block.number();
-                        let block_parent = block.parent_hash();
+                    match borsh::from_slice::<Block>(&data) {
+                        Ok(block) => {
+                            let block_number = block.number();
+                            let block_parent = block.parent_hash();
+                            info!("Parsed block #{}, parent: {}", block_number, hex::encode(&block_parent.as_bytes()[..8]));
 
-                        match self_clone.chain.import_block(block.clone()) {
-                            Ok(_) => {
-                                info!("Imported missing block #{}", block_number);
-                                // Try to process pending blocks
-                                self_clone.process_pending_blocks_sync();
+                            match self_clone.chain.import_block(block.clone()) {
+                                Ok(_) => {
+                                    info!("Imported fetched block #{}", block_number);
+                                    // Try to process pending blocks
+                                    self_clone.process_pending_blocks_sync();
+                                }
+                                Err(qfc_chain::ChainError::InvalidParent { .. }) => {
+                                    // Need to request even earlier blocks
+                                    info!("Block #{} still missing parent, queuing", block_number);
+                                    self_clone.pending_blocks.write().push_front(block);
+                                    // Request parent
+                                    self_clone.request_missing_blocks(block_parent);
+                                }
+                                Err(e) => {
+                                    warn!("Failed to import fetched block #{}: {}", block_number, e);
+                                }
                             }
-                            Err(qfc_chain::ChainError::InvalidParent { .. }) => {
-                                // Need to request even earlier blocks
-                                debug!("Still missing parent for block #{}", block_number);
-                                self_clone.pending_blocks.write().push_front(block);
-                                // Request parent
-                                self_clone.request_missing_blocks(block_parent);
-                            }
-                            Err(e) => {
-                                warn!("Failed to import fetched block: {}", e);
-                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to parse block: {}", e);
                         }
                     }
                 }
                 Ok(SyncResponse::NotFound) => {
-                    debug!("Peer doesn't have the requested block");
+                    info!("Block not found on peer");
                 }
                 Ok(other) => {
                     warn!("Unexpected sync response: {:?}", other);

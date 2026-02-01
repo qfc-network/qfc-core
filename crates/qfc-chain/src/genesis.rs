@@ -50,25 +50,12 @@ impl Default for GenesisConfig {
 }
 
 impl GenesisConfig {
-    /// Create testnet genesis config
+    /// Create testnet genesis config (same as dev for network compatibility)
     pub fn testnet() -> Self {
-        let mut alloc = HashMap::new();
-
-        // Allocate to some test addresses
-        alloc.insert(
-            "0x0000000000000000000000000000000000000001".to_string(),
-            GenesisAllocation {
-                balance: "1000000000000000000000000".to_string(), // 1M QFC
-            },
-        );
-
-        Self {
-            chain_id: DEFAULT_CHAIN_ID,
-            timestamp: 0,
-            extra_data: b"QFC Genesis".to_vec(),
-            alloc,
-            validators: Vec::new(),
-        }
+        // Use same genesis as dev() to ensure all nodes on the network
+        // have the same genesis hash. The only difference is that dev mode
+        // also enables automatic block production.
+        Self::dev()
     }
 
     /// Create dev genesis config with rich accounts
@@ -85,12 +72,19 @@ impl GenesisConfig {
             );
         }
 
+        // Dev validator address (derived from secret key [0x42; 32])
+        // This is the deterministic dev validator that produces blocks in dev mode
+        let validators = vec![GenesisValidator {
+            address: "0x10d7812fbe50096ae82569fdad35f79628bc0084".to_string(),
+            stake: "1000000".to_string(),
+        }];
+
         Self {
             chain_id: DEFAULT_CHAIN_ID,
             timestamp: 0,
             extra_data: b"QFC Dev Genesis".to_vec(),
             alloc,
-            validators: Vec::new(),
+            validators,
         }
     }
 

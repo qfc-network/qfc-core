@@ -10,6 +10,7 @@ use qfc_state::StateDB;
 use qfc_storage::{cf, encode_block_number, Database, WriteBatch};
 use qfc_types::{
     Account, Address, Block, BlockBody, BlockHeader, Hash, Receipt, SealedBlock, Transaction, U256,
+    ValidatorNode,
 };
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -99,6 +100,9 @@ impl Chain {
                 }
             }
 
+            // Register genesis validators with consensus engine
+            self.register_genesis_validators();
+
             info!("Loaded chain with genesis: {}", hash);
             return Ok(());
         }
@@ -141,9 +145,34 @@ impl Chain {
         *self.genesis_hash.write() = Some(hash);
         *self.head.write() = Some(SealedBlock::new(hash, genesis));
 
+        // Register genesis validators with consensus engine
+        self.register_genesis_validators();
+
         info!("Genesis block created: {}", hash);
 
         Ok(())
+    }
+
+    /// Register genesis validators with the consensus engine
+    fn register_genesis_validators(&self) {
+        let validators: Vec<ValidatorNode> = self
+            .config
+            .genesis
+            .parse_validators()
+            .into_iter()
+            .map(|(address, stake)| {
+                let mut v = ValidatorNode::default();
+                v.address = address;
+                v.stake = stake;
+                v.contribution_score = 1000; // Default contribution score
+                info!("Registering genesis validator: {}", address);
+                v
+            })
+            .collect();
+
+        if !validators.is_empty() {
+            self.consensus.update_validators(validators);
+        }
     }
 
     /// Get genesis hash

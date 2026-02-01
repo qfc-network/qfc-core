@@ -209,7 +209,7 @@ impl NetworkService {
                             SwarmEvent::Behaviour(QfcBehaviourEvent::Sync(request_response::Event::Message { peer, message, .. })) => {
                                 match message {
                                     request_response::Message::Request { request, channel, .. } => {
-                                        debug!("Received sync request from {}: {:?}", peer, request);
+                                        info!("Received sync request from {}: {:?}", peer, request);
                                         // Create a channel for the response
                                         let (tx, rx) = oneshot::channel();
                                         let event = SyncEvent::Request {
@@ -232,7 +232,7 @@ impl NetworkService {
                                         }
                                     }
                                     request_response::Message::Response { request_id, response } => {
-                                        debug!("Received sync response from {}: {:?}", peer, response);
+                                        info!("Received sync response from {}: {:?}", peer, response);
                                         // Complete the pending request
                                         if let Some(tx) = pending_clone.write().remove(&request_id) {
                                             let _ = tx.send(Ok(response));
@@ -240,8 +240,8 @@ impl NetworkService {
                                     }
                                 }
                             }
-                            SwarmEvent::Behaviour(QfcBehaviourEvent::Sync(request_response::Event::OutboundFailure { request_id, error, .. })) => {
-                                warn!("Sync request failed: {:?}", error);
+                            SwarmEvent::Behaviour(QfcBehaviourEvent::Sync(request_response::Event::OutboundFailure { peer, request_id, error, .. })) => {
+                                warn!("Sync request to {} failed: {:?}", peer, error);
                                 if let Some(tx) = pending_clone.write().remove(&request_id) {
                                     let _ = tx.send(Err(NetworkError::Protocol(format!("{:?}", error))));
                                 }
@@ -293,6 +293,7 @@ impl NetworkService {
                     }
                     Some((channel, response)) = swarm_response_rx.recv() => {
                         // Send sync response back to peer
+                        info!("Sending sync response: {:?}", response);
                         if swarm.behaviour_mut().sync.send_response(channel, response).is_err() {
                             warn!("Failed to send sync response");
                         }
