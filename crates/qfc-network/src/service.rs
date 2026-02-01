@@ -353,6 +353,14 @@ impl NetworkService {
             .map_err(|e| NetworkError::Protocol(e.to_string()))
     }
 
+    /// Broadcast a validator message (heartbeat, epoch announcement, slashing evidence)
+    pub async fn broadcast_validator_msg(&self, msg_data: Vec<u8>) -> Result<()> {
+        self.command_tx
+            .send(NetworkCommand::Broadcast(NetworkMessage::ValidatorMsg(msg_data)))
+            .await
+            .map_err(|e| NetworkError::Protocol(e.to_string()))
+    }
+
     /// Request a block by hash from a peer
     pub async fn request_block_by_hash(&self, peer_id: PeerId, hash: qfc_types::Hash) -> Result<SyncResponse> {
         let (tx, rx) = oneshot::channel();

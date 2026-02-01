@@ -390,6 +390,196 @@ impl Epoch {
     }
 }
 
+/// Validator message types for network communication
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+pub enum ValidatorMessage {
+    /// Heartbeat to signal liveness
+    Heartbeat(Heartbeat),
+    /// Epoch announcement
+    EpochAnnouncement(EpochAnnouncement),
+    /// Slashing evidence
+    SlashingEvidence(SlashingEvidence),
+}
+
+impl ValidatorMessage {
+    /// Serialize message
+    pub fn to_bytes(&self) -> Vec<u8> {
+        borsh::to_vec(self).expect("serialization should not fail")
+    }
+
+    /// Deserialize message
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, borsh::io::Error> {
+        borsh::from_slice(bytes)
+    }
+}
+
+/// Validator heartbeat message
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+pub struct Heartbeat {
+    /// Validator address
+    pub validator: Address,
+    /// Current block height
+    pub block_height: u64,
+    /// Current block hash
+    pub block_hash: Hash,
+    /// Timestamp
+    pub timestamp: u64,
+    /// Signature
+    pub signature: Signature,
+}
+
+impl Heartbeat {
+    /// Create a new heartbeat
+    pub fn new(validator: Address, block_height: u64, block_hash: Hash, timestamp: u64) -> Self {
+        Self {
+            validator,
+            block_height,
+            block_hash,
+            timestamp,
+            signature: Signature::ZERO,
+        }
+    }
+
+    /// Serialize for signing (without signature)
+    pub fn to_bytes_without_signature(&self) -> Vec<u8> {
+        let unsigned = UnsignedHeartbeat {
+            validator: self.validator,
+            block_height: self.block_height,
+            block_hash: self.block_hash,
+            timestamp: self.timestamp,
+        };
+        borsh::to_vec(&unsigned).expect("serialization should not fail")
+    }
+
+    /// Set signature
+    pub fn set_signature(&mut self, signature: Signature) {
+        self.signature = signature;
+    }
+}
+
+#[derive(BorshSerialize, BorshDeserialize)]
+struct UnsignedHeartbeat {
+    pub validator: Address,
+    pub block_height: u64,
+    pub block_hash: Hash,
+    pub timestamp: u64,
+}
+
+/// Epoch announcement message
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+pub struct EpochAnnouncement {
+    /// Epoch number
+    pub epoch_number: u64,
+    /// Epoch seed
+    pub seed: [u8; 32],
+    /// Start timestamp
+    pub start_time: u64,
+    /// Announcing validator
+    pub announcer: Address,
+    /// Signature
+    pub signature: Signature,
+}
+
+impl EpochAnnouncement {
+    /// Create a new epoch announcement
+    pub fn new(epoch_number: u64, seed: [u8; 32], start_time: u64, announcer: Address) -> Self {
+        Self {
+            epoch_number,
+            seed,
+            start_time,
+            announcer,
+            signature: Signature::ZERO,
+        }
+    }
+
+    /// Serialize for signing (without signature)
+    pub fn to_bytes_without_signature(&self) -> Vec<u8> {
+        let unsigned = UnsignedEpochAnnouncement {
+            epoch_number: self.epoch_number,
+            seed: self.seed,
+            start_time: self.start_time,
+            announcer: self.announcer,
+        };
+        borsh::to_vec(&unsigned).expect("serialization should not fail")
+    }
+
+    /// Set signature
+    pub fn set_signature(&mut self, signature: Signature) {
+        self.signature = signature;
+    }
+}
+
+#[derive(BorshSerialize, BorshDeserialize)]
+struct UnsignedEpochAnnouncement {
+    pub epoch_number: u64,
+    pub seed: [u8; 32],
+    pub start_time: u64,
+    pub announcer: Address,
+}
+
+/// Slashing evidence for misbehaving validators
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+pub struct SlashingEvidence {
+    /// The misbehaving validator
+    pub offender: Address,
+    /// Type of offense
+    pub offense: SlashableOffense,
+    /// Evidence data (e.g., conflicting signatures)
+    pub evidence: Vec<u8>,
+    /// Block height where offense occurred
+    pub block_height: u64,
+    /// Reporter
+    pub reporter: Address,
+    /// Reporter's signature
+    pub signature: Signature,
+}
+
+impl SlashingEvidence {
+    /// Create new slashing evidence
+    pub fn new(
+        offender: Address,
+        offense: SlashableOffense,
+        evidence: Vec<u8>,
+        block_height: u64,
+        reporter: Address,
+    ) -> Self {
+        Self {
+            offender,
+            offense,
+            evidence,
+            block_height,
+            reporter,
+            signature: Signature::ZERO,
+        }
+    }
+
+    /// Serialize for signing (without signature)
+    pub fn to_bytes_without_signature(&self) -> Vec<u8> {
+        let unsigned = UnsignedSlashingEvidence {
+            offender: self.offender,
+            offense: self.offense.clone(),
+            evidence: self.evidence.clone(),
+            block_height: self.block_height,
+            reporter: self.reporter,
+        };
+        borsh::to_vec(&unsigned).expect("serialization should not fail")
+    }
+
+    /// Set signature
+    pub fn set_signature(&mut self, signature: Signature) {
+        self.signature = signature;
+    }
+}
+
+#[derive(BorshSerialize, BorshDeserialize)]
+struct UnsignedSlashingEvidence {
+    pub offender: Address,
+    pub offense: SlashableOffense,
+    pub evidence: Vec<u8>,
+    pub block_height: u64,
+    pub reporter: Address,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

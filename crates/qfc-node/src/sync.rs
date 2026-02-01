@@ -7,7 +7,7 @@ use qfc_crypto::{blake3_hash, verify_hash_signature};
 use qfc_mempool::Mempool;
 use qfc_network::{NetworkMessage, NetworkService, SyncEvent, SyncRequest, SyncResponse};
 use qfc_rpc::SyncStatusProvider;
-use qfc_types::{Block, Hash, Vote, VoteDecision};
+use qfc_types::{Block, Hash, Heartbeat, SlashingEvidence, ValidatorMessage, Vote, VoteDecision};
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
@@ -583,8 +583,178 @@ impl SyncManager {
 
     /// Handle a validator message
     async fn handle_validator_msg(&self, data: Vec<u8>) {
-        // TODO: Implement validator message handling
-        debug!("Received validator message ({} bytes)", data.len());
+        // Deserialize the validator message
+        let msg: ValidatorMessage = match borsh::from_slice(&data) {
+            Ok(m) => m,
+            Err(e) => {
+                warn!("Failed to decode validator message: {}", e);
+                return;
+            }
+        };
+
+        match msg {
+            ValidatorMessage::Heartbeat(heartbeat) => {
+                self.handle_heartbeat(heartbeat).await;
+            }
+            ValidatorMessage::EpochAnnouncement(announcement) => {
+                self.handle_epoch_announcement(announcement).await;
+            }
+            ValidatorMessage::SlashingEvidence(evidence) => {
+                self.handle_slashing_evidence(evidence).await;
+            }
+        }
+    }
+
+    /// Handle a validator heartbeat
+    async fn handle_heartbeat(&self, heartbeat: Heartbeat) {
+        let consensus = self.chain.consensus();
+        let validators = consensus.get_validators();
+
+        // Find the validator
+        let validator = match validators.iter().find(|v| v.address == heartbeat.validator) {
+            Some(v) => v,
+            None => {
+                debug!("Heartbeat from unknown validator: {}", heartbeat.validator);
+                return;
+            }
+        };
+
+        // Verify signature
+        let heartbeat_hash = blake3_hash(&heartbeat.to_bytes_without_signature());
+        if verify_hash_signature(&validator.public_key, &heartbeat_hash, &heartbeat.signature)
+            .is_err()
+        {
+            warn!("Invalid heartbeat signature from {}", heartbeat.validator);
+            return;
+        }
+
+        // Update peer height if they report a higher block
+        if heartbeat.block_height > self.chain.block_number() {
+            self.update_peer_height(heartbeat.block_height);
+        }
+
+        // Calculate latency (rough estimate based on timestamp difference)
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        if now > heartbeat.timestamp {
+            let latency_ms = (now - heartbeat.timestamp) as u32;
+            // Only record reasonable latencies (< 30 seconds)
+            if latency_ms < 30_000 {
+                consensus.record_latency(&heartbeat.validator, latency_ms);
+            }
+        }
+
+        debug!(
+            "Heartbeat from {} at block #{}",
+            heartbeat.validator, heartbeat.block_height
+        );
+    }
+
+    /// Handle an epoch announcement
+    async fn handle_epoch_announcement(&self, announcement: qfc_types::EpochAnnouncement) {
+        let consensus = self.chain.consensus();
+        let validators = consensus.get_validators();
+
+        // Find the announcer
+        let announcer = match validators.iter().find(|v| v.address == announcement.announcer) {
+            Some(v) => v,
+            None => {
+                warn!(
+                    "Epoch announcement from unknown validator: {}",
+                    announcement.announcer
+                );
+                return;
+            }
+        };
+
+        // Verify signature
+        let announcement_hash = blake3_hash(&announcement.to_bytes_without_signature());
+        if verify_hash_signature(&announcer.public_key, &announcement_hash, &announcement.signature)
+            .is_err()
+        {
+            warn!(
+                "Invalid epoch announcement signature from {}",
+                announcement.announcer
+            );
+            return;
+        }
+
+        // Check if this is a new epoch
+        let current_epoch = consensus.get_epoch();
+        if announcement.epoch_number <= current_epoch.number {
+            debug!(
+                "Ignoring old epoch announcement: {} (current: {})",
+                announcement.epoch_number, current_epoch.number
+            );
+            return;
+        }
+
+        // Start the new epoch
+        info!(
+            "Received epoch {} announcement from {}",
+            announcement.epoch_number, announcement.announcer
+        );
+        consensus.start_epoch(announcement.epoch_number, announcement.seed);
+    }
+
+    /// Handle slashing evidence
+    async fn handle_slashing_evidence(&self, evidence: SlashingEvidence) {
+        let consensus = self.chain.consensus();
+        let validators = consensus.get_validators();
+
+        // Find the reporter
+        let reporter = match validators.iter().find(|v| v.address == evidence.reporter) {
+            Some(v) => v,
+            None => {
+                warn!(
+                    "Slashing evidence from unknown validator: {}",
+                    evidence.reporter
+                );
+                return;
+            }
+        };
+
+        // Verify signature
+        let evidence_hash = blake3_hash(&evidence.to_bytes_without_signature());
+        if verify_hash_signature(&reporter.public_key, &evidence_hash, &evidence.signature).is_err()
+        {
+            warn!(
+                "Invalid slashing evidence signature from {}",
+                evidence.reporter
+            );
+            return;
+        }
+
+        // Check if the offender exists
+        if !validators.iter().any(|v| v.address == evidence.offender) {
+            warn!("Slashing evidence for unknown validator: {}", evidence.offender);
+            return;
+        }
+
+        info!(
+            "Received slashing evidence against {} for {:?} from {}",
+            evidence.offender, evidence.offense, evidence.reporter
+        );
+
+        // Determine slash parameters based on offense type
+        let (slash_percent, jail_duration_ms) = match evidence.offense {
+            qfc_types::SlashableOffense::DoubleSign => (10, 24 * 60 * 60 * 1000), // 10%, 24 hours
+            qfc_types::SlashableOffense::InvalidBlock => (5, 12 * 60 * 60 * 1000), // 5%, 12 hours
+            qfc_types::SlashableOffense::Censorship => (3, 6 * 60 * 60 * 1000),    // 3%, 6 hours
+            qfc_types::SlashableOffense::Offline => (1, 1 * 60 * 60 * 1000),       // 1%, 1 hour
+            qfc_types::SlashableOffense::FalseVote => (2, 2 * 60 * 60 * 1000),     // 2%, 2 hours
+        };
+
+        // Apply the slash
+        consensus.slash_validator(&evidence.offender, slash_percent, jail_duration_ms);
+
+        info!(
+            "Slashed validator {} by {}%, jailed for {}ms",
+            evidence.offender, slash_percent, jail_duration_ms
+        );
     }
 
     /// Initiate sync with a peer

@@ -7,7 +7,7 @@ use qfc_crypto::blake3_hash;
 use qfc_executor::Executor;
 use qfc_mempool::Mempool;
 use qfc_network::NetworkService;
-use qfc_types::Transaction;
+use qfc_types::{Heartbeat, Transaction, ValidatorMessage};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::{interval, Instant};
@@ -84,11 +84,20 @@ impl BlockProducer {
         // No need to override here
 
         let mut block_timer = interval(Duration::from_millis(self.config.block_interval_ms));
+        let mut heartbeat_counter: u64 = 0;
+        let heartbeat_interval = 3; // Send heartbeat every 3 slots
         let mut slot: u64 = 0;
 
         loop {
             block_timer.tick().await;
             slot += 1;
+            heartbeat_counter += 1;
+
+            // Send periodic heartbeat
+            if heartbeat_counter >= heartbeat_interval {
+                heartbeat_counter = 0;
+                self.send_heartbeat().await;
+            }
 
             // Check if we should produce
             if !self.consensus.should_produce(slot) {
@@ -109,6 +118,46 @@ impl BlockProducer {
                     error!("Failed to produce block: {}", e);
                 }
             }
+        }
+    }
+
+    /// Send a heartbeat to the network
+    async fn send_heartbeat(&self) {
+        let Some(network) = &self.network else {
+            return;
+        };
+
+        let our_address = match self.consensus.our_address() {
+            Some(addr) => addr,
+            None => return,
+        };
+
+        let head = match self.chain.head() {
+            Some(h) => h,
+            None => return,
+        };
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        // Create heartbeat
+        let mut heartbeat = Heartbeat::new(our_address, head.block.number(), head.hash, now);
+
+        // Sign the heartbeat
+        let heartbeat_hash = blake3_hash(&heartbeat.to_bytes_without_signature());
+        match self.consensus.sign_hash(&heartbeat_hash) {
+            Ok(sig) => heartbeat.set_signature(sig),
+            Err(_) => return,
+        }
+
+        // Broadcast
+        let msg = ValidatorMessage::Heartbeat(heartbeat);
+        if let Err(e) = network.broadcast_validator_msg(msg.to_bytes()).await {
+            debug!("Failed to broadcast heartbeat: {}", e);
+        } else {
+            debug!("Sent heartbeat at block #{}", head.block.number());
         }
     }
 

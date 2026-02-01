@@ -397,6 +397,17 @@ impl ConsensusEngine {
             .push(vote);
     }
 
+    /// Sign a message hash with our validator key
+    pub fn sign_hash(&self, hash: &Hash) -> Result<Signature> {
+        let validator_key = self
+            .validator_key
+            .as_ref()
+            .ok_or(ConsensusError::NotValidator)?;
+
+        let signature = validator_key.prove(hash.as_bytes()).proof;
+        Ok(Signature::new(signature))
+    }
+
     /// Check if a block has reached finality
     pub fn check_finality(&self, block_hash: &Hash) -> bool {
         let votes = self.pending_votes.read();
