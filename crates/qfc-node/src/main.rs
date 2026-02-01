@@ -3,6 +3,7 @@
 //! Main entry point for running a QFC node.
 
 mod producer;
+mod sync;
 
 use anyhow::Result;
 use clap::Parser;
@@ -12,13 +13,15 @@ use qfc_chain::{Chain, ChainConfig, GenesisConfig};
 use qfc_consensus::{ConsensusConfig, ConsensusEngine};
 use qfc_crypto::VrfKeypair;
 use qfc_mempool::{Mempool, MempoolConfig};
+use qfc_network::{NetworkConfig, NetworkService};
 use qfc_rpc::{RpcConfig, RpcServer};
 use qfc_storage::{Database, StorageConfig};
 use qfc_types::DEFAULT_CHAIN_ID;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{info, Level};
+use sync::SyncManager;
+use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 /// QFC Blockchain Node
@@ -52,6 +55,18 @@ struct Args {
     /// Log level
     #[arg(long, default_value = "info")]
     log_level: String,
+
+    /// P2P listen port
+    #[arg(long, default_value_t = 30303)]
+    p2p_port: u16,
+
+    /// Disable P2P networking
+    #[arg(long)]
+    no_network: bool,
+
+    /// Bootnode addresses (multiaddr format)
+    #[arg(long)]
+    bootnodes: Vec<String>,
 }
 
 #[tokio::main]
@@ -167,6 +182,56 @@ async fn main() -> Result<()> {
         None
     };
 
+    // Start P2P network
+    let _network_service = if !args.no_network {
+        let mut network_config = if args.dev {
+            NetworkConfig::dev()
+        } else {
+            NetworkConfig::default()
+        };
+
+        // Set listen address with specified port
+        network_config.listen_addresses = vec![
+            format!("/ip4/0.0.0.0/tcp/{}", args.p2p_port).parse().unwrap()
+        ];
+
+        // Add bootnodes
+        for bootnode in &args.bootnodes {
+            match bootnode.parse() {
+                Ok(addr) => network_config.bootnodes.push(addr),
+                Err(e) => warn!("Invalid bootnode address '{}': {}", bootnode, e),
+            }
+        }
+
+        match NetworkService::start(network_config).await {
+            Ok((service, mut message_rx)) => {
+                info!("P2P network started, peer ID: {}", service.local_peer_id());
+                let service = Arc::new(service);
+
+                // Start sync manager
+                let sync_manager = SyncManager::new(
+                    chain.clone(),
+                    mempool.clone(),
+                );
+
+                tokio::spawn(async move {
+                    while let Some(msg) = message_rx.recv().await {
+                        sync_manager.handle_message(msg).await;
+                    }
+                });
+
+                Some(service)
+            }
+            Err(e) => {
+                warn!("Failed to start P2P network: {}", e);
+                None
+            }
+        }
+    } else {
+        info!("P2P networking disabled");
+        None
+    };
+
     // Start block producer if we're a validator or in dev mode
     let is_validator = consensus.is_validator();
     if is_validator {
@@ -176,10 +241,13 @@ async fn main() -> Result<()> {
             ..Default::default()
         };
 
+        let network_for_producer = _network_service.clone();
+
         let producer = BlockProducer::new(
             chain.clone(),
             consensus.clone(),
             mempool.clone(),
+            network_for_producer,
             producer_config,
             args.chain_id,
         );

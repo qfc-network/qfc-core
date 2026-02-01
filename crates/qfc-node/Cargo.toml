@@ -22,6 +22,7 @@ qfc-executor.workspace = true
 qfc-mempool.workspace = true
 qfc-network.workspace = true
 qfc-rpc.workspace = true
+borsh.workspace = true
 clap.workspace = true
 serde.workspace = true
 tokio.workspace = true

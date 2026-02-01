@@ -1,6 +1,6 @@
 //! Network service
 
-use crate::behaviour::{topics, NetworkMessage, QfcBehaviour};
+use crate::behaviour::{topics, NetworkMessage, QfcBehaviour, QfcBehaviourEvent};
 use crate::config::NetworkConfig;
 use crate::error::{NetworkError, Result};
 use futures::StreamExt;
@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 /// Network service handle
 pub struct NetworkService {
@@ -130,6 +130,7 @@ impl NetworkService {
         let (internal_tx, mut internal_rx) = mpsc::channel::<NetworkMessage>(100);
 
         let peers_clone = Arc::clone(&peers);
+        let message_tx_clone = message_tx.clone();
 
         // Spawn the swarm event loop
         tokio::spawn(async move {
@@ -137,9 +138,39 @@ impl NetworkService {
                 tokio::select! {
                     event = swarm.select_next_some() => {
                         match event {
-                            SwarmEvent::Behaviour(event) => {
-                                // Handle behaviour events
-                                debug!("Behaviour event: {:?}", event);
+                            SwarmEvent::Behaviour(QfcBehaviourEvent::Gossipsub(gossipsub::Event::Message {
+                                propagation_source: _,
+                                message_id: _,
+                                message,
+                            })) => {
+                                // Handle received gossipsub message
+                                let topic = message.topic.as_str();
+                                let data = message.data;
+
+                                let network_msg = match topic {
+                                    t if t == topics::NEW_BLOCKS => NetworkMessage::NewBlock(data),
+                                    t if t == topics::NEW_TRANSACTIONS => NetworkMessage::NewTransaction(data),
+                                    t if t == topics::CONSENSUS_VOTES => NetworkMessage::Vote(data),
+                                    t if t == topics::VALIDATOR_MESSAGES => NetworkMessage::ValidatorMsg(data),
+                                    _ => {
+                                        debug!("Unknown topic: {}", topic);
+                                        continue;
+                                    }
+                                };
+
+                                if let Err(e) = message_tx_clone.send(network_msg).await {
+                                    warn!("Failed to forward message: {}", e);
+                                }
+                            }
+                            SwarmEvent::Behaviour(QfcBehaviourEvent::Identify(identify::Event::Received { peer_id, info, .. })) => {
+                                debug!("Identified peer {}: {:?}", peer_id, info.protocol_version);
+                                // Add peer to Kademlia DHT
+                                for addr in info.listen_addrs {
+                                    swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
+                                }
+                            }
+                            SwarmEvent::Behaviour(_) => {
+                                // Other behaviour events
                             }
                             SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                                 info!("Connected to peer: {}", peer_id);

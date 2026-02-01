@@ -6,11 +6,12 @@ use qfc_consensus::ConsensusEngine;
 use qfc_crypto::blake3_hash;
 use qfc_executor::Executor;
 use qfc_mempool::Mempool;
+use qfc_network::NetworkService;
 use qfc_types::{Transaction, ValidatorNode};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::{interval, Instant};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Block producer configuration
 #[derive(Clone, Debug)]
@@ -38,6 +39,7 @@ pub struct BlockProducer {
     chain: Arc<Chain>,
     consensus: Arc<ConsensusEngine>,
     mempool: Arc<RwLock<Mempool>>,
+    network: Option<Arc<NetworkService>>,
     executor: Executor,
     config: ProducerConfig,
 }
@@ -48,6 +50,7 @@ impl BlockProducer {
         chain: Arc<Chain>,
         consensus: Arc<ConsensusEngine>,
         mempool: Arc<RwLock<Mempool>>,
+        network: Option<Arc<NetworkService>>,
         config: ProducerConfig,
         chain_id: u64,
     ) -> Self {
@@ -55,6 +58,7 @@ impl BlockProducer {
             chain,
             consensus,
             mempool,
+            network,
             executor: Executor::new(chain_id),
             config,
         }
@@ -136,8 +140,8 @@ impl BlockProducer {
         // Execute transactions
         let state = self.chain.state();
 
-        // Take snapshot before execution
-        let snapshot = state.snapshot();
+        // Take snapshot before execution (for potential rollback)
+        let _snapshot = state.snapshot();
 
         let (receipts, gas_used) = self
             .executor
@@ -157,6 +161,16 @@ impl BlockProducer {
 
         // Store the block
         self.chain.store_produced_block(&block, &receipts)?;
+
+        // Broadcast to network
+        if let Some(network) = &self.network {
+            let block_data = borsh::to_vec(&block).unwrap();
+            if let Err(e) = network.broadcast_block(block_data).await {
+                warn!("Failed to broadcast block: {}", e);
+            } else {
+                debug!("Broadcasted block #{} to network", block_number);
+            }
+        }
 
         // Remove included transactions from mempool
         for tx in &transactions {
