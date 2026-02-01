@@ -27,15 +27,26 @@ qfc-core/
 ```bash
 # 构建
 cargo build
+cargo build --release
 
 # 测试
 cargo test --all
 
-# 运行开发节点
+# 运行开发节点 (自动出块)
 cargo run --bin qfc-node -- --dev
 
-# 运行节点（自定义参数）
-cargo run --bin qfc-node -- --data-dir ./mydata --rpc-addr 127.0.0.1:8545
+# 运行验证者节点
+cargo run --bin qfc-node -- --validator <SECRET_KEY_HEX> --p2p-port 30303
+
+# 连接到其他节点
+cargo run --bin qfc-node -- --bootnodes "/ip4/127.0.0.1/tcp/30303/p2p/<PEER_ID>"
+
+# 禁用 P2P 网络
+cargo run --bin qfc-node -- --dev --no-network
+
+# RPC 测试
+curl -s http://127.0.0.1:8545 -X POST -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
 ```
 
 ## 技术栈
@@ -79,6 +90,10 @@ Proof of Contribution (PoC) - 多维度贡献评分:
 
 - [x] Phase 1: 基础框架 (单节点出块)
 - [ ] Phase 2: 网络同步 (多节点测试网)
+  - [x] P2P 节点连接 (libp2p)
+  - [x] 区块广播 (GossipSub)
+  - [ ] 区块同步请求/响应
+  - [ ] 初始同步 (sync from genesis)
 - [ ] Phase 3: 完整功能 (生产就绪)
 
 ## 设计文档
