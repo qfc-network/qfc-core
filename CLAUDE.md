@@ -100,7 +100,7 @@ Proof of Contribution (PoC) - 多维度贡献评分:
 - [x] Phase 3: 完整功能 (生产就绪)
   - [x] eth_call / eth_estimateGas 实现
   - [x] 多验证者测试 (3节点测试网)
-  - [ ] 集成测试
+  - [x] 集成测试
 
 ## 设计文档
 

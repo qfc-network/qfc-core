@@ -1,16 +1,52 @@
 //! RPC types for JSON serialization
 
-use qfc_types::{Address, Block, Hash, Receipt, Transaction, U256};
-use serde::{Deserialize, Serialize};
+use qfc_types::{Address, Block, Hash, Receipt, Transaction};
+use serde::{Deserialize, Deserializer, Serialize};
 
-/// Block number parameter
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(untagged)]
+/// Block number parameter - handles both hex strings ("0x0") and tags ("latest")
+#[derive(Clone, Debug)]
 pub enum BlockNumber {
     /// Specific block number
     Number(u64),
     /// Block tag
     Tag(BlockTag),
+}
+
+impl Serialize for BlockNumber {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            BlockNumber::Number(n) => serializer.serialize_str(&format!("0x{:x}", n)),
+            BlockNumber::Tag(tag) => tag.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for BlockNumber {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+
+        // Try parsing as a tag first
+        match s.to_lowercase().as_str() {
+            "latest" => return Ok(BlockNumber::Tag(BlockTag::Latest)),
+            "earliest" => return Ok(BlockNumber::Tag(BlockTag::Earliest)),
+            "pending" => return Ok(BlockNumber::Tag(BlockTag::Pending)),
+            "safe" => return Ok(BlockNumber::Tag(BlockTag::Safe)),
+            "finalized" => return Ok(BlockNumber::Tag(BlockTag::Finalized)),
+            _ => {}
+        }
+
+        // Try parsing as hex number
+        let s = s.strip_prefix("0x").unwrap_or(&s);
+        u64::from_str_radix(s, 16)
+            .map(BlockNumber::Number)
+            .map_err(|_| serde::de::Error::custom("invalid block number"))
+    }
 }
 
 /// Block tag
