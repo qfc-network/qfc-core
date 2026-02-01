@@ -1,0 +1,26 @@
+[package]
+name = "qfc-consensus"
+description = "Proof of Contribution consensus for QFC blockchain"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+qfc-types.workspace = true
+qfc-crypto.workspace = true
+qfc-state.workspace = true
+qfc-executor.workspace = true
+qfc-mempool.workspace = true
+borsh.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+parking_lot.workspace = true
+tokio.workspace = true
+futures.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+rand.workspace = true
+
+[dev-dependencies]

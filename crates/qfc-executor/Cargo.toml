@@ -1,0 +1,21 @@
+[package]
+name = "qfc-executor"
+description = "Transaction execution for QFC blockchain"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+qfc-types.workspace = true
+qfc-crypto.workspace = true
+qfc-state.workspace = true
+borsh.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3.9"
+qfc-storage.workspace = true

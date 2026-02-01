@@ -1,0 +1,25 @@
+[package]
+name = "qfc-network"
+description = "P2P networking for QFC blockchain"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+qfc-types.workspace = true
+qfc-crypto.workspace = true
+libp2p.workspace = true
+borsh.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+parking_lot.workspace = true
+tokio.workspace = true
+futures.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+bytes.workspace = true
+
+[dev-dependencies]

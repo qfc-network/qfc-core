@@ -1,0 +1,23 @@
+[package]
+name = "qfc-state"
+description = "State management for QFC blockchain"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+qfc-types.workspace = true
+qfc-crypto.workspace = true
+qfc-storage.workspace = true
+qfc-trie.workspace = true
+borsh.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+parking_lot.workspace = true
+lru.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3.9"

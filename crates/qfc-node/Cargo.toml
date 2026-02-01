@@ -1,0 +1,33 @@
+[package]
+name = "qfc-node"
+description = "QFC blockchain node"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "qfc-node"
+path = "src/main.rs"
+
+[dependencies]
+qfc-types.workspace = true
+qfc-crypto.workspace = true
+qfc-storage.workspace = true
+qfc-state.workspace = true
+qfc-chain.workspace = true
+qfc-consensus.workspace = true
+qfc-mempool.workspace = true
+qfc-network.workspace = true
+qfc-rpc.workspace = true
+clap.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+parking_lot.workspace = true
+hex.workspace = true
+
+[dev-dependencies]

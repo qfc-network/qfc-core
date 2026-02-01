@@ -1,0 +1,106 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/qfc-types",
+    "crates/qfc-crypto",
+    "crates/qfc-storage",
+    "crates/qfc-trie",
+    "crates/qfc-state",
+    "crates/qfc-executor",
+    "crates/qfc-mempool",
+    "crates/qfc-consensus",
+    "crates/qfc-chain",
+    "crates/qfc-network",
+    "crates/qfc-rpc",
+    "crates/qfc-node",
+]
+
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["QFC Core Team"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/qfc-network/qfc-core"
+rust-version = "1.75"
+
+[workspace.dependencies]
+# Serialization
+borsh = { version = "1.3", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Numeric types
+primitive-types = { version = "0.12", features = ["serde"] }
+uint = "0.9"
+
+# Cryptography
+blake3 = "=1.5.4"
+ed25519-dalek = { version = "2.1", features = ["serde", "rand_core"] }
+constant_time_eq = "=0.3.1"
+rand = "0.8"
+rand_core = "0.6"
+
+# Storage
+rocksdb = "0.22"
+
+# Networking
+libp2p = { version = "0.56", default-features = false, features = ["dns", "tokio", "tcp", "noise", "yamux", "identify", "ping", "gossipsub", "kad", "request-response", "macros"] }
+
+# RPC
+jsonrpsee = { version = "0.22", features = ["server", "macros", "client", "http-client", "ws-client"] }
+
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# CLI
+clap = { version = "4.4", features = ["derive"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Utilities
+hex = "0.4"
+bytes = "1.5"
+parking_lot = "0.12"
+dashmap = "5.5"
+lru = "0.12"
+once_cell = "1.19"
+tempfile = "3.9"
+
+# Internal crates
+qfc-types = { path = "crates/qfc-types" }
+qfc-crypto = { path = "crates/qfc-crypto" }
+qfc-storage = { path = "crates/qfc-storage" }
+qfc-trie = { path = "crates/qfc-trie" }
+qfc-state = { path = "crates/qfc-state" }
+qfc-executor = { path = "crates/qfc-executor" }
+qfc-mempool = { path = "crates/qfc-mempool" }
+qfc-consensus = { path = "crates/qfc-consensus" }
+qfc-chain = { path = "crates/qfc-chain" }
+qfc-network = { path = "crates/qfc-network" }
+qfc-rpc = { path = "crates/qfc-rpc" }
+qfc-node = { path = "crates/qfc-node" }
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+
+[profile.dev]
+opt-level = 1
+
+[profile.bench]
+lto = true
+codegen-units = 1
+
+# Patch problematic crates that require edition2024
+[patch.crates-io]
+base64ct = { git = "https://github.com/RustCrypto/formats", tag = "base64ct/v1.6.0", package = "base64ct" }

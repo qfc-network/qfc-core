@@ -1,0 +1,21 @@
+[package]
+name = "qfc-types"
+description = "Core types for QFC blockchain"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+borsh.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+primitive-types.workspace = true
+hex.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+blake3.workspace = true
+
+[dev-dependencies]
+rand.workspace = true
