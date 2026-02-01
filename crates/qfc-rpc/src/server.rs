@@ -274,7 +274,8 @@ impl EthApiServer for RpcServer {
                     (Address::ZERO, None)
                 };
 
-                Ok(Some(RpcReceipt::from_receipt(r, from, to)))
+                // TODO: Look up block_hash and block_number from transaction location
+                Ok(Some(RpcReceipt::from_receipt(r, from, to, None, None)))
             }
             None => Ok(None),
         }

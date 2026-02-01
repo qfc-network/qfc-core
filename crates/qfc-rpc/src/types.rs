@@ -115,7 +115,7 @@ impl RpcBlock {
                         .zip(tx_hashes.iter())
                         .enumerate()
                         .map(|(i, (tx, hash))| {
-                            RpcTransaction::from_tx(tx.clone(), *hash, block.number(), i as u32)
+                            RpcTransaction::from_tx(tx.clone(), *hash, block_hash, block.number(), i as u32)
                         })
                         .collect(),
                 )
@@ -149,15 +149,20 @@ pub struct RpcTransaction {
 }
 
 impl RpcTransaction {
-    pub fn from_tx(tx: Transaction, hash: Hash, block_number: u64, tx_index: u32) -> Self {
-        // For now, derive sender from signature (placeholder)
-        let sender_hash = qfc_crypto::blake3_hash(tx.signature.as_bytes());
-        let sender = Address::from_slice(&sender_hash.as_bytes()[12..32]).unwrap();
+    pub fn from_tx(
+        tx: Transaction,
+        hash: Hash,
+        block_hash: Hash,
+        block_number: u64,
+        tx_index: u32,
+    ) -> Self {
+        // Derive sender from public key (Ed25519)
+        let sender = qfc_crypto::address_from_public_key(&tx.public_key);
 
         Self {
             hash: hash.to_string(),
             nonce: format!("0x{:x}", tx.nonce),
-            block_hash: None, // TODO
+            block_hash: Some(block_hash.to_string()),
             block_number: Some(format!("0x{:x}", block_number)),
             transaction_index: Some(format!("0x{:x}", tx_index)),
             from: sender.to_string(),
@@ -205,12 +210,18 @@ pub struct RpcReceipt {
 }
 
 impl RpcReceipt {
-    pub fn from_receipt(receipt: Receipt, from: Address, to: Option<Address>) -> Self {
+    pub fn from_receipt(
+        receipt: Receipt,
+        from: Address,
+        to: Option<Address>,
+        block_hash: Option<Hash>,
+        block_number: Option<u64>,
+    ) -> Self {
         Self {
             transaction_hash: receipt.tx_hash.to_string(),
             transaction_index: format!("0x{:x}", receipt.tx_index),
-            block_hash: None, // TODO
-            block_number: None, // TODO
+            block_hash: block_hash.map(|h| h.to_string()),
+            block_number: block_number.map(|n| format!("0x{:x}", n)),
             from: from.to_string(),
             to: to.map(|a| a.to_string()),
             cumulative_gas_used: format!("0x{:x}", receipt.cumulative_gas_used),
