@@ -1,10 +1,10 @@
 //! Transaction executor
 
 use crate::error::{ExecutorError, Result};
-use qfc_crypto::{address_from_public_key, blake3_hash, contract_address, verify_hash_signature};
+use qfc_crypto::{blake3_hash, contract_address};
 use qfc_state::StateDB;
 use qfc_types::{
-    create_bloom, Address, Hash, Log, Receipt, ReceiptStatus, SignedTransaction, Transaction,
+    create_bloom, Address, Log, Receipt, ReceiptStatus, SignedTransaction, Transaction,
     TransactionType, U256, DEFAULT_CHAIN_ID, MIN_VALIDATOR_STAKE, MINIMUM_GAS, TRANSFER_GAS,
 };
 use tracing::{debug, trace, warn};
@@ -199,7 +199,7 @@ impl Executor {
 
         // 4. Handle result
         match result {
-            Ok(mut exec_result) => {
+            Ok(exec_result) => {
                 // Refund unused gas
                 let gas_refund = (gas_limit - exec_result.gas_used) * tx.tx.gas_price.low_u64();
                 state.add_balance(&sender, U256::from_u64(gas_refund))?;
@@ -420,7 +420,7 @@ impl Executor {
 
     fn execute_validator_exit(
         &self,
-        tx: &Transaction,
+        _tx: &Transaction,
         sender: &Address,
         state: &StateDB,
     ) -> Result<ExecutionResult> {
@@ -488,7 +488,7 @@ impl Executor {
                         ReceiptStatus::Failure(result.error.unwrap_or_default())
                     };
 
-                    let mut receipt = Receipt {
+                    let receipt = Receipt {
                         tx_hash,
                         tx_index: index as u32,
                         status,

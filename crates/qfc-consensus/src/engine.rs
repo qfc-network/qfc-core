@@ -1,21 +1,15 @@
 //! Consensus engine implementation
 
 use crate::error::{ConsensusError, Result};
-use crate::scoring::{calculate_contribution_score, NetworkState};
 use parking_lot::RwLock;
 use qfc_crypto::{blake3_hash, vrf_output_to_f64, VrfKeypair};
-use qfc_executor::Executor;
-use qfc_mempool::Mempool;
-use qfc_state::StateDB;
 use qfc_types::{
     Address, Block, BlockHeader, Epoch, Hash, Receipt, Signature, Transaction, ValidatorNode,
-    Vote, VoteDecision, VrfProof, BLOCK_VERSION, DEFAULT_BLOCK_GAS_LIMIT, FINALITY_THRESHOLD,
+    Vote, BLOCK_VERSION, DEFAULT_BLOCK_GAS_LIMIT, FINALITY_THRESHOLD,
 };
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::info;
 
 /// Consensus engine configuration
 #[derive(Clone, Debug)]

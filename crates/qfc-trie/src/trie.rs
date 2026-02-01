@@ -9,8 +9,6 @@ use qfc_storage::{cf, Database};
 use qfc_types::Hash;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
-use std::sync::Arc;
-use tracing::trace;
 
 /// Trie configuration
 #[derive(Clone, Debug)]

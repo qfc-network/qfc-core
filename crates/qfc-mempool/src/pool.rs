@@ -4,11 +4,10 @@ use crate::error::{MempoolError, Result};
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use qfc_crypto::blake3_hash;
-use qfc_types::{Address, Hash, SignedTransaction, Transaction, U256};
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::Arc;
+use qfc_types::{Address, Hash, Transaction, U256};
+use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
 
 /// Mempool configuration
 #[derive(Clone, Debug)]
@@ -233,7 +232,7 @@ impl Mempool {
 
         // Iterate by gas price (highest first)
         let by_price = self.by_price.read();
-        for ((gas_price, hash), _) in by_price.iter().rev() {
+        for ((_gas_price, hash), _) in by_price.iter().rev() {
             if selected.len() >= max_count {
                 break;
             }
@@ -252,7 +251,7 @@ impl Mempool {
                 }
 
                 // Check nonce ordering
-                let expected_nonce = seen_senders
+                let _expected_nonce = seen_senders
                     .get(&pooled.sender)
                     .map(|n| n + 1)
                     .unwrap_or(0); // TODO: Get from state

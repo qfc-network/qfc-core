@@ -7,7 +7,7 @@ use qfc_crypto::blake3_hash;
 use qfc_executor::Executor;
 use qfc_mempool::Mempool;
 use qfc_network::NetworkService;
-use qfc_types::{Transaction, ValidatorNode};
+use qfc_types::Transaction;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::{interval, Instant};

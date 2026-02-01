@@ -3,7 +3,7 @@
 use crate::behaviour::{topics, NetworkMessage, QfcBehaviour, QfcBehaviourEvent};
 use crate::config::NetworkConfig;
 use crate::error::{NetworkError, Result};
-use crate::sync_protocol::{SyncCodec, SyncRequest, SyncResponse, SYNC_PROTOCOL};
+use crate::sync_protocol::{SyncRequest, SyncResponse, SYNC_PROTOCOL};
 use futures::StreamExt;
 use libp2p::{
     gossipsub::{self, IdentTopic, MessageAuthenticity},
@@ -52,7 +52,8 @@ pub struct NetworkService {
     peers: Arc<RwLock<HashSet<PeerId>>>,
     /// Command sender
     command_tx: mpsc::Sender<NetworkCommand>,
-    /// Pending sync requests
+    /// Pending sync requests (for future async request handling)
+    #[allow(dead_code)]
     pending_requests: Arc<RwLock<HashMap<OutboundRequestId, oneshot::Sender<Result<SyncResponse>>>>>,
     /// Configuration
     #[allow(dead_code)]

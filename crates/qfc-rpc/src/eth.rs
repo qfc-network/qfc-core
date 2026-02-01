@@ -1,7 +1,6 @@
 //! Ethereum-compatible RPC methods
 
-use crate::error::RpcError;
-use crate::types::{BlockNumber, BlockTag, CallRequest, RpcBlock, RpcReceipt, RpcTransaction};
+use crate::types::{BlockNumber, CallRequest, RpcBlock, RpcReceipt, RpcTransaction};
 use jsonrpsee::core::RpcResult;
 use jsonrpsee::proc_macros::rpc;
 

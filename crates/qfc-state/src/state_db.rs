@@ -2,13 +2,12 @@
 
 use crate::error::{Result, StateError};
 use parking_lot::RwLock;
-use qfc_crypto::{address_from_public_key, blake3_hash};
+use qfc_crypto::blake3_hash;
 use qfc_storage::{cf, Database};
 use qfc_trie::Trie;
-use qfc_types::{Account, Address, Hash, PublicKey, U256};
+use qfc_types::{Account, Address, Hash, U256};
 use std::collections::HashMap;
-use std::sync::Arc;
-use tracing::{debug, trace};
+use tracing::debug;
 
 /// State database for managing blockchain state
 pub struct StateDB {

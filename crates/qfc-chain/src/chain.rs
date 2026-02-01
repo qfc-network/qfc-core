@@ -4,16 +4,16 @@ use crate::error::{ChainError, Result};
 use crate::genesis::{genesis_hash, GenesisConfig};
 use parking_lot::RwLock;
 use qfc_consensus::ConsensusEngine;
-use qfc_crypto::{blake3_hash, merkle_root};
+use qfc_crypto::blake3_hash;
 use qfc_executor::Executor;
 use qfc_state::StateDB;
 use qfc_storage::{cf, encode_block_number, Database, WriteBatch};
 use qfc_types::{
-    Account, Address, Block, BlockBody, BlockHeader, Hash, Receipt, SealedBlock, Signature,
+    Address, Block, BlockBody, BlockHeader, Hash, Receipt, SealedBlock, Signature,
     Transaction, TransactionType, U256, ValidatorNode,
 };
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Chain configuration
 #[derive(Clone, Debug)]

@@ -1,6 +1,6 @@
 //! Network behaviour definition
 
-use crate::sync_protocol::{SyncCodec, SyncRequest, SyncResponse};
+use crate::sync_protocol::SyncCodec;
 use libp2p::{
     gossipsub, identify, kad, ping, request_response,
     swarm::NetworkBehaviour,
