@@ -111,10 +111,10 @@ Proof of Contribution (PoC) - 多维度贡献评分:
   - [x] 区块签名存储 (BlockBody)
   - [x] 同步状态报告 (SyncStatusProvider trait)
   - [x] Ed25519 公钥派生发送者地址
+  - [x] 投票处理 (finality votes)
 
 ### 待实现功能
 
-- [ ] 投票处理 (finality votes)
 - [ ] 验证者消息处理
 - [ ] 智能合约 VM (EVM/WASM)
 - [ ] 状态剪枝 (state pruning)
