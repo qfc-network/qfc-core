@@ -299,9 +299,66 @@ impl EthApiServer for RpcServer {
         Ok(hash.to_string())
     }
 
-    async fn call(&self, request: CallRequest, block: Option<BlockNumber>) -> RpcResult<String> {
-        // TODO: Implement actual contract call execution
-        Ok("0x".to_string())
+    async fn call(&self, request: CallRequest, _block: Option<BlockNumber>) -> RpcResult<String> {
+        // Parse from address
+        let from = if let Some(ref from_str) = request.from {
+            let from_str = from_str.strip_prefix("0x").unwrap_or(from_str);
+            let bytes = hex::decode(from_str).map_err(|e| RpcError::InvalidParams(e.to_string()))?;
+            Address::from_slice(&bytes)
+        } else {
+            None
+        };
+
+        // Parse to address
+        let to = if let Some(ref to_str) = request.to {
+            let to_str = to_str.strip_prefix("0x").unwrap_or(to_str);
+            let bytes = hex::decode(to_str).map_err(|e| RpcError::InvalidParams(e.to_string()))?;
+            Address::from_slice(&bytes)
+        } else {
+            None
+        };
+
+        // Parse value
+        let value = if let Some(ref val_str) = request.value {
+            let val_str = val_str.strip_prefix("0x").unwrap_or(val_str);
+            let val = u128::from_str_radix(val_str, 16).unwrap_or(0);
+            U256::from_u128(val)
+        } else {
+            U256::ZERO
+        };
+
+        // Parse data
+        let data = if let Some(ref data_str) = request.data {
+            let data_str = data_str.strip_prefix("0x").unwrap_or(data_str);
+            hex::decode(data_str).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        // Parse gas limit
+        let gas_limit = if let Some(ref gas_str) = request.gas {
+            let gas_str = gas_str.strip_prefix("0x").unwrap_or(gas_str);
+            u64::from_str_radix(gas_str, 16).ok()
+        } else {
+            None
+        };
+
+        // Execute the call
+        match self.chain.simulate_call(from, to, value, data, gas_limit) {
+            Ok((success, output, _gas_used)) => {
+                if success {
+                    Ok(format!("0x{}", hex::encode(&output)))
+                } else {
+                    // Return the error message if available
+                    if output.is_empty() {
+                        Ok("0x".to_string())
+                    } else {
+                        Ok(format!("0x{}", hex::encode(&output)))
+                    }
+                }
+            }
+            Err(e) => Err(RpcError::Execution(e.to_string()).into()),
+        }
     }
 
     async fn estimate_gas(
@@ -309,14 +366,58 @@ impl EthApiServer for RpcServer {
         request: CallRequest,
         _block: Option<BlockNumber>,
     ) -> RpcResult<String> {
-        // Basic gas estimation
-        let base_gas = if request.data.is_some() {
-            53000u64 // Contract interaction
+        // Parse from address
+        let from = if let Some(ref from_str) = request.from {
+            let from_str = from_str.strip_prefix("0x").unwrap_or(from_str);
+            let bytes = hex::decode(from_str).map_err(|e| RpcError::InvalidParams(e.to_string()))?;
+            Address::from_slice(&bytes)
         } else {
-            21000u64 // Simple transfer
+            None
         };
 
-        Ok(format!("0x{:x}", base_gas))
+        // Parse to address
+        let to = if let Some(ref to_str) = request.to {
+            let to_str = to_str.strip_prefix("0x").unwrap_or(to_str);
+            let bytes = hex::decode(to_str).map_err(|e| RpcError::InvalidParams(e.to_string()))?;
+            Address::from_slice(&bytes)
+        } else {
+            None
+        };
+
+        // Parse value
+        let value = if let Some(ref val_str) = request.value {
+            let val_str = val_str.strip_prefix("0x").unwrap_or(val_str);
+            let val = u128::from_str_radix(val_str, 16).unwrap_or(0);
+            U256::from_u128(val)
+        } else {
+            U256::ZERO
+        };
+
+        // Parse data
+        let data = if let Some(ref data_str) = request.data {
+            let data_str = data_str.strip_prefix("0x").unwrap_or(data_str);
+            hex::decode(data_str).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        // Execute to get actual gas usage
+        match self.chain.simulate_call(from, to, value, data, None) {
+            Ok((_success, _output, gas_used)) => {
+                // Add 10% buffer for safety
+                let estimated = gas_used + (gas_used / 10);
+                Ok(format!("0x{:x}", estimated))
+            }
+            Err(_) => {
+                // Fallback to basic estimation
+                let base_gas = if request.data.is_some() {
+                    53000u64
+                } else {
+                    21000u64
+                };
+                Ok(format!("0x{:x}", base_gas))
+            }
+        }
     }
 
     async fn gas_price(&self) -> RpcResult<String> {

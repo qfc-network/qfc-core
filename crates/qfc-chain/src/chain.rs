@@ -9,8 +9,8 @@ use qfc_executor::Executor;
 use qfc_state::StateDB;
 use qfc_storage::{cf, encode_block_number, Database, WriteBatch};
 use qfc_types::{
-    Account, Address, Block, BlockBody, BlockHeader, Hash, Receipt, SealedBlock, Transaction, U256,
-    ValidatorNode,
+    Account, Address, Block, BlockBody, BlockHeader, Hash, Receipt, SealedBlock, Signature,
+    Transaction, TransactionType, U256, ValidatorNode,
 };
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -462,6 +462,75 @@ impl Chain {
         );
 
         Ok(())
+    }
+
+    /// Simulate a call without modifying state (for eth_call)
+    pub fn simulate_call(
+        &self,
+        from: Option<Address>,
+        to: Option<Address>,
+        value: U256,
+        data: Vec<u8>,
+        gas_limit: Option<u64>,
+    ) -> Result<(bool, Vec<u8>, u64)> {
+        // Use a default sender if not specified
+        let sender = from.unwrap_or_else(|| Address::ZERO);
+
+        // Create a simulated transaction
+        let tx_type = if to.is_some() {
+            if data.is_empty() {
+                TransactionType::Transfer
+            } else {
+                TransactionType::ContractCall
+            }
+        } else {
+            TransactionType::ContractCreate
+        };
+
+        let gas = gas_limit.unwrap_or(qfc_types::DEFAULT_BLOCK_GAS_LIMIT);
+
+        let tx = Transaction {
+            tx_type,
+            chain_id: self.config.chain_id,
+            nonce: self.state.get_nonce(&sender).unwrap_or(0),
+            to,
+            value,
+            data,
+            gas_limit: gas,
+            gas_price: U256::from_u64(1), // Minimal gas price for simulation
+            signature: Signature::ZERO,
+        };
+
+        // Take a snapshot
+        let snapshot = self.state.snapshot();
+
+        // Give sender enough balance for gas (simulation only)
+        let gas_cost = U256::from_u64(gas) * U256::from_u64(1); // gas * gas_price
+        let total_needed = gas_cost + value;
+        let _ = self.state.add_balance(&sender, total_needed);
+
+        // Create a signed transaction (we skip validation for simulation)
+        let tx_hash = blake3_hash(&tx.to_bytes_without_signature());
+        let signed_tx = qfc_types::SignedTransaction::new(tx, tx_hash, sender);
+
+        // Execute
+        let result = self.executor.execute(&signed_tx, &self.state, &Address::ZERO);
+
+        // Revert state changes
+        let _ = self.state.revert(snapshot);
+
+        match result {
+            Ok(exec_result) => {
+                // Return error message as output if failed
+                let output = if exec_result.success {
+                    Vec::new() // No EVM output yet
+                } else {
+                    exec_result.error.unwrap_or_default().into_bytes()
+                };
+                Ok((exec_result.success, output, exec_result.gas_used))
+            }
+            Err(e) => Err(ChainError::Executor(e.to_string())),
+        }
     }
 }
 
