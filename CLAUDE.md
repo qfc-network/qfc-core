@@ -92,7 +92,8 @@ Proof of Contribution (PoC) - 多维度贡献评分:
 - [ ] Phase 2: 网络同步 (多节点测试网)
   - [x] P2P 节点连接 (libp2p)
   - [x] 区块广播 (GossipSub)
-  - [ ] 区块同步请求/响应
+  - [x] 区块同步协议 (request-response)
+  - [ ] 调试同步响应 (WIP)
   - [ ] 初始同步 (sync from genesis)
 - [ ] Phase 3: 完整功能 (生产就绪)
 
