@@ -248,22 +248,24 @@ impl Block {
     }
 }
 
-/// Block body (transactions only, for separate storage)
+/// Block body (transactions, votes, and signature for separate storage)
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct BlockBody {
     pub transactions: Vec<Transaction>,
     pub votes: Vec<Vote>,
+    pub signature: Signature,
 }
 
 impl BlockBody {
-    pub fn new(transactions: Vec<Transaction>, votes: Vec<Vote>) -> Self {
-        Self { transactions, votes }
+    pub fn new(transactions: Vec<Transaction>, votes: Vec<Vote>, signature: Signature) -> Self {
+        Self { transactions, votes, signature }
     }
 
     pub fn from_block(block: &Block) -> Self {
         Self {
             transactions: block.transactions.clone(),
             votes: block.votes.clone(),
+            signature: block.signature,
         }
     }
 }

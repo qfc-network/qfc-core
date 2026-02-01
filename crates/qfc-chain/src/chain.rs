@@ -221,7 +221,7 @@ impl Chain {
             header,
             transactions: body.transactions,
             votes: body.votes,
-            signature: qfc_types::Signature::ZERO, // TODO: Store signature
+            signature: body.signature,
         }))
     }
 
