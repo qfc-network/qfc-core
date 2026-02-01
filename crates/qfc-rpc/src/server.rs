@@ -260,9 +260,20 @@ impl EthApiServer for RpcServer {
 
         match receipt {
             Some(r) => {
-                // TODO: Get actual from/to
-                let from = Address::ZERO;
-                let to = None;
+                // Get transaction to extract from/to
+                let tx = self
+                    .chain
+                    .get_transaction(&hash)
+                    .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+                let (from, to) = if let Some(tx) = tx {
+                    // Derive sender from public key
+                    let from = qfc_crypto::address_from_public_key(&tx.public_key);
+                    (from, tx.to)
+                } else {
+                    (Address::ZERO, None)
+                };
+
                 Ok(Some(RpcReceipt::from_receipt(r, from, to)))
             }
             None => Ok(None),
@@ -278,9 +289,8 @@ impl EthApiServer for RpcServer {
 
         let hash = blake3_hash(&tx.to_bytes_without_signature());
 
-        // Derive sender from signature (placeholder)
-        let sender_hash = blake3_hash(tx.signature.as_bytes());
-        let sender = Address::from_slice(&sender_hash.as_bytes()[12..32]).unwrap();
+        // Derive sender from public key (Ed25519)
+        let sender = qfc_crypto::address_from_public_key(&tx.public_key);
 
         // Add to mempool
         self.mempool
