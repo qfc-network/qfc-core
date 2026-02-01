@@ -1,0 +1,88 @@
+# QFC Core
+
+QFC (Quantum-Flux Chain) 区块链核心实现。
+
+## 项目结构
+
+```
+qfc-core/
+├── Cargo.toml                 # Workspace 配置
+├── crates/
+│   ├── qfc-types/             # 核心类型 (Hash, Address, Block, Transaction)
+│   ├── qfc-crypto/            # 加密 (Blake3, Ed25519, VRF)
+│   ├── qfc-storage/           # RocksDB 存储层
+│   ├── qfc-trie/              # Merkle Patricia Trie
+│   ├── qfc-state/             # 状态管理
+│   ├── qfc-executor/          # 交易执行
+│   ├── qfc-mempool/           # 交易池
+│   ├── qfc-consensus/         # PoC 共识引擎
+│   ├── qfc-chain/             # 链管理
+│   ├── qfc-network/           # P2P 网络 (libp2p)
+│   ├── qfc-rpc/               # JSON-RPC API
+│   └── qfc-node/              # 节点主程序
+```
+
+## 常用命令
+
+```bash
+# 构建
+cargo build
+
+# 测试
+cargo test --all
+
+# 运行开发节点
+cargo run --bin qfc-node -- --dev
+
+# 运行节点（自定义参数）
+cargo run --bin qfc-node -- --data-dir ./mydata --rpc-addr 127.0.0.1:8545
+```
+
+## 技术栈
+
+- **哈希**: Blake3
+- **签名**: Ed25519
+- **VRF**: Ed25519-based VRF (区块生产者选择)
+- **存储**: RocksDB
+- **网络**: libp2p (GossipSub, Kademlia)
+- **RPC**: jsonrpsee (兼容 Ethereum eth_* API)
+- **序列化**: Borsh (内部), JSON (RPC)
+
+## 共识机制
+
+Proof of Contribution (PoC) - 多维度贡献评分:
+- 质押权重: 30%
+- 计算贡献: 20%
+- 在线时长: 15%
+- 验证准确率: 15%
+- 网络贡献: 10%
+- 存储贡献: 5%
+- 历史信誉: 5%
+
+## RPC 端点
+
+### Ethereum 兼容 (eth_*)
+- `eth_chainId` - 链 ID
+- `eth_blockNumber` - 当前区块高度
+- `eth_getBalance` - 查询余额
+- `eth_sendRawTransaction` - 发送交易
+- `eth_getBlockByNumber/Hash` - 查询区块
+- `eth_getTransactionReceipt` - 交易收据
+
+### QFC 特有 (qfc_*)
+- `qfc_getValidators` - 验证者列表
+- `qfc_getContributionScore` - 贡献分数
+- `qfc_getStake` - 质押金额
+- `qfc_getEpoch` - 当前 epoch 信息
+
+## 开发状态
+
+- [x] Phase 1: 基础框架 (单节点出块)
+- [ ] Phase 2: 网络同步 (多节点测试网)
+- [ ] Phase 3: 完整功能 (生产就绪)
+
+## 设计文档
+
+参考 `../qfc-design/` 目录:
+- `01-BLOCKCHAIN-DESIGN.md` - 数据结构和 RPC
+- `02-CONSENSUS-MECHANISM.md` - PoC 共识算法
