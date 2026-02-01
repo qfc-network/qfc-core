@@ -1,6 +1,6 @@
 //! Transaction types
 
-use crate::{Address, Hash, Signature, U256};
+use crate::{Address, Hash, PublicKey, Signature, U256};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
@@ -75,6 +75,9 @@ pub struct Transaction {
     /// Gas price in wei
     pub gas_price: U256,
 
+    /// Sender's public key (required for Ed25519 signature verification)
+    pub public_key: PublicKey,
+
     /// Signature
     pub signature: Signature,
 }
@@ -90,6 +93,7 @@ impl Default for Transaction {
             data: Vec::new(),
             gas_limit: crate::MINIMUM_GAS,
             gas_price: U256::from_u64(crate::MIN_GAS_PRICE),
+            public_key: PublicKey::ZERO,
             signature: Signature::ZERO,
         }
     }
@@ -107,6 +111,7 @@ impl Transaction {
             data: Vec::new(),
             gas_limit: crate::TRANSFER_GAS,
             gas_price,
+            public_key: PublicKey::ZERO,
             signature: Signature::ZERO,
         }
     }
@@ -122,6 +127,7 @@ impl Transaction {
             data: code,
             gas_limit,
             gas_price,
+            public_key: PublicKey::ZERO,
             signature: Signature::ZERO,
         }
     }
@@ -144,6 +150,7 @@ impl Transaction {
             data,
             gas_limit,
             gas_price,
+            public_key: PublicKey::ZERO,
             signature: Signature::ZERO,
         }
     }
@@ -159,6 +166,7 @@ impl Transaction {
             data: Vec::new(),
             gas_limit: crate::MINIMUM_GAS * 2,
             gas_price,
+            public_key: PublicKey::ZERO,
             signature: Signature::ZERO,
         }
     }
@@ -177,13 +185,21 @@ impl Transaction {
             data,
             gas_limit: crate::MINIMUM_GAS * 2,
             gas_price,
+            public_key: PublicKey::ZERO,
             signature: Signature::ZERO,
         }
+    }
+
+    /// Set the public key and signature
+    pub fn sign(&mut self, public_key: PublicKey, signature: Signature) {
+        self.public_key = public_key;
+        self.signature = signature;
     }
 
     /// Serialize transaction without signature for hashing
     pub fn to_bytes_without_signature(&self) -> Vec<u8> {
         // We create a copy without signature for hashing
+        // Note: public_key IS included because it's part of the signed message
         let unsigned = UnsignedTransaction {
             tx_type: self.tx_type,
             chain_id: self.chain_id,
@@ -193,6 +209,7 @@ impl Transaction {
             data: self.data.clone(),
             gas_limit: self.gas_limit,
             gas_price: self.gas_price,
+            public_key: self.public_key,
         };
         borsh::to_vec(&unsigned).expect("serialization should not fail")
     }
@@ -262,6 +279,7 @@ struct UnsignedTransaction {
     pub data: Vec<u8>,
     pub gas_limit: u64,
     pub gas_price: U256,
+    pub public_key: PublicKey,
 }
 
 /// Signed transaction with recovered sender

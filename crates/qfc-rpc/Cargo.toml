@@ -11,6 +11,7 @@ rust-version.workspace = true
 qfc-types.workspace = true
 qfc-crypto.workspace = true
 qfc-chain.workspace = true
+qfc-consensus.workspace = true
 qfc-mempool.workspace = true
 qfc-network.workspace = true
 jsonrpsee.workspace = true

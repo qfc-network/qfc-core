@@ -1,7 +1,7 @@
 //! Transaction executor
 
 use crate::error::{ExecutorError, Result};
-use qfc_crypto::{blake3_hash, contract_address};
+use qfc_crypto::{address_from_public_key, blake3_hash, contract_address};
 use qfc_state::StateDB;
 use qfc_types::{
     create_bloom, Address, Log, Receipt, ReceiptStatus, SignedTransaction, Transaction,
@@ -96,22 +96,15 @@ impl Executor {
             });
         }
 
-        // 3. Compute transaction hash and recover sender
+        // 3. Compute transaction hash and verify signature
         let tx_hash = blake3_hash(&tx.to_bytes_without_signature());
 
-        // For Ed25519, we need the public key to verify, so we encode sender address
-        // In a real implementation, we'd recover the public key from the signature
-        // For now, we'll use a simplified approach where the sender is derived
-        // from the transaction's signature verification
+        // Verify the Ed25519 signature using the public key included in the transaction
+        qfc_crypto::verify_hash_signature(&tx.public_key, &tx_hash, &tx.signature)
+            .map_err(|_| ExecutorError::InvalidSignature)?;
 
-        // TODO: Implement proper sender recovery from Ed25519 signature
-        // For now, we'll trust the signature and compute sender from a public key
-        // This is a placeholder - in production, we'd need to include the public key
-        // in the transaction or use a different signature scheme
-
-        // Placeholder: derive sender from first 20 bytes of signature hash
-        let sender_hash = blake3_hash(tx.signature.as_bytes());
-        let sender = Address::from_slice(&sender_hash.as_bytes()[12..32]).unwrap();
+        // Derive sender address from the verified public key
+        let sender = address_from_public_key(&tx.public_key);
 
         // 4. Check sender's balance
         let sender_balance = state.get_balance(&sender)?;

@@ -331,6 +331,9 @@ impl Chain {
             state_root.as_bytes(),
         )?;
 
+        // Record block production in consensus engine for PoC scoring
+        self.consensus.record_block_produced(&producer);
+
         info!(
             "Imported block {} at height {}",
             block_hash,
@@ -518,6 +521,7 @@ impl Chain {
             data,
             gas_limit: gas,
             gas_price: U256::from_u64(1), // Minimal gas price for simulation
+            public_key: qfc_types::PublicKey::ZERO,
             signature: Signature::ZERO,
         };
 

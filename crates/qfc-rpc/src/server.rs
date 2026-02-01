@@ -2,12 +2,16 @@
 
 use crate::error::RpcError;
 use crate::eth::EthApiServer;
-use crate::qfc::{QfcApiServer, RpcEpoch, RpcNodeInfo, RpcValidator};
+use crate::qfc::{
+    QfcApiServer, RpcEpoch, RpcNodeInfo, RpcValidator, RpcValidatorMetrics,
+    RpcValidatorScoreBreakdown,
+};
 use crate::types::{BlockNumber, BlockTag, CallRequest, RpcBlock, RpcReceipt, RpcTransaction};
 use jsonrpsee::core::RpcResult;
 use jsonrpsee::server::{ServerBuilder, ServerHandle};
 use parking_lot::RwLock;
 use qfc_chain::Chain;
+use qfc_consensus::NetworkState;
 use qfc_crypto::blake3_hash;
 use qfc_mempool::Mempool;
 use qfc_network::NetworkService;
@@ -523,5 +527,103 @@ impl QfcApiServer for RpcServer {
             is_validator,
             syncing: false, // TODO: Implement sync status
         })
+    }
+
+    async fn get_validator_score_breakdown(
+        &self,
+        address: String,
+    ) -> RpcResult<RpcValidatorScoreBreakdown> {
+        let address = Self::parse_address(&address)?;
+
+        // Find the validator
+        let validators = self.chain.get_validators();
+        let validator = validators
+            .iter()
+            .find(|v| v.address == address)
+            .ok_or_else(|| RpcError::InvalidParams("Validator not found".to_string()))?;
+
+        // Calculate individual score components
+        // These are weighted scores (each already multiplied by their weight)
+        let total_stake: u128 = validators.iter().map(|v| v.stake.low_u128()).sum();
+        let total_hashrate: u64 = validators
+            .iter()
+            .filter(|v| v.provides_compute)
+            .map(|v| v.hashrate)
+            .sum();
+        let total_storage: u64 = validators.iter().map(|v| v.storage_provided_gb as u64).sum();
+
+        // Calculate stake score component (30% weight)
+        let stake_ratio = if total_stake > 0 {
+            validator.stake.low_u128() as f64 / total_stake as f64
+        } else {
+            0.0
+        };
+        let stake_score = (stake_ratio * 3000.0) as u64; // 30% max
+
+        // Calculate compute score component (20% weight)
+        let compute_score = if validator.provides_compute && total_hashrate > 0 {
+            ((validator.hashrate as f64 / total_hashrate as f64) * 2000.0) as u64
+        } else {
+            0
+        };
+
+        // Calculate uptime score component (15% weight)
+        let uptime_score = (validator.uptime_ratio() * 1500.0) as u64;
+
+        // Calculate accuracy score component (15% weight)
+        let accuracy_score = (validator.accuracy_ratio() * 1500.0) as u64;
+
+        // Calculate network score component (10% weight)
+        let latency_score = 1.0 / (1.0 + validator.avg_latency_ms as f64 / 100.0);
+        let bandwidth_score = (validator.bandwidth_mbps as f64 / 1000.0).min(1.0);
+        let service_score = latency_score * 0.6 + bandwidth_score * 0.4;
+        let network_score = (service_score * 1000.0) as u64;
+
+        // Calculate storage score component (5% weight)
+        let storage_score = if total_storage > 0 {
+            ((validator.storage_provided_gb as f64 / total_storage as f64) * 500.0) as u64
+        } else {
+            0
+        };
+
+        // Calculate reputation score component (5% weight)
+        let reputation_score = (validator.reputation_ratio() * 500.0) as u64;
+
+        Ok(RpcValidatorScoreBreakdown {
+            address: address.to_string(),
+            total_score: format!("0x{:x}", validator.contribution_score),
+            stake: format!("0x{:x}", validator.stake.0),
+            stake_score: format!("0x{:x}", stake_score),
+            compute_score: format!("0x{:x}", compute_score),
+            uptime_score: format!("0x{:x}", uptime_score),
+            accuracy_score: format!("0x{:x}", accuracy_score),
+            network_score: format!("0x{:x}", network_score),
+            storage_score: format!("0x{:x}", storage_score),
+            reputation_score: format!("0x{:x}", reputation_score),
+            metrics: RpcValidatorMetrics {
+                uptime_percent: format!("{:.2}", validator.uptime_ratio() * 100.0),
+                accuracy_percent: format!("{:.2}", validator.accuracy_ratio() * 100.0),
+                reputation_percent: format!("{:.2}", validator.reputation_ratio() * 100.0),
+                avg_latency_ms: validator.avg_latency_ms,
+                bandwidth_mbps: validator.bandwidth_mbps,
+                storage_gb: validator.storage_provided_gb,
+                provides_compute: validator.provides_compute,
+                hashrate: format!("0x{:x}", validator.hashrate),
+                blocks_produced: format!("0x{:x}", validator.blocks_produced),
+                valid_votes: format!("0x{:x}", validator.valid_votes),
+                invalid_votes: format!("0x{:x}", validator.invalid_votes),
+            },
+        })
+    }
+
+    async fn get_network_state(&self) -> RpcResult<String> {
+        let state = self.chain.consensus().get_network_state();
+        let state_str = match state {
+            NetworkState::Normal => "normal",
+            NetworkState::Congested => "congested",
+            NetworkState::StorageShortage => "storage_shortage",
+            NetworkState::UnderAttack => "under_attack",
+        };
+        Ok(state_str.to_string())
     }
 }

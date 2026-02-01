@@ -354,6 +354,7 @@ mod tests {
             data: Vec::new(),
             gas_limit: 21000,
             gas_price: U256::from_u64(gas_price),
+            public_key: Default::default(),
             signature: Default::default(),
         }
     }

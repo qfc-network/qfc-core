@@ -15,6 +15,61 @@ pub struct RpcValidator {
     pub is_active: bool,
 }
 
+/// Detailed validator score breakdown
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcValidatorScoreBreakdown {
+    pub address: String,
+    /// Total contribution score (0-10000 representing 0-100%)
+    pub total_score: String,
+    /// Stake amount
+    pub stake: String,
+    /// Stake score component (30% weight)
+    pub stake_score: String,
+    /// Compute score component (20% weight)
+    pub compute_score: String,
+    /// Uptime score component (15% weight)
+    pub uptime_score: String,
+    /// Accuracy score component (15% weight)
+    pub accuracy_score: String,
+    /// Network score component (10% weight)
+    pub network_score: String,
+    /// Storage score component (5% weight)
+    pub storage_score: String,
+    /// Reputation score component (5% weight)
+    pub reputation_score: String,
+    /// Raw metrics
+    pub metrics: RpcValidatorMetrics,
+}
+
+/// Raw validator metrics
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcValidatorMetrics {
+    /// Uptime percentage (0-100)
+    pub uptime_percent: String,
+    /// Accuracy percentage (0-100)
+    pub accuracy_percent: String,
+    /// Reputation percentage (0-100)
+    pub reputation_percent: String,
+    /// Average latency in ms
+    pub avg_latency_ms: u32,
+    /// Bandwidth in Mbps
+    pub bandwidth_mbps: u32,
+    /// Storage provided in GB
+    pub storage_gb: u32,
+    /// Whether provides compute
+    pub provides_compute: bool,
+    /// Hashrate if provides compute
+    pub hashrate: String,
+    /// Blocks produced
+    pub blocks_produced: String,
+    /// Valid votes
+    pub valid_votes: String,
+    /// Invalid votes
+    pub invalid_votes: String,
+}
+
 /// QFC RPC API trait
 #[rpc(server, namespace = "qfc")]
 pub trait QfcApi {
@@ -25,6 +80,10 @@ pub trait QfcApi {
     /// Get contribution score for an address
     #[method(name = "getContributionScore")]
     async fn get_contribution_score(&self, address: String) -> RpcResult<String>;
+
+    /// Get detailed score breakdown for a validator
+    #[method(name = "getValidatorScoreBreakdown")]
+    async fn get_validator_score_breakdown(&self, address: String) -> RpcResult<RpcValidatorScoreBreakdown>;
 
     /// Get stake amount for an address
     #[method(name = "getStake")]
@@ -41,6 +100,10 @@ pub trait QfcApi {
     /// Get node info
     #[method(name = "nodeInfo")]
     async fn node_info(&self) -> RpcResult<RpcNodeInfo>;
+
+    /// Get current network state
+    #[method(name = "getNetworkState")]
+    async fn get_network_state(&self) -> RpcResult<String>;
 }
 
 /// Epoch information
