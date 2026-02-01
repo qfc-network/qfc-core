@@ -253,13 +253,14 @@ impl EthApiServer for RpcServer {
     async fn get_transaction_receipt(&self, hash: String) -> RpcResult<Option<RpcReceipt>> {
         let hash = Self::parse_hash(&hash)?;
 
-        let receipt = self
+        // Get receipt with block info
+        let result = self
             .chain
-            .get_receipt(&hash)
+            .get_receipt_with_block_info(&hash)
             .map_err(|e| RpcError::Internal(e.to_string()))?;
 
-        match receipt {
-            Some(r) => {
+        match result {
+            Some((receipt, block_hash, block_number)) => {
                 // Get transaction to extract from/to
                 let tx = self
                     .chain
@@ -274,8 +275,24 @@ impl EthApiServer for RpcServer {
                     (Address::ZERO, None)
                 };
 
-                // TODO: Look up block_hash and block_number from transaction location
-                Ok(Some(RpcReceipt::from_receipt(r, from, to, None, None)))
+                let block_hash_opt = if block_hash != Hash::ZERO {
+                    Some(block_hash)
+                } else {
+                    None
+                };
+                let block_number_opt = if block_number > 0 || block_hash != Hash::ZERO {
+                    Some(block_number)
+                } else {
+                    None
+                };
+
+                Ok(Some(RpcReceipt::from_receipt(
+                    receipt,
+                    from,
+                    to,
+                    block_hash_opt,
+                    block_number_opt,
+                )))
             }
             None => Ok(None),
         }

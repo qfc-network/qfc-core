@@ -267,6 +267,42 @@ impl Chain {
         Ok(Some(receipt))
     }
 
+    /// Get transaction location (block_height, tx_index) by hash
+    pub fn get_transaction_location(&self, hash: &Hash) -> Result<Option<(u64, u32)>> {
+        let location_bytes = match self.db.get(cf::TX_INDEX, hash.as_bytes())? {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+
+        Ok(qfc_storage::decode_tx_location(&location_bytes))
+    }
+
+    /// Get receipt with block info
+    pub fn get_receipt_with_block_info(
+        &self,
+        hash: &Hash,
+    ) -> Result<Option<(Receipt, Hash, u64)>> {
+        let receipt = match self.get_receipt(hash)? {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+
+        // Get transaction location
+        let (block_height, _tx_index) = match self.get_transaction_location(hash)? {
+            Some(loc) => loc,
+            None => return Ok(Some((receipt, Hash::ZERO, 0))),
+        };
+
+        // Get block hash
+        let block = match self.get_block_by_number(block_height)? {
+            Some(b) => b,
+            None => return Ok(Some((receipt, Hash::ZERO, block_height))),
+        };
+
+        let block_hash = blake3_hash(&block.header_bytes());
+        Ok(Some((receipt, block_hash, block_height)))
+    }
+
     /// Import a block
     pub fn import_block(&self, block: Block) -> Result<Hash> {
         let block_hash = blake3_hash(&block.header_bytes());
@@ -368,13 +404,23 @@ impl Chain {
             key.to_vec(),
         );
 
-        // Store transactions
-        for tx in &block.transactions {
+        // Store transactions and their locations
+        for (index, tx) in block.transactions.iter().enumerate() {
             let tx_hash = blake3_hash(&tx.to_bytes_without_signature());
+
+            // Store transaction data
             batch.put(
                 cf::TRANSACTIONS,
                 tx_hash.as_bytes().to_vec(),
                 tx.to_bytes(),
+            );
+
+            // Store transaction location index (block_height, tx_index)
+            let tx_location = qfc_storage::encode_tx_location(block.number(), index as u32);
+            batch.put(
+                cf::TX_INDEX,
+                tx_hash.as_bytes().to_vec(),
+                tx_location.to_vec(),
             );
         }
 
