@@ -166,6 +166,18 @@ impl BlockProducer {
             } else {
                 debug!("Broadcasted block #{} to network", block_number);
             }
+
+            // Cast and broadcast our own vote for the block we produced
+            if let Ok(vote) = self.consensus.vote(&block, true) {
+                let vote_data = vote.to_bytes();
+                if let Err(e) = network.broadcast_vote(vote_data).await {
+                    warn!("Failed to broadcast vote: {}", e);
+                } else {
+                    debug!("Broadcasted accept vote for block #{}", block_number);
+                }
+                // Add our vote to pending votes
+                self.consensus.add_vote(vote);
+            }
         }
 
         // Remove included transactions from mempool

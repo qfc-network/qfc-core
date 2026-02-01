@@ -3,11 +3,11 @@
 use libp2p::PeerId;
 use parking_lot::RwLock;
 use qfc_chain::Chain;
-use qfc_crypto::blake3_hash;
+use qfc_crypto::{blake3_hash, verify_hash_signature};
 use qfc_mempool::Mempool;
 use qfc_network::{NetworkMessage, NetworkService, SyncEvent, SyncRequest, SyncResponse};
 use qfc_rpc::SyncStatusProvider;
-use qfc_types::{Block, Hash};
+use qfc_types::{Block, Hash, Vote, VoteDecision};
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
@@ -218,6 +218,11 @@ impl SyncManager {
                 info!("Imported block #{} from network", block_number);
                 // Process any pending blocks that might now be importable
                 self.process_pending_blocks().await;
+
+                // If we're a validator, cast our vote for this block
+                if self.chain.consensus().is_validator() {
+                    self.cast_vote_for_block(&block).await;
+                }
             }
             Err(qfc_chain::ChainError::BlockAlreadyKnown) => {
                 debug!("Block #{} already known", block_number);
@@ -236,6 +241,36 @@ impl SyncManager {
                 warn!("Failed to import block #{}: {}", block_number, e);
             }
         }
+    }
+
+    /// Cast a vote for a successfully imported block
+    async fn cast_vote_for_block(&self, block: &Block) {
+        let consensus = self.chain.consensus();
+        let block_number = block.number();
+
+        // Create an accept vote (we validated the block during import)
+        let vote = match consensus.vote(block, true) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("Failed to create vote for block #{}: {}", block_number, e);
+                return;
+            }
+        };
+
+        // Broadcast our vote
+        let vote_data = vote.to_bytes();
+        if let Err(e) = self.network.broadcast_vote(vote_data).await {
+            warn!("Failed to broadcast vote for block #{}: {}", block_number, e);
+        } else {
+            info!(
+                "Broadcast accept vote for block #{} from {}",
+                block_number,
+                consensus.our_address().unwrap_or_default()
+            );
+        }
+
+        // Add our vote to pending votes
+        consensus.add_vote(vote);
     }
 
     /// Request missing blocks from peers
@@ -397,8 +432,153 @@ impl SyncManager {
 
     /// Handle an incoming vote
     async fn handle_vote(&self, data: Vec<u8>) {
-        // TODO: Implement vote handling for finality
-        debug!("Received vote ({} bytes)", data.len());
+        // 1. Deserialize the vote
+        let vote: Vote = match borsh::from_slice(&data) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("Failed to decode vote: {}", e);
+                return;
+            }
+        };
+
+        debug!(
+            "Received vote for block #{} from {}",
+            vote.block_height,
+            vote.voter
+        );
+
+        // 2. Get consensus engine and validators
+        let consensus = self.chain.consensus();
+        let validators = consensus.get_validators();
+
+        // 3. Find the voter in the validator set
+        let voter_validator = match validators.iter().find(|v| v.address == vote.voter) {
+            Some(v) => v,
+            None => {
+                warn!("Vote from unknown validator: {}", vote.voter);
+                return;
+            }
+        };
+
+        // 4. Check if voter is active
+        if !voter_validator.is_active() {
+            warn!("Vote from inactive/jailed validator: {}", vote.voter);
+            return;
+        }
+
+        // 5. Verify the vote signature
+        let vote_hash = blake3_hash(&vote.to_bytes_without_signature());
+        if verify_hash_signature(&voter_validator.public_key, &vote_hash, &vote.signature).is_err()
+        {
+            warn!("Invalid vote signature from {}", vote.voter);
+            // Record invalid vote for slashing consideration
+            consensus.record_vote(&vote.voter, false);
+            return;
+        }
+
+        // 6. Verify the vote is for a known block
+        let block_exists = self
+            .chain
+            .get_block_by_hash(&vote.block_hash)
+            .ok()
+            .flatten()
+            .is_some();
+
+        if !block_exists {
+            debug!(
+                "Vote for unknown block {}, storing anyway",
+                hex::encode(&vote.block_hash.as_bytes()[..8])
+            );
+        }
+
+        // 7. Record the vote as valid
+        let is_accept = vote.decision == VoteDecision::Accept;
+        consensus.record_vote(&vote.voter, true);
+
+        // 8. Add vote to pending votes
+        consensus.add_vote(vote.clone());
+
+        info!(
+            "Added {} vote from {} for block #{}",
+            if is_accept { "accept" } else { "reject" },
+            vote.voter,
+            vote.block_height
+        );
+
+        // 9. Check if block has reached finality
+        if consensus.check_finality(&vote.block_hash) {
+            let current_finalized = consensus.finalized_height();
+            if vote.block_height > current_finalized {
+                consensus.set_finalized_height(vote.block_height);
+                info!("Block #{} finalized!", vote.block_height);
+
+                // Prune old votes
+                consensus.prune_old_votes(vote.block_height);
+            }
+        }
+
+        // 10. If we're a validator and haven't voted yet, cast our vote
+        if consensus.is_validator() {
+            self.maybe_cast_vote(&vote.block_hash, vote.block_height).await;
+        }
+    }
+
+    /// Cast our own vote for a block if we haven't already
+    async fn maybe_cast_vote(&self, block_hash: &Hash, block_height: u64) {
+        let consensus = self.chain.consensus();
+
+        // Check if we've already voted for this block
+        // (A more robust implementation would track our own votes)
+        let our_address = match consensus.our_address() {
+            Some(addr) => addr,
+            None => return,
+        };
+
+        // Get the block to validate
+        let block = match self.chain.get_block_by_hash(block_hash) {
+            Ok(Some(b)) => b,
+            _ => {
+                debug!("Cannot vote: block not found");
+                return;
+            }
+        };
+
+        // Get the parent block for validation
+        let parent = match self.chain.get_block_by_hash(&block.parent_hash()) {
+            Ok(Some(p)) => p,
+            _ => {
+                debug!("Cannot vote: parent block not found");
+                return;
+            }
+        };
+
+        // Validate the block and decide our vote
+        let accept = consensus.validate_block(&block, &parent).is_ok();
+
+        // Create and sign our vote
+        let vote = match consensus.vote(&block, accept) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("Failed to create vote: {}", e);
+                return;
+            }
+        };
+
+        // Broadcast our vote
+        let vote_data = vote.to_bytes();
+        if let Err(e) = self.network.broadcast_vote(vote_data).await {
+            warn!("Failed to broadcast vote: {}", e);
+        } else {
+            info!(
+                "Broadcast {} vote for block #{} from {}",
+                if accept { "accept" } else { "reject" },
+                block_height,
+                our_address
+            );
+        }
+
+        // Add our own vote to pending votes
+        consensus.add_vote(vote);
     }
 
     /// Handle a validator message
