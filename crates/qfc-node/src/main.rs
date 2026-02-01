@@ -150,19 +150,22 @@ async fn main() -> Result<()> {
     let mempool = Arc::new(RwLock::new(Mempool::new(MempoolConfig::default())));
 
     // Start RPC server
-    if args.rpc {
+    let _rpc_handle = if args.rpc {
         let rpc_config = RpcConfig {
             http_addr: args.rpc_addr,
             http_enabled: true,
         };
 
         let rpc_server = RpcServer::new(chain.clone(), mempool.clone(), args.chain_id);
-        let _handle = rpc_server
+        let handle = rpc_server
             .start(rpc_config)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to start RPC server: {}", e))?;
         info!("RPC server started on {}", args.rpc_addr);
-    }
+        Some(handle)
+    } else {
+        None
+    };
 
     // Start block producer if we're a validator or in dev mode
     let is_validator = consensus.is_validator();
