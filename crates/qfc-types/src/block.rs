@@ -217,6 +217,11 @@ impl Block {
         self.header.gas_limit
     }
 
+    /// Get VRF proof
+    pub fn vrf_proof(&self) -> &VrfProof {
+        &self.header.vrf_proof
+    }
+
     /// Get transaction count
     pub fn tx_count(&self) -> usize {
         self.transactions.len()

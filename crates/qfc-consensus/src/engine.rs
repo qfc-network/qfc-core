@@ -3,7 +3,7 @@
 use crate::error::{ConsensusError, Result};
 use crate::scoring::{calculate_contribution_score, NetworkState};
 use parking_lot::RwLock;
-use qfc_crypto::{blake3_hash, vrf_output_to_f64, VrfKeypair};
+use qfc_crypto::{blake3_hash, vrf_output_to_f64, vrf_verify_with_seed, VrfKeypair};
 use qfc_types::{
     Address, Block, BlockHeader, Epoch, Hash, Receipt, Signature, Transaction, ValidatorNode,
     Vote, BLOCK_VERSION, DEFAULT_BLOCK_GAS_LIMIT, FINALITY_THRESHOLD,
@@ -337,8 +337,13 @@ impl ConsensusEngine {
             return Err(ConsensusError::ValidatorJailed);
         }
 
-        // 5. Verify VRF proof
-        // TODO: Verify against epoch seed
+        // 5. Verify VRF proof against epoch seed
+        let epoch = self.current_epoch.read();
+        if producer.public_key != qfc_types::PublicKey::ZERO {
+            // Only verify if producer has a public key set
+            vrf_verify_with_seed(&producer.public_key, &epoch.seed, block.vrf_proof())
+                .map_err(|_| ConsensusError::InvalidVrfProof)?;
+        }
 
         // 6. Check block size
         if block.transactions.len() > qfc_types::MAX_TRANSACTIONS_PER_BLOCK {

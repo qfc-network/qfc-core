@@ -83,8 +83,12 @@ Proof of Contribution (PoC) - 多维度贡献评分:
 ### QFC 特有 (qfc_*)
 - `qfc_getValidators` - 验证者列表
 - `qfc_getContributionScore` - 贡献分数
+- `qfc_getValidatorScoreBreakdown` - 验证者分数详情 (含各维度分数)
 - `qfc_getStake` - 质押金额
 - `qfc_getEpoch` - 当前 epoch 信息
+- `qfc_getFinalizedBlock` - 最终确认区块
+- `qfc_getNetworkState` - 网络状态 (normal/congested/storage_shortage/under_attack)
+- `qfc_nodeInfo` - 节点信息
 
 ## 开发状态
 
