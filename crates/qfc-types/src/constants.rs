@@ -119,6 +119,32 @@ pub const ONE_QFC: u128 = 1_000_000_000_000_000_000;
 /// One Gwei in wei (10^9)
 pub const ONE_GWEI: u64 = 1_000_000_000;
 
+// ============ Tokenomics ============
+
+/// Initial total supply (1 billion QFC)
+pub const INITIAL_SUPPLY: u128 = 1_000_000_000 * ONE_QFC;
+
+/// Maximum supply cap (2 billion QFC)
+pub const MAX_SUPPLY: u128 = 2_000_000_000 * ONE_QFC;
+
+/// Block reward halving period in years
+pub const HALVING_PERIOD_YEARS: u64 = 1;
+
+/// Minimum block reward after all halvings (0.625 QFC)
+pub const MIN_BLOCK_REWARD: u128 = 625_000_000_000_000_000;
+
+/// Unstaking delay in seconds (7 days)
+pub const UNSTAKE_DELAY_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// Minimum delegation amount (100 QFC)
+pub const MIN_DELEGATION: u128 = 100 * ONE_QFC;
+
+/// Maximum stake percentage per validator (1%)
+pub const MAX_VALIDATOR_STAKE_PERCENT: u64 = 1;
+
+/// Contract creator fee rebate percentage (5%)
+pub const CONTRACT_CREATOR_FEE_PERCENT: u64 = 5;
+
 /// Minimum gas price (1 Gwei)
 pub const MIN_GAS_PRICE: u64 = ONE_GWEI;
 
@@ -168,4 +194,28 @@ pub fn min_validator_stake() -> U256 {
 /// Get one QFC as U256
 pub fn one_qfc() -> U256 {
     U256::from_u128(ONE_QFC)
+}
+
+/// Get initial supply as U256
+pub fn initial_supply() -> U256 {
+    U256::from_u128(INITIAL_SUPPLY)
+}
+
+/// Get max supply as U256
+pub fn max_supply() -> U256 {
+    U256::from_u128(MAX_SUPPLY)
+}
+
+/// Calculate block reward for a given year (0-indexed)
+/// Reward halves each year until minimum is reached
+pub fn block_reward_for_year(year: u64) -> U256 {
+    let halvings = year.min(4); // Max 4 halvings
+    let reward = BLOCK_REWARD >> halvings;
+    let final_reward = reward.max(MIN_BLOCK_REWARD);
+    U256::from_u128(final_reward)
+}
+
+/// Get minimum delegation as U256
+pub fn min_delegation() -> U256 {
+    U256::from_u128(MIN_DELEGATION)
 }

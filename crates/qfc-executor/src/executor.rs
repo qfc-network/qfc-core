@@ -1,7 +1,8 @@
 //! Transaction executor
 
 use crate::error::{ExecutorError, Result};
-use qfc_crypto::{address_from_public_key, blake3_hash, contract_address};
+use crate::evm::EvmExecutor;
+use qfc_crypto::{address_from_public_key, blake3_hash};
 use qfc_state::StateDB;
 use qfc_types::{
     create_bloom, Address, Log, Receipt, ReceiptStatus, SignedTransaction, Transaction,
@@ -60,17 +61,35 @@ impl ExecutionResult {
 pub struct Executor {
     /// Chain ID for validation
     chain_id: u64,
+    /// Current block number (set during execution)
+    block_number: u64,
+    /// Current block timestamp (set during execution)
+    block_timestamp: u64,
+    /// Block gas limit
+    block_gas_limit: u64,
 }
 
 impl Executor {
     /// Create a new executor
     pub fn new(chain_id: u64) -> Self {
-        Self { chain_id }
+        Self {
+            chain_id,
+            block_number: 0,
+            block_timestamp: 0,
+            block_gas_limit: qfc_types::DEFAULT_BLOCK_GAS_LIMIT,
+        }
     }
 
     /// Create an executor for the default testnet
     pub fn testnet() -> Self {
         Self::new(DEFAULT_CHAIN_ID)
+    }
+
+    /// Set block context for EVM execution
+    pub fn set_block_context(&mut self, block_number: u64, block_timestamp: u64, gas_limit: u64) {
+        self.block_number = block_number;
+        self.block_timestamp = block_timestamp;
+        self.block_gas_limit = gas_limit;
     }
 
     /// Validate a transaction before execution
@@ -179,9 +198,11 @@ impl Executor {
         let result = match tx.tx.tx_type {
             TransactionType::Transfer => self.execute_transfer(&tx.tx, &sender, state),
             TransactionType::ContractCreate => {
-                self.execute_contract_create(&tx.tx, &sender, state)
+                self.execute_contract_create(&tx.tx, &sender, state, block_producer)
             }
-            TransactionType::ContractCall => self.execute_contract_call(&tx.tx, &sender, state),
+            TransactionType::ContractCall => {
+                self.execute_contract_call(&tx.tx, &sender, state, block_producer)
+            }
             TransactionType::Stake => self.execute_stake(&tx.tx, &sender, state),
             TransactionType::Unstake => self.execute_unstake(&tx.tx, &sender, state),
             TransactionType::ValidatorRegister => {
@@ -247,32 +268,39 @@ impl Executor {
         tx: &Transaction,
         sender: &Address,
         state: &StateDB,
+        block_producer: &Address,
     ) -> Result<ExecutionResult> {
-        // Calculate contract address
-        let nonce = state.get_nonce(sender)?.saturating_sub(1); // Nonce was already incremented
-        let contract_addr = contract_address(sender, nonce);
-
-        // Transfer value to contract
-        if !tx.value.is_zero() {
-            state.transfer(sender, &contract_addr, tx.value)?;
-        }
-
-        // Store contract code
-        // For now, we just store the init code as the runtime code
-        // In a real implementation, we'd execute the init code
-        let code = tx.data.clone();
-        let gas_used = qfc_types::CONTRACT_CREATE_GAS + tx.data_gas();
-
-        if !code.is_empty() {
-            state.set_code(&contract_addr, code)?;
-        }
-
-        debug!(
-            "Contract created at {} by {}",
-            contract_addr, sender
+        // Use EVM to execute contract creation
+        let evm_executor = EvmExecutor::new(
+            state,
+            self.chain_id,
+            self.block_number,
+            self.block_timestamp,
+            *block_producer,
+            self.block_gas_limit,
         );
 
-        Ok(ExecutionResult::success_with_contract(gas_used, contract_addr))
+        let result = evm_executor.create(sender, tx.data.clone(), tx.value, tx.gas_limit)?;
+
+        if result.success {
+            let gas_used = result.gas_used.max(qfc_types::CONTRACT_CREATE_GAS);
+            if let Some(contract_addr) = result.contract_address {
+                debug!("Contract created at {} by {}", contract_addr, sender);
+                let mut exec_result = ExecutionResult::success_with_contract(gas_used, contract_addr);
+                exec_result.logs = result.logs;
+                Ok(exec_result)
+            } else {
+                Ok(ExecutionResult::failure(
+                    gas_used,
+                    "Contract creation failed: no address".to_string(),
+                ))
+            }
+        } else {
+            Ok(ExecutionResult::failure(
+                result.gas_used,
+                result.error.unwrap_or_else(|| "Unknown error".to_string()),
+            ))
+        }
     }
 
     fn execute_contract_call(
@@ -280,26 +308,56 @@ impl Executor {
         tx: &Transaction,
         sender: &Address,
         state: &StateDB,
+        block_producer: &Address,
     ) -> Result<ExecutionResult> {
         let to = tx.to.ok_or(ExecutorError::MissingRecipient)?;
 
-        // Transfer value
-        if !tx.value.is_zero() {
-            state.transfer(sender, &to, tx.value)?;
+        // Check if target has code (is a contract)
+        let code = state.get_code(&to)?;
+
+        if code.is_empty() {
+            // Not a contract, just transfer value
+            if !tx.value.is_zero() {
+                state.transfer(sender, &to, tx.value)?;
+            }
+            let gas_used = MINIMUM_GAS + tx.data_gas();
+            debug!(
+                "Call to non-contract: {} -> {} value={}",
+                sender, to, tx.value
+            );
+            return Ok(ExecutionResult::success(gas_used));
         }
 
-        // TODO: Execute contract code (needs VM implementation)
-        // For now, just consume gas for the call
-        let gas_used = MINIMUM_GAS + tx.data_gas();
-
-        debug!(
-            "Contract call: {} -> {} data_len={}",
-            sender,
-            to,
-            tx.data.len()
+        // Use EVM to execute contract call
+        let evm_executor = EvmExecutor::new(
+            state,
+            self.chain_id,
+            self.block_number,
+            self.block_timestamp,
+            *block_producer,
+            self.block_gas_limit,
         );
 
-        Ok(ExecutionResult::success(gas_used))
+        let result = evm_executor.call(sender, &to, tx.data.clone(), tx.value, tx.gas_limit)?;
+
+        debug!(
+            "Contract call: {} -> {} data_len={} success={}",
+            sender,
+            to,
+            tx.data.len(),
+            result.success
+        );
+
+        if result.success {
+            let mut exec_result = ExecutionResult::success(result.gas_used);
+            exec_result.logs = result.logs;
+            Ok(exec_result)
+        } else {
+            Ok(ExecutionResult::failure(
+                result.gas_used,
+                result.error.unwrap_or_else(|| "Execution failed".to_string()),
+            ))
+        }
     }
 
     fn execute_stake(
@@ -538,7 +596,7 @@ mod tests {
         state.set_balance(&sender, U256::from_u128(100_000_000_000_000_000)).unwrap(); // 0.1 ETH-equivalent
 
         // Create transfer transaction
-        let mut tx = Transaction::transfer(
+        let tx = Transaction::transfer(
             recipient,
             U256::from_u64(1000),
             0,

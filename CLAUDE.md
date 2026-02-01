@@ -114,10 +114,9 @@ Proof of Contribution (PoC) - 多维度贡献评分:
   - [x] 投票处理 (finality votes)
   - [x] 验证者消息处理 (heartbeat, epoch, slashing)
 
-### 待实现功能
-- [ ] 智能合约 VM (EVM/WASM)
-- [ ] 状态剪枝 (state pruning)
-- [ ] 快照同步 (snap sync)
+  - [x] EVM 集成 (revm - 智能合约执行)
+  - [x] 状态剪枝 (StatePruner - 保留最近N个区块状态)
+  - [x] 快照同步 (SnapSyncManager - 快速状态下载)
 
 ## 设计文档
 

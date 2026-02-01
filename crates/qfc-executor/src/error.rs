@@ -45,6 +45,9 @@ pub enum ExecutorError {
 
     #[error("Internal error: {0}")]
     Internal(String),
+
+    #[error("EVM error: {0}")]
+    EvmError(String),
 }
 
 impl From<qfc_state::StateError> for ExecutorError {

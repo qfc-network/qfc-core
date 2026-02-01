@@ -84,6 +84,7 @@ pub struct Address(pub [u8; 20]);
 
 impl Address {
     pub const ZERO: Address = Address([0u8; 20]);
+    pub const MAX: Address = Address([0xffu8; 20]);
 
     pub fn new(bytes: [u8; 20]) -> Self {
         Self(bytes)

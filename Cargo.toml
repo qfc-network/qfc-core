@@ -44,6 +44,9 @@ rand_core = "0.6"
 # Storage
 rocksdb = "0.22"
 
+# EVM
+revm = { version = "8.0", default-features = false, features = ["std"] }
+
 # Networking
 libp2p = { version = "0.56", default-features = false, features = ["dns", "tokio", "tcp", "noise", "yamux", "identify", "ping", "gossipsub", "kad", "request-response", "macros"] }
 
