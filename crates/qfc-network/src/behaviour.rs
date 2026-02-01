@@ -1,9 +1,13 @@
 //! Network behaviour definition
 
+use crate::sync_protocol::{SyncCodec, SyncRequest, SyncResponse};
 use libp2p::{
-    gossipsub, identify, kad, ping,
+    gossipsub, identify, kad, ping, request_response,
     swarm::NetworkBehaviour,
 };
+
+/// Type alias for the sync request-response behaviour
+pub type SyncBehaviour = request_response::Behaviour<SyncCodec>;
 
 /// QFC network behaviour
 #[derive(NetworkBehaviour)]
@@ -19,6 +23,9 @@ pub struct QfcBehaviour {
 
     /// Ping for connection health
     pub ping: ping::Behaviour,
+
+    /// Request-response for block sync
+    pub sync: SyncBehaviour,
 }
 
 /// GossipSub topic names

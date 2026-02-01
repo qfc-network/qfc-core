@@ -24,6 +24,7 @@ qfc-network.workspace = true
 qfc-rpc.workspace = true
 borsh.workspace = true
 clap.workspace = true
+libp2p.workspace = true
 serde.workspace = true
 tokio.workspace = true
 tracing.workspace = true

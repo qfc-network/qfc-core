@@ -3,20 +3,46 @@
 use crate::behaviour::{topics, NetworkMessage, QfcBehaviour, QfcBehaviourEvent};
 use crate::config::NetworkConfig;
 use crate::error::{NetworkError, Result};
+use crate::sync_protocol::{SyncCodec, SyncRequest, SyncResponse, SYNC_PROTOCOL};
 use futures::StreamExt;
 use libp2p::{
     gossipsub::{self, IdentTopic, MessageAuthenticity},
     identify, kad,
     noise, ping,
+    request_response::{self, OutboundRequestId, ProtocolSupport},
     swarm::SwarmEvent,
     tcp, yamux, PeerId, Swarm, Transport,
 };
 use parking_lot::RwLock;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
+
+/// Commands for the network service
+#[derive(Debug)]
+pub enum NetworkCommand {
+    /// Broadcast a gossipsub message
+    Broadcast(NetworkMessage),
+    /// Send a sync request to a peer
+    SyncRequest {
+        peer_id: PeerId,
+        request: SyncRequest,
+        response_tx: oneshot::Sender<Result<SyncResponse>>,
+    },
+}
+
+/// Sync event for the node to handle
+#[derive(Debug)]
+pub enum SyncEvent {
+    /// Received a sync request from a peer
+    Request {
+        peer_id: PeerId,
+        request: SyncRequest,
+        response_tx: oneshot::Sender<SyncResponse>,
+    },
+}
 
 /// Network service handle
 pub struct NetworkService {
@@ -24,9 +50,12 @@ pub struct NetworkService {
     local_peer_id: PeerId,
     /// Connected peers
     peers: Arc<RwLock<HashSet<PeerId>>>,
-    /// Message sender
-    message_tx: mpsc::Sender<NetworkMessage>,
+    /// Command sender
+    command_tx: mpsc::Sender<NetworkCommand>,
+    /// Pending sync requests
+    pending_requests: Arc<RwLock<HashMap<OutboundRequestId, oneshot::Sender<Result<SyncResponse>>>>>,
     /// Configuration
+    #[allow(dead_code)]
     config: NetworkConfig,
 }
 
@@ -34,7 +63,7 @@ impl NetworkService {
     /// Create and start the network service
     pub async fn start(
         config: NetworkConfig,
-    ) -> Result<(Self, mpsc::Receiver<NetworkMessage>)> {
+    ) -> Result<(Self, mpsc::Receiver<NetworkMessage>, mpsc::Receiver<SyncEvent>)> {
         // Generate or load keypair
         let local_key = if let Some(secret) = &config.secret_key {
             let mut secret_bytes = secret.clone();
@@ -80,12 +109,20 @@ impl NetworkService {
         // Create ping
         let ping = ping::Behaviour::new(ping::Config::new());
 
+        // Create sync request-response
+        let sync = request_response::Behaviour::new(
+            [(SYNC_PROTOCOL, ProtocolSupport::Full)],
+            request_response::Config::default()
+                .with_request_timeout(Duration::from_secs(30)),
+        );
+
         // Create behaviour
         let behaviour = QfcBehaviour {
             gossipsub,
             kademlia,
             identify,
             ping,
+            sync,
         };
 
         // Create swarm
@@ -126,11 +163,18 @@ impl NetworkService {
         }
 
         let peers = Arc::new(RwLock::new(HashSet::new()));
+        let pending_requests: Arc<RwLock<HashMap<OutboundRequestId, oneshot::Sender<Result<SyncResponse>>>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+
         let (message_tx, message_rx) = mpsc::channel(1000);
-        let (internal_tx, mut internal_rx) = mpsc::channel::<NetworkMessage>(100);
+        let (sync_event_tx, sync_event_rx) = mpsc::channel(100);
+        let (command_tx, mut command_rx) = mpsc::channel::<NetworkCommand>(100);
+        let (swarm_response_tx, mut swarm_response_rx) =
+            mpsc::channel::<(request_response::ResponseChannel<SyncResponse>, SyncResponse)>(100);
 
         let peers_clone = Arc::clone(&peers);
-        let message_tx_clone = message_tx.clone();
+        let pending_clone = Arc::clone(&pending_requests);
+        let swarm_response_tx_clone = swarm_response_tx.clone();
 
         // Spawn the swarm event loop
         tokio::spawn(async move {
@@ -158,8 +202,48 @@ impl NetworkService {
                                     }
                                 };
 
-                                if let Err(e) = message_tx_clone.send(network_msg).await {
+                                if let Err(e) = message_tx.send(network_msg).await {
                                     warn!("Failed to forward message: {}", e);
+                                }
+                            }
+                            SwarmEvent::Behaviour(QfcBehaviourEvent::Sync(request_response::Event::Message { peer, message, .. })) => {
+                                match message {
+                                    request_response::Message::Request { request, channel, .. } => {
+                                        debug!("Received sync request from {}: {:?}", peer, request);
+                                        // Create a channel for the response
+                                        let (tx, rx) = oneshot::channel();
+                                        let event = SyncEvent::Request {
+                                            peer_id: peer,
+                                            request,
+                                            response_tx: tx,
+                                        };
+                                        let swarm_response_tx = swarm_response_tx_clone.clone();
+                                        if let Err(e) = sync_event_tx.send(event).await {
+                                            warn!("Failed to forward sync request: {}", e);
+                                        } else {
+                                            // Wait for response and send it back
+                                            tokio::spawn(async move {
+                                                if let Ok(response) = rx.await {
+                                                    if swarm_response_tx.send((channel, response)).await.is_err() {
+                                                        warn!("Failed to queue sync response");
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    }
+                                    request_response::Message::Response { request_id, response } => {
+                                        debug!("Received sync response from {}: {:?}", peer, response);
+                                        // Complete the pending request
+                                        if let Some(tx) = pending_clone.write().remove(&request_id) {
+                                            let _ = tx.send(Ok(response));
+                                        }
+                                    }
+                                }
+                            }
+                            SwarmEvent::Behaviour(QfcBehaviourEvent::Sync(request_response::Event::OutboundFailure { request_id, error, .. })) => {
+                                warn!("Sync request failed: {:?}", error);
+                                if let Some(tx) = pending_clone.write().remove(&request_id) {
+                                    let _ = tx.send(Err(NetworkError::Protocol(format!("{:?}", error))));
                                 }
                             }
                             SwarmEvent::Behaviour(QfcBehaviourEvent::Identify(identify::Event::Received { peer_id, info, .. })) => {
@@ -186,18 +270,31 @@ impl NetworkService {
                             _ => {}
                         }
                     }
-                    Some(msg) = internal_rx.recv() => {
-                        // Publish message to appropriate topic
-                        let (topic, data) = match msg {
-                            NetworkMessage::NewBlock(data) => (topics::NEW_BLOCKS, data),
-                            NetworkMessage::NewTransaction(data) => (topics::NEW_TRANSACTIONS, data),
-                            NetworkMessage::Vote(data) => (topics::CONSENSUS_VOTES, data),
-                            NetworkMessage::ValidatorMsg(data) => (topics::VALIDATOR_MESSAGES, data),
-                        };
+                    Some(cmd) = command_rx.recv() => {
+                        match cmd {
+                            NetworkCommand::Broadcast(msg) => {
+                                let (topic, data) = match msg {
+                                    NetworkMessage::NewBlock(data) => (topics::NEW_BLOCKS, data),
+                                    NetworkMessage::NewTransaction(data) => (topics::NEW_TRANSACTIONS, data),
+                                    NetworkMessage::Vote(data) => (topics::CONSENSUS_VOTES, data),
+                                    NetworkMessage::ValidatorMsg(data) => (topics::VALIDATOR_MESSAGES, data),
+                                };
 
-                        let topic = IdentTopic::new(topic);
-                        if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic, data) {
-                            warn!("Failed to publish message: {}", e);
+                                let topic = IdentTopic::new(topic);
+                                if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic, data) {
+                                    warn!("Failed to publish message: {}", e);
+                                }
+                            }
+                            NetworkCommand::SyncRequest { peer_id, request, response_tx } => {
+                                let request_id = swarm.behaviour_mut().sync.send_request(&peer_id, request);
+                                pending_clone.write().insert(request_id, response_tx);
+                            }
+                        }
+                    }
+                    Some((channel, response)) = swarm_response_rx.recv() => {
+                        // Send sync response back to peer
+                        if swarm.behaviour_mut().sync.send_response(channel, response).is_err() {
+                            warn!("Failed to send sync response");
                         }
                     }
                 }
@@ -207,11 +304,12 @@ impl NetworkService {
         let service = NetworkService {
             local_peer_id,
             peers,
-            message_tx: internal_tx,
+            command_tx,
+            pending_requests,
             config,
         };
 
-        Ok((service, message_rx))
+        Ok((service, message_rx, sync_event_rx))
     }
 
     /// Get local peer ID
@@ -231,25 +329,86 @@ impl NetworkService {
 
     /// Broadcast a new block
     pub async fn broadcast_block(&self, block_data: Vec<u8>) -> Result<()> {
-        self.message_tx
-            .send(NetworkMessage::NewBlock(block_data))
+        self.command_tx
+            .send(NetworkCommand::Broadcast(NetworkMessage::NewBlock(block_data)))
             .await
             .map_err(|e| NetworkError::Protocol(e.to_string()))
     }
 
     /// Broadcast a new transaction
     pub async fn broadcast_transaction(&self, tx_data: Vec<u8>) -> Result<()> {
-        self.message_tx
-            .send(NetworkMessage::NewTransaction(tx_data))
+        self.command_tx
+            .send(NetworkCommand::Broadcast(NetworkMessage::NewTransaction(tx_data)))
             .await
             .map_err(|e| NetworkError::Protocol(e.to_string()))
     }
 
     /// Broadcast a vote
     pub async fn broadcast_vote(&self, vote_data: Vec<u8>) -> Result<()> {
-        self.message_tx
-            .send(NetworkMessage::Vote(vote_data))
+        self.command_tx
+            .send(NetworkCommand::Broadcast(NetworkMessage::Vote(vote_data)))
             .await
             .map_err(|e| NetworkError::Protocol(e.to_string()))
     }
+
+    /// Request a block by hash from a peer
+    pub async fn request_block_by_hash(&self, peer_id: PeerId, hash: qfc_types::Hash) -> Result<SyncResponse> {
+        let (tx, rx) = oneshot::channel();
+        self.command_tx
+            .send(NetworkCommand::SyncRequest {
+                peer_id,
+                request: SyncRequest::GetBlockByHash(hash),
+                response_tx: tx,
+            })
+            .await
+            .map_err(|e| NetworkError::Protocol(e.to_string()))?;
+
+        rx.await.map_err(|_| NetworkError::Protocol("Request cancelled".to_string()))?
+    }
+
+    /// Request a block by number from a peer
+    pub async fn request_block_by_number(&self, peer_id: PeerId, number: u64) -> Result<SyncResponse> {
+        let (tx, rx) = oneshot::channel();
+        self.command_tx
+            .send(NetworkCommand::SyncRequest {
+                peer_id,
+                request: SyncRequest::GetBlockByNumber(number),
+                response_tx: tx,
+            })
+            .await
+            .map_err(|e| NetworkError::Protocol(e.to_string()))?;
+
+        rx.await.map_err(|_| NetworkError::Protocol("Request cancelled".to_string()))?
+    }
+
+    /// Request a range of blocks from a peer
+    pub async fn request_block_range(&self, peer_id: PeerId, start: u64, end: u64) -> Result<SyncResponse> {
+        let (tx, rx) = oneshot::channel();
+        self.command_tx
+            .send(NetworkCommand::SyncRequest {
+                peer_id,
+                request: SyncRequest::GetBlockRange { start, end },
+                response_tx: tx,
+            })
+            .await
+            .map_err(|e| NetworkError::Protocol(e.to_string()))?;
+
+        rx.await.map_err(|_| NetworkError::Protocol("Request cancelled".to_string()))?
+    }
+
+    /// Request status from a peer
+    pub async fn request_status(&self, peer_id: PeerId) -> Result<SyncResponse> {
+        let (tx, rx) = oneshot::channel();
+        self.command_tx
+            .send(NetworkCommand::SyncRequest {
+                peer_id,
+                request: SyncRequest::GetStatus,
+                response_tx: tx,
+            })
+            .await
+            .map_err(|e| NetworkError::Protocol(e.to_string()))?;
+
+        rx.await.map_err(|_| NetworkError::Protocol("Request cancelled".to_string()))?
+    }
+
 }

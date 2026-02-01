@@ -204,7 +204,7 @@ async fn main() -> Result<()> {
         }
 
         match NetworkService::start(network_config).await {
-            Ok((service, mut message_rx)) => {
+            Ok((service, mut message_rx, mut sync_event_rx)) => {
                 info!("P2P network started, peer ID: {}", service.local_peer_id());
                 let service = Arc::new(service);
 
@@ -212,11 +212,21 @@ async fn main() -> Result<()> {
                 let sync_manager = SyncManager::new(
                     chain.clone(),
                     mempool.clone(),
+                    service.clone(),
                 );
+                let sync_manager_clone = sync_manager.clone();
 
+                // Handle incoming gossip messages
                 tokio::spawn(async move {
                     while let Some(msg) = message_rx.recv().await {
                         sync_manager.handle_message(msg).await;
+                    }
+                });
+
+                // Handle sync requests
+                tokio::spawn(async move {
+                    while let Some(event) = sync_event_rx.recv().await {
+                        sync_manager_clone.handle_sync_event(event).await;
                     }
                 });
 
