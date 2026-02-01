@@ -451,8 +451,27 @@ impl EthApiServer for RpcServer {
 #[async_trait::async_trait]
 impl QfcApiServer for RpcServer {
     async fn get_validators(&self) -> RpcResult<Vec<RpcValidator>> {
-        // TODO: Implement
-        Ok(Vec::new())
+        let validators = self.chain.get_validators();
+        let state = self.chain.state();
+
+        let rpc_validators: Vec<RpcValidator> = validators
+            .iter()
+            .map(|v| {
+                // Get additional info from state
+                let stake = state.get_stake(&v.address).unwrap_or_default();
+                let score = state.get_contribution_score(&v.address).unwrap_or(0);
+
+                RpcValidator {
+                    address: v.address.to_string(),
+                    stake: format!("0x{:x}", stake.0),
+                    contribution_score: format!("0x{:x}", score),
+                    uptime: format!("0x{:x}", v.uptime),
+                    is_active: v.is_active(),
+                }
+            })
+            .collect();
+
+        Ok(rpc_validators)
     }
 
     async fn get_contribution_score(&self, address: String) -> RpcResult<String> {
@@ -476,25 +495,33 @@ impl QfcApiServer for RpcServer {
     }
 
     async fn get_epoch(&self) -> RpcResult<RpcEpoch> {
-        // TODO: Implement
+        let epoch = self.chain.get_epoch();
         Ok(RpcEpoch {
-            number: "0x0".to_string(),
-            start_time: "0x0".to_string(),
-            duration_ms: "0x2710".to_string(), // 10000ms
+            number: format!("0x{:x}", epoch.number),
+            start_time: format!("0x{:x}", epoch.start_time),
+            duration_ms: format!("0x{:x}", 10000u64), // 10 seconds
         })
     }
 
     async fn get_finalized_block(&self) -> RpcResult<String> {
-        Ok(format!("0x{:x}", self.chain.block_number()))
+        Ok(format!("0x{:x}", self.chain.finalized_height()))
     }
 
     async fn node_info(&self) -> RpcResult<RpcNodeInfo> {
+        let peer_count = if let Some(network) = &self.network {
+            network.peer_count() as u64
+        } else {
+            0
+        };
+
+        let is_validator = self.chain.consensus().is_validator();
+
         Ok(RpcNodeInfo {
-            version: "0.1.0".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
             chain_id: format!("0x{:x}", self.chain_id),
-            peer_count: 0,
-            is_validator: false,
-            syncing: false,
+            peer_count,
+            is_validator,
+            syncing: false, // TODO: Implement sync status
         })
     }
 }

@@ -9,7 +9,7 @@ use qfc_executor::Executor;
 use qfc_state::StateDB;
 use qfc_storage::{cf, encode_block_number, Database, WriteBatch};
 use qfc_types::{
-    Address, Block, BlockBody, BlockHeader, Hash, Receipt, SealedBlock, Signature,
+    Address, Block, BlockBody, BlockHeader, Epoch, Hash, Receipt, SealedBlock, Signature,
     Transaction, TransactionType, U256, ValidatorNode,
 };
 use std::sync::Arc;
@@ -422,6 +422,26 @@ impl Chain {
     /// Get the database
     pub fn db(&self) -> &Database {
         &self.db
+    }
+
+    /// Get the consensus engine
+    pub fn consensus(&self) -> &ConsensusEngine {
+        &self.consensus
+    }
+
+    /// Get current validators
+    pub fn get_validators(&self) -> Vec<ValidatorNode> {
+        self.consensus.get_validators()
+    }
+
+    /// Get current epoch
+    pub fn get_epoch(&self) -> Epoch {
+        self.consensus.get_epoch()
+    }
+
+    /// Get finalized block height
+    pub fn finalized_height(&self) -> u64 {
+        self.consensus.finalized_height()
     }
 
     /// Store a block that we produced (skip validation since we created it)

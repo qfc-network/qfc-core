@@ -95,6 +95,16 @@ impl ConsensusEngine {
         *self.validators.write() = validators;
     }
 
+    /// Get current validators
+    pub fn get_validators(&self) -> Vec<ValidatorNode> {
+        self.validators.read().clone()
+    }
+
+    /// Get current epoch
+    pub fn get_epoch(&self) -> Epoch {
+        self.current_epoch.read().clone()
+    }
+
     /// Start a new epoch
     pub fn start_epoch(&self, epoch_number: u64, seed: [u8; 32]) {
         let now = SystemTime::now()
