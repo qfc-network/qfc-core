@@ -72,6 +72,29 @@ impl GenesisConfig {
             );
         }
 
+        // Dev validator accounts (with known private keys)
+        // Key [0x42; 32] -> 0x10d7812fbe50096ae82569fdad35f79628bc0084
+        // Key [0x43; 32] -> 0xfd3dabd401f1b94789d89ce947be9345cfbf44c3
+        // Key [0x44; 32] -> 0xb6d2be7dc3b62c39e5c5a6b744076e9c4dffb552
+        alloc.insert(
+            "0x10d7812fbe50096ae82569fdad35f79628bc0084".to_string(),
+            GenesisAllocation {
+                balance: "1000000000000000000000000000".to_string(), // 1B QFC
+            },
+        );
+        alloc.insert(
+            "0xfd3dabd401f1b94789d89ce947be9345cfbf44c3".to_string(),
+            GenesisAllocation {
+                balance: "1000000000000000000000000000".to_string(), // 1B QFC
+            },
+        );
+        alloc.insert(
+            "0xb6d2be7dc3b62c39e5c5a6b744076e9c4dffb552".to_string(),
+            GenesisAllocation {
+                balance: "1000000000000000000000000000".to_string(), // 1B QFC
+            },
+        );
+
         // Dev validators (deterministic keys for testing)
         // Key [0x42; 32] -> 0x10d7812fbe50096ae82569fdad35f79628bc0084
         // Key [0x43; 32] -> 0xfd3dabd401f1b94789d89ce947be9345cfbf44c3
