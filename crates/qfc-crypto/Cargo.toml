@@ -19,3 +19,8 @@ borsh.workspace = true
 hex.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "crypto_bench"
+harness = false

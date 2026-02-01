@@ -19,3 +19,8 @@ tracing.workspace = true
 [dev-dependencies]
 tempfile = "3.9"
 qfc-storage.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "executor_bench"
+harness = false
