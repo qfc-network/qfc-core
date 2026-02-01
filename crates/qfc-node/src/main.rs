@@ -164,26 +164,8 @@ async fn main() -> Result<()> {
     // Create mempool
     let mempool = Arc::new(RwLock::new(Mempool::new(MempoolConfig::default())));
 
-    // Start RPC server
-    let _rpc_handle = if args.rpc {
-        let rpc_config = RpcConfig {
-            http_addr: args.rpc_addr,
-            http_enabled: true,
-        };
-
-        let rpc_server = RpcServer::new(chain.clone(), mempool.clone(), args.chain_id);
-        let handle = rpc_server
-            .start(rpc_config)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to start RPC server: {}", e))?;
-        info!("RPC server started on {}", args.rpc_addr);
-        Some(handle)
-    } else {
-        None
-    };
-
-    // Start P2P network
-    let _network_service = if !args.no_network {
+    // Start P2P network first (so we can pass it to RPC server)
+    let network_service: Option<Arc<NetworkService>> = if !args.no_network {
         let mut network_config = if args.dev {
             NetworkConfig::dev()
         } else {
@@ -241,6 +223,30 @@ async fn main() -> Result<()> {
         info!("P2P networking disabled");
         None
     };
+
+    // Start RPC server (with network for transaction broadcasting)
+    let _rpc_handle = if args.rpc {
+        let rpc_config = RpcConfig {
+            http_addr: args.rpc_addr,
+            http_enabled: true,
+        };
+
+        let mut rpc_server = RpcServer::new(chain.clone(), mempool.clone(), args.chain_id);
+        if let Some(ref network) = network_service {
+            rpc_server = rpc_server.with_network(network.clone());
+        }
+        let handle = rpc_server
+            .start(rpc_config)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to start RPC server: {}", e))?;
+        info!("RPC server started on {}", args.rpc_addr);
+        Some(handle)
+    } else {
+        None
+    };
+
+    // Keep network service alive
+    let _network_service = network_service;
 
     // Start block producer if we're a validator or in dev mode
     let is_validator = consensus.is_validator();

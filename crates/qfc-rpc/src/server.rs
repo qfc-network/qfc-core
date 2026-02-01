@@ -10,10 +10,11 @@ use parking_lot::RwLock;
 use qfc_chain::Chain;
 use qfc_crypto::blake3_hash;
 use qfc_mempool::Mempool;
+use qfc_network::NetworkService;
 use qfc_types::{Address, Hash, Transaction, U256};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// RPC server configuration
 #[derive(Clone, Debug)]
@@ -40,6 +41,8 @@ pub struct RpcServer {
     chain: Arc<Chain>,
     /// Mempool
     mempool: Arc<RwLock<Mempool>>,
+    /// Network service (optional, for broadcasting)
+    network: Option<Arc<NetworkService>>,
     /// Chain ID
     chain_id: u64,
 }
@@ -50,8 +53,15 @@ impl RpcServer {
         Self {
             chain,
             mempool,
+            network: None,
             chain_id,
         }
+    }
+
+    /// Set the network service for transaction broadcasting
+    pub fn with_network(mut self, network: Arc<NetworkService>) -> Self {
+        self.network = Some(network);
+        self
     }
 
     /// Start the RPC server
@@ -256,8 +266,8 @@ impl EthApiServer for RpcServer {
     }
 
     async fn send_raw_transaction(&self, data: String) -> RpcResult<String> {
-        let data = data.strip_prefix("0x").unwrap_or(&data);
-        let bytes = hex::decode(data).map_err(|e| RpcError::InvalidParams(e.to_string()))?;
+        let data_str = data.strip_prefix("0x").unwrap_or(&data);
+        let bytes = hex::decode(data_str).map_err(|e| RpcError::InvalidParams(e.to_string()))?;
 
         let tx =
             Transaction::from_bytes(&bytes).map_err(|e| RpcError::InvalidParams(e.to_string()))?;
@@ -271,10 +281,20 @@ impl EthApiServer for RpcServer {
         // Add to mempool
         self.mempool
             .write()
-            .add(tx, sender)
+            .add(tx.clone(), sender)
             .map_err(|e| RpcError::Execution(e.to_string()))?;
 
-        debug!("Added transaction {} to mempool", hash);
+        info!("Added transaction {} to mempool from {}", hash, sender);
+
+        // Broadcast to network if available
+        if let Some(network) = &self.network {
+            let tx_bytes = tx.to_bytes();
+            if let Err(e) = network.broadcast_transaction(tx_bytes).await {
+                warn!("Failed to broadcast transaction: {}", e);
+            } else {
+                debug!("Broadcast transaction {} to network", hash);
+            }
+        }
 
         Ok(hash.to_string())
     }

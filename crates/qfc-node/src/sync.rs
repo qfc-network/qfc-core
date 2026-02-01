@@ -307,11 +307,40 @@ impl SyncManager {
 
     /// Handle an incoming transaction
     async fn handle_transaction(&self, data: Vec<u8>) {
-        // TODO: Transactions need sender public key for verification
-        debug!(
-            "Received transaction ({} bytes) - pending sender verification",
-            data.len()
-        );
+        // Parse transaction
+        let tx = match qfc_types::Transaction::from_bytes(&data) {
+            Ok(t) => t,
+            Err(e) => {
+                warn!("Failed to decode transaction: {}", e);
+                return;
+            }
+        };
+
+        let tx_hash = blake3_hash(&tx.to_bytes_without_signature());
+
+        // Derive sender from signature (placeholder - proper verification would use public key recovery)
+        let sender_hash = blake3_hash(tx.signature.as_bytes());
+        let sender = match qfc_types::Address::from_slice(&sender_hash.as_bytes()[12..32]) {
+            Some(addr) => addr,
+            None => {
+                warn!("Failed to derive sender address");
+                return;
+            }
+        };
+
+        // Add to mempool
+        match self.mempool.write().add(tx, sender) {
+            Ok(_) => {
+                info!(
+                    "Added transaction {} from network (sender: {})",
+                    hex::encode(&tx_hash.as_bytes()[..8]),
+                    sender
+                );
+            }
+            Err(e) => {
+                debug!("Failed to add transaction to mempool: {}", e);
+            }
+        }
     }
 
     /// Handle an incoming vote

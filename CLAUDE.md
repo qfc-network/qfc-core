@@ -96,7 +96,11 @@ Proof of Contribution (PoC) - 多维度贡献评分:
   - [x] 区块同步响应处理
   - [x] 初始同步 (sync from genesis)
   - [x] 创世验证者注册
+  - [x] 交易广播与同步
 - [ ] Phase 3: 完整功能 (生产就绪)
+  - [ ] eth_call / eth_estimateGas 实现
+  - [ ] 多验证者测试
+  - [ ] 集成测试
 
 ## 设计文档
 

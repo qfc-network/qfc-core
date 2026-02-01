@@ -24,3 +24,5 @@ Thumbs.db
 # Environment
 .env
 .env.*
+data1/
+data2/
