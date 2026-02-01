@@ -18,6 +18,7 @@ qfc-storage.workspace = true
 qfc-state.workspace = true
 qfc-chain.workspace = true
 qfc-consensus.workspace = true
+qfc-executor.workspace = true
 qfc-mempool.workspace = true
 qfc-network.workspace = true
 qfc-rpc.workspace = true

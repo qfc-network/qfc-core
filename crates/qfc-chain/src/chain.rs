@@ -394,6 +394,46 @@ impl Chain {
     pub fn db(&self) -> &Database {
         &self.db
     }
+
+    /// Store a block that we produced (skip validation since we created it)
+    pub fn store_produced_block(&self, block: &Block, receipts: &[Receipt]) -> Result<()> {
+        let block_hash = blake3_hash(&block.header_bytes());
+
+        // Store block
+        self.store_block(block)?;
+
+        // Store receipts
+        for receipt in receipts {
+            self.db.put(
+                cf::RECEIPTS,
+                receipt.tx_hash.as_bytes(),
+                &borsh::to_vec(receipt).unwrap(),
+            )?;
+        }
+
+        // Update head
+        *self.head.write() = Some(SealedBlock::new(block_hash, block.clone()));
+
+        // Update metadata
+        self.db.put(
+            cf::METADATA,
+            qfc_storage::meta::LATEST_BLOCK_NUMBER,
+            &block.number().to_le_bytes(),
+        )?;
+        self.db.put(
+            cf::METADATA,
+            qfc_storage::meta::LATEST_STATE_ROOT,
+            block.state_root().as_bytes(),
+        )?;
+
+        debug!(
+            "Stored produced block {} at height {}",
+            block_hash,
+            block.number()
+        );
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]

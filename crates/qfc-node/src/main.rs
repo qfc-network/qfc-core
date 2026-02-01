@@ -2,16 +2,19 @@
 //!
 //! Main entry point for running a QFC node.
 
+mod producer;
+
 use anyhow::Result;
 use clap::Parser;
 use parking_lot::RwLock;
+use producer::{BlockProducer, ProducerConfig};
 use qfc_chain::{Chain, ChainConfig, GenesisConfig};
 use qfc_consensus::{ConsensusConfig, ConsensusEngine};
 use qfc_crypto::VrfKeypair;
 use qfc_mempool::{Mempool, MempoolConfig};
 use qfc_rpc::{RpcConfig, RpcServer};
 use qfc_storage::{Database, StorageConfig};
-use qfc_types::{Address, DEFAULT_CHAIN_ID};
+use qfc_types::DEFAULT_CHAIN_ID;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -102,6 +105,7 @@ async fn main() -> Result<()> {
     // Create consensus engine
     let consensus_config = ConsensusConfig::default();
     let consensus = if let Some(validator_key_hex) = &args.validator {
+        // Explicit validator key provided
         let key_bytes: [u8; 32] = hex::decode(validator_key_hex)?
             .try_into()
             .map_err(|_| anyhow::anyhow!("Invalid validator key length"))?;
@@ -110,6 +114,18 @@ async fn main() -> Result<()> {
         let address = qfc_crypto::address_from_public_key(&vrf_key.public_key());
 
         info!("Running as validator: {}", address);
+        Arc::new(ConsensusEngine::new_validator(
+            consensus_config,
+            vrf_key,
+            address,
+        ))
+    } else if args.dev {
+        // Dev mode: generate a deterministic validator key
+        let dev_secret = [0x42u8; 32]; // Deterministic dev key
+        let vrf_key = VrfKeypair::from_secret_bytes(&dev_secret)?;
+        let address = qfc_crypto::address_from_public_key(&vrf_key.public_key());
+
+        info!("Dev mode validator: {}", address);
         Arc::new(ConsensusEngine::new_validator(
             consensus_config,
             vrf_key,
@@ -148,6 +164,28 @@ async fn main() -> Result<()> {
         info!("RPC server started on {}", args.rpc_addr);
     }
 
+    // Start block producer if we're a validator or in dev mode
+    let is_validator = consensus.is_validator();
+    if is_validator {
+        let producer_config = ProducerConfig {
+            block_interval_ms: if args.dev { 3000 } else { 5000 },
+            produce_empty_blocks: args.dev, // Only produce empty blocks in dev mode
+            ..Default::default()
+        };
+
+        let producer = BlockProducer::new(
+            chain.clone(),
+            consensus.clone(),
+            mempool.clone(),
+            producer_config,
+            args.chain_id,
+        );
+
+        tokio::spawn(async move {
+            producer.start().await;
+        });
+    }
+
     // Print startup info
     info!("===========================================");
     info!("QFC Node is running!");
@@ -156,6 +194,9 @@ async fn main() -> Result<()> {
     info!("Current block: {}", chain.block_number());
     if args.rpc {
         info!("RPC endpoint: http://{}", args.rpc_addr);
+    }
+    if is_validator {
+        info!("Block producer: ACTIVE");
     }
     info!("===========================================");
 
