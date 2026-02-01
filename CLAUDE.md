@@ -105,6 +105,20 @@ Proof of Contribution (PoC) - 多维度贡献评分:
   - [x] eth_call / eth_estimateGas 实现
   - [x] 多验证者测试 (3节点测试网)
   - [x] 集成测试
+  - [x] 多维度 PoC 评分集成 (7维权重计算)
+  - [x] VRF 证明验证 (区块验证安全性)
+  - [x] 交易位置索引 (block_height, tx_index)
+  - [x] 区块签名存储 (BlockBody)
+  - [x] 同步状态报告 (SyncStatusProvider trait)
+  - [x] Ed25519 公钥派生发送者地址
+
+### 待实现功能
+
+- [ ] 投票处理 (finality votes)
+- [ ] 验证者消息处理
+- [ ] 智能合约 VM (EVM/WASM)
+- [ ] 状态剪枝 (state pruning)
+- [ ] 快照同步 (snap sync)
 
 ## 设计文档
 
