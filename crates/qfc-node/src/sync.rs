@@ -6,6 +6,7 @@ use qfc_chain::Chain;
 use qfc_crypto::blake3_hash;
 use qfc_mempool::Mempool;
 use qfc_network::{NetworkMessage, NetworkService, SyncEvent, SyncRequest, SyncResponse};
+use qfc_rpc::SyncStatusProvider;
 use qfc_types::{Block, Hash};
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
@@ -13,6 +14,18 @@ use tracing::{debug, error, info, warn};
 
 /// Maximum number of blocks to request at once
 const MAX_BLOCKS_PER_REQUEST: u64 = 32;
+
+/// Sync state information
+#[derive(Clone, Debug, Default)]
+#[allow(dead_code)]
+pub struct SyncState {
+    /// Highest block number known from peers
+    pub highest_peer_block: u64,
+    /// Whether we're actively syncing
+    pub is_syncing: bool,
+    /// Number of pending blocks waiting for parents
+    pub pending_count: usize,
+}
 
 /// Sync manager handles incoming blocks and transactions from the network
 #[derive(Clone)]
@@ -25,6 +38,8 @@ pub struct SyncManager {
     pending_blocks: Arc<RwLock<VecDeque<Block>>>,
     /// Hashes we've already requested
     requested_hashes: Arc<RwLock<HashSet<Hash>>>,
+    /// Highest known block from peers
+    highest_peer_block: Arc<RwLock<u64>>,
 }
 
 impl SyncManager {
@@ -40,6 +55,40 @@ impl SyncManager {
             network,
             pending_blocks: Arc::new(RwLock::new(VecDeque::new())),
             requested_hashes: Arc::new(RwLock::new(HashSet::new())),
+            highest_peer_block: Arc::new(RwLock::new(0)),
+        }
+    }
+
+    /// Get the current sync state
+    pub fn sync_state(&self) -> SyncState {
+        let highest_peer = *self.highest_peer_block.read();
+        let our_height = self.chain.block_number();
+        let pending_count = self.pending_blocks.read().len();
+
+        // We're syncing if we're more than 2 blocks behind the highest known peer
+        // and we have pending blocks or requested hashes
+        let is_syncing = highest_peer > 0
+            && our_height + 2 < highest_peer
+            && (pending_count > 0 || !self.requested_hashes.read().is_empty());
+
+        SyncState {
+            highest_peer_block: highest_peer,
+            is_syncing,
+            pending_count,
+        }
+    }
+
+    /// Check if we're currently syncing
+    #[allow(dead_code)]
+    pub fn is_syncing(&self) -> bool {
+        self.sync_state().is_syncing
+    }
+
+    /// Update highest known peer block
+    pub fn update_peer_height(&self, height: u64) {
+        let mut highest = self.highest_peer_block.write();
+        if height > *highest {
+            *highest = height;
         }
     }
 
@@ -159,6 +208,9 @@ impl SyncManager {
             block_number,
             hex::encode(&block_hash.as_bytes()[..8])
         );
+
+        // Update highest known peer block
+        self.update_peer_height(block_number);
 
         // Try to import the block
         match self.chain.import_block(block.clone()) {
@@ -438,5 +490,19 @@ impl SyncManager {
                 }
             }
         }
+    }
+}
+
+impl SyncStatusProvider for SyncManager {
+    fn is_syncing(&self) -> bool {
+        self.sync_state().is_syncing
+    }
+
+    fn highest_peer_block(&self) -> u64 {
+        *self.highest_peer_block.read()
+    }
+
+    fn pending_count(&self) -> usize {
+        self.pending_blocks.read().len()
     }
 }

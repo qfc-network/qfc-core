@@ -165,7 +165,7 @@ async fn main() -> Result<()> {
     let mempool = Arc::new(RwLock::new(Mempool::new(MempoolConfig::default())));
 
     // Start P2P network first (so we can pass it to RPC server)
-    let network_service: Option<Arc<NetworkService>> = if !args.no_network {
+    let network_result: Option<(Arc<NetworkService>, Arc<SyncManager>)> = if !args.no_network {
         let mut network_config = if args.dev {
             NetworkConfig::dev()
         } else {
@@ -191,28 +191,29 @@ async fn main() -> Result<()> {
                 let service = Arc::new(service);
 
                 // Start sync manager
-                let sync_manager = SyncManager::new(
+                let sync_manager = Arc::new(SyncManager::new(
                     chain.clone(),
                     mempool.clone(),
                     service.clone(),
-                );
-                let sync_manager_clone = sync_manager.clone();
+                ));
+                let sync_manager_for_messages = sync_manager.clone();
+                let sync_manager_for_events = sync_manager.clone();
 
                 // Handle incoming gossip messages
                 tokio::spawn(async move {
                     while let Some(msg) = message_rx.recv().await {
-                        sync_manager.handle_message(msg).await;
+                        sync_manager_for_messages.handle_message(msg).await;
                     }
                 });
 
                 // Handle sync requests
                 tokio::spawn(async move {
                     while let Some(event) = sync_event_rx.recv().await {
-                        sync_manager_clone.handle_sync_event(event).await;
+                        sync_manager_for_events.handle_sync_event(event).await;
                     }
                 });
 
-                Some(service)
+                Some((service, sync_manager))
             }
             Err(e) => {
                 warn!("Failed to start P2P network: {}", e);
@@ -222,6 +223,12 @@ async fn main() -> Result<()> {
     } else {
         info!("P2P networking disabled");
         None
+    };
+
+    // Extract network service and sync manager
+    let (network_service, sync_manager) = match network_result {
+        Some((net, sync)) => (Some(net), Some(sync)),
+        None => (None, None),
     };
 
     // Start RPC server (with network for transaction broadcasting)
@@ -235,6 +242,9 @@ async fn main() -> Result<()> {
         if let Some(ref network) = network_service {
             rpc_server = rpc_server.with_network(network.clone());
         }
+        if let Some(ref sync) = sync_manager {
+            rpc_server = rpc_server.with_sync_status(sync.clone());
+        }
         let handle = rpc_server
             .start(rpc_config)
             .await
@@ -247,6 +257,7 @@ async fn main() -> Result<()> {
 
     // Keep network service alive
     let _network_service = network_service;
+    let _sync_manager = sync_manager;
 
     // Start block producer if we're a validator or in dev mode
     let is_validator = consensus.is_validator();

@@ -29,6 +29,16 @@ pub struct RpcConfig {
     pub http_enabled: bool,
 }
 
+/// Trait for providing sync status to the RPC server
+pub trait SyncStatusProvider: Send + Sync {
+    /// Returns true if the node is currently syncing
+    fn is_syncing(&self) -> bool;
+    /// Returns the highest block number known from peers
+    fn highest_peer_block(&self) -> u64;
+    /// Returns the number of pending blocks waiting for parents
+    fn pending_count(&self) -> usize;
+}
+
 impl Default for RpcConfig {
     fn default() -> Self {
         Self {
@@ -39,7 +49,6 @@ impl Default for RpcConfig {
 }
 
 /// RPC server
-#[derive(Clone)]
 pub struct RpcServer {
     /// Chain
     chain: Arc<Chain>,
@@ -47,8 +56,22 @@ pub struct RpcServer {
     mempool: Arc<RwLock<Mempool>>,
     /// Network service (optional, for broadcasting)
     network: Option<Arc<NetworkService>>,
+    /// Sync status provider (optional)
+    sync_status: Option<Arc<dyn SyncStatusProvider>>,
     /// Chain ID
     chain_id: u64,
+}
+
+impl Clone for RpcServer {
+    fn clone(&self) -> Self {
+        Self {
+            chain: self.chain.clone(),
+            mempool: self.mempool.clone(),
+            network: self.network.clone(),
+            sync_status: self.sync_status.clone(),
+            chain_id: self.chain_id,
+        }
+    }
 }
 
 impl RpcServer {
@@ -58,6 +81,7 @@ impl RpcServer {
             chain,
             mempool,
             network: None,
+            sync_status: None,
             chain_id,
         }
     }
@@ -65,6 +89,12 @@ impl RpcServer {
     /// Set the network service for transaction broadcasting
     pub fn with_network(mut self, network: Arc<NetworkService>) -> Self {
         self.network = Some(network);
+        self
+    }
+
+    /// Set the sync status provider
+    pub fn with_sync_status(mut self, sync_status: Arc<dyn SyncStatusProvider>) -> Self {
+        self.sync_status = Some(sync_status);
         self
     }
 
@@ -548,12 +578,18 @@ impl QfcApiServer for RpcServer {
 
         let is_validator = self.chain.consensus().is_validator();
 
+        let syncing = if let Some(sync_status) = &self.sync_status {
+            sync_status.is_syncing()
+        } else {
+            false
+        };
+
         Ok(RpcNodeInfo {
             version: env!("CARGO_PKG_VERSION").to_string(),
             chain_id: format!("0x{:x}", self.chain_id),
             peer_count,
             is_validator,
-            syncing: false, // TODO: Implement sync status
+            syncing,
         })
     }
 
