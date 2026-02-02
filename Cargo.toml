@@ -13,6 +13,7 @@ members = [
     "crates/qfc-network",
     "crates/qfc-rpc",
     "crates/qfc-node",
+    "crates/qfc-qsc",
 ]
 
 
@@ -75,6 +76,9 @@ criterion = "0.5"
 # Utilities
 hex = "0.4"
 bytes = "1.5"
+string-interner = "0.17"
+ariadne = "0.4"
+pretty_assertions = "1.4"
 parking_lot = "0.12"
 dashmap = "5.5"
 lru = "0.12"
@@ -94,6 +98,7 @@ qfc-chain = { path = "crates/qfc-chain" }
 qfc-network = { path = "crates/qfc-network" }
 qfc-rpc = { path = "crates/qfc-rpc" }
 qfc-node = { path = "crates/qfc-node" }
+qfc-qsc = { path = "crates/qfc-qsc" }
 
 [profile.release]
 lto = true
