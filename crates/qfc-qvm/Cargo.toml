@@ -1,0 +1,35 @@
+[package]
+name = "qfc-qvm"
+description = "QFC Virtual Machine - QuantumScript bytecode execution engine"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Error handling
+thiserror.workspace = true
+anyhow.workspace = true
+
+# Serialization
+serde.workspace = true
+borsh.workspace = true
+
+# Numeric types
+primitive-types.workspace = true
+
+# Crypto
+blake3.workspace = true
+
+# Utilities
+hex.workspace = true
+bytes.workspace = true
+parking_lot.workspace = true
+
+# Internal crates
+qfc-types.workspace = true
+qfc-qsc.workspace = true
+
+[dev-dependencies]
+pretty_assertions = "1.4"

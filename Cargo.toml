@@ -14,6 +14,7 @@ members = [
     "crates/qfc-rpc",
     "crates/qfc-node",
     "crates/qfc-qsc",
+    "crates/qfc-qvm",
 ]
 
 
@@ -99,6 +100,7 @@ qfc-network = { path = "crates/qfc-network" }
 qfc-rpc = { path = "crates/qfc-rpc" }
 qfc-node = { path = "crates/qfc-node" }
 qfc-qsc = { path = "crates/qfc-qsc" }
+qfc-qvm = { path = "crates/qfc-qvm" }
 
 [profile.release]
 lto = true
