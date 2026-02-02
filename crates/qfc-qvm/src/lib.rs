@@ -51,6 +51,7 @@
 pub mod executor;
 pub mod gas;
 pub mod interop;
+pub mod jit;
 pub mod memory;
 pub mod stdlib;
 pub mod value;
@@ -63,6 +64,11 @@ pub use interop::{
 pub use memory::{CallFrame, Heap, Memory, MemoryError, MemoryResult, Stack, Storage};
 pub use stdlib::StdlibRegistry;
 pub use value::{ResourceAbility, Value, ValueRef, ValueType};
+
+// JIT compilation (optional feature)
+pub use jit::{ExecutionMode, JitError, JitResult, JitStats};
+#[cfg(feature = "jit")]
+pub use jit::{CodeGenerator, CompiledFunction, JitCompiler, JitConfig, JitRuntime};
 
 /// QVM version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
