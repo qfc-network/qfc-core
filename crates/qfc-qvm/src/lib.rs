@@ -50,12 +50,16 @@
 
 pub mod executor;
 pub mod gas;
+pub mod interop;
 pub mod memory;
 pub mod stdlib;
 pub mod value;
 
 pub use executor::{ExecutionContext, ExecutionError, ExecutionOutput, ExecutionResult, Executor, Log};
 pub use gas::{GasCosts, GasError, GasMeter, GasResult};
+pub use interop::{
+    CallType, ContractType, CrossVmCall, CrossVmResult, EvmBackend, InteropManager,
+};
 pub use memory::{CallFrame, Heap, Memory, MemoryError, MemoryResult, Stack, Storage};
 pub use stdlib::StdlibRegistry;
 pub use value::{ResourceAbility, Value, ValueRef, ValueType};
