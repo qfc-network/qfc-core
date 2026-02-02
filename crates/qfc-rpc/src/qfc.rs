@@ -104,6 +104,20 @@ pub trait QfcApi {
     /// Get current network state
     #[method(name = "getNetworkState")]
     async fn get_network_state(&self) -> RpcResult<String>;
+
+    /// Request tokens from faucet (dev mode only)
+    /// Returns transaction hash
+    #[method(name = "requestFaucet")]
+    async fn request_faucet(&self, address: String, amount: String) -> RpcResult<RpcFaucetResponse>;
+}
+
+/// Faucet response
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcFaucetResponse {
+    pub tx_hash: String,
+    pub amount: String,
+    pub to: String,
 }
 
 /// Epoch information

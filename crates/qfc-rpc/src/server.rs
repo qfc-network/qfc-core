@@ -3,7 +3,7 @@
 use crate::error::RpcError;
 use crate::eth::EthApiServer;
 use crate::qfc::{
-    QfcApiServer, RpcEpoch, RpcNodeInfo, RpcValidator, RpcValidatorMetrics,
+    QfcApiServer, RpcEpoch, RpcFaucetResponse, RpcNodeInfo, RpcValidator, RpcValidatorMetrics,
     RpcValidatorScoreBreakdown,
 };
 use crate::types::{BlockNumber, BlockTag, CallRequest, RpcBlock, RpcReceipt, RpcTransaction};
@@ -689,5 +689,81 @@ impl QfcApiServer for RpcServer {
             NetworkState::UnderAttack => "under_attack",
         };
         Ok(state_str.to_string())
+    }
+
+    async fn request_faucet(&self, address: String, amount: String) -> RpcResult<RpcFaucetResponse> {
+        // Only allow in dev mode (chain_id 9000)
+        if self.chain_id != 9000 {
+            return Err(RpcError::Execution("Faucet only available in dev mode".to_string()).into());
+        }
+
+        let to_address = Self::parse_address(&address)?;
+
+        // Parse amount (in wei)
+        let amount_str = amount.strip_prefix("0x").unwrap_or(&amount);
+        let amount_value = u128::from_str_radix(amount_str, 16)
+            .or_else(|_| amount_str.parse::<u128>())
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid amount: {}", e)))?;
+
+        // Faucet uses dev validator key [0x42; 32]
+        // Ed25519 address: 0x10d7812fbe50096ae82569fdad35f79628bc0084
+        let faucet_secret_key = [0x42u8; 32];
+        let faucet_keypair = qfc_crypto::Keypair::from_secret_bytes(&faucet_secret_key)
+            .map_err(|e| RpcError::Internal(format!("Failed to create faucet keypair: {}", e)))?;
+        let faucet_public_key = faucet_keypair.public_key();
+        let faucet_address = qfc_crypto::address_from_public_key(&faucet_public_key);
+
+        // Get current nonce for faucet address
+        let nonce = self.chain.state()
+            .get_nonce(&faucet_address)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        // Create transaction
+        let tx = Transaction {
+            tx_type: qfc_types::TransactionType::Transfer,
+            chain_id: self.chain_id,
+            nonce,
+            gas_price: U256::from_u128(1_000_000_000), // 1 Gwei
+            gas_limit: 21000,
+            to: Some(to_address),
+            value: U256::from_u128(amount_value),
+            data: Vec::new(),
+            signature: qfc_types::Signature::ZERO, // Will be set after signing
+            public_key: faucet_public_key,
+        };
+
+        // Sign the transaction hash (not raw bytes)
+        let tx_bytes = tx.to_bytes_without_signature();
+        let tx_hash = blake3_hash(&tx_bytes);
+        let signature = faucet_keypair.sign_hash(&tx_hash);
+
+        let signed_tx = Transaction {
+            signature,
+            ..tx
+        };
+
+        // tx_hash is already computed above
+
+        // Add to mempool
+        self.mempool
+            .write()
+            .add(signed_tx.clone(), faucet_address)
+            .map_err(|e| RpcError::Execution(e.to_string()))?;
+
+        info!("Faucet: sent {} wei to {} (tx: {})", amount_value, to_address, tx_hash);
+
+        // Broadcast to network if available
+        if let Some(network) = &self.network {
+            let tx_bytes = signed_tx.to_bytes();
+            if let Err(e) = network.broadcast_transaction(tx_bytes).await {
+                warn!("Failed to broadcast faucet transaction: {}", e);
+            }
+        }
+
+        Ok(RpcFaucetResponse {
+            tx_hash: tx_hash.to_string(),
+            amount: format!("0x{:x}", amount_value),
+            to: to_address.to_string(),
+        })
     }
 }

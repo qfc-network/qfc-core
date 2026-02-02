@@ -89,6 +89,7 @@ Proof of Contribution (PoC) - 多维度贡献评分:
 - `qfc_getFinalizedBlock` - 最终确认区块
 - `qfc_getNetworkState` - 网络状态 (normal/congested/storage_shortage/under_attack)
 - `qfc_nodeInfo` - 节点信息
+- `qfc_requestFaucet` - 请求测试币 (仅 dev 模式, chain_id=9000)
 
 ## 开发状态
 

@@ -72,7 +72,7 @@ impl GenesisConfig {
             );
         }
 
-        // Dev validator accounts (with known private keys)
+        // Dev validator accounts (Ed25519 derived addresses)
         // Key [0x42; 32] -> 0x10d7812fbe50096ae82569fdad35f79628bc0084
         // Key [0x43; 32] -> 0xfd3dabd401f1b94789d89ce947be9345cfbf44c3
         // Key [0x44; 32] -> 0xb6d2be7dc3b62c39e5c5a6b744076e9c4dffb552
@@ -92,6 +92,15 @@ impl GenesisConfig {
             "0xb6d2be7dc3b62c39e5c5a6b744076e9c4dffb552".to_string(),
             GenesisAllocation {
                 balance: "1000000000000000000000000000".to_string(), // 1B QFC
+            },
+        );
+
+        // Faucet accounts (secp256k1/ethers.js derived addresses for same keys)
+        // Key [0x42; 32] -> 0x17c5185167401eD00cF5F5b2fc97D9BBfDb7D025
+        alloc.insert(
+            "0x17c5185167401eD00cF5F5b2fc97D9BBfDb7D025".to_string(),
+            GenesisAllocation {
+                balance: "1000000000000000000000000000".to_string(), // 1B QFC (faucet)
             },
         );
 

@@ -81,10 +81,19 @@ pub struct RpcBlock {
     pub gas_limit: String,
     pub gas_used: String,
     pub extra_data: String,
+    // Fields required by ethers.js
+    pub difficulty: String,
+    pub total_difficulty: String,
+    pub nonce: String,
+    pub sha3_uncles: String,
+    pub logs_bloom: String,
+    pub size: String,
+    pub base_fee_per_gas: Option<String>,
+    // When full_tx=true, this contains full transaction objects
+    // When full_tx=false, this contains transaction hashes as strings
+    // ethers.js expects this field to always be named "transactions"
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub transactions: Option<Vec<RpcTransaction>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transaction_hashes: Option<Vec<String>>,
+    pub transactions: Option<serde_json::Value>,
 }
 
 impl RpcBlock {
@@ -94,6 +103,9 @@ impl RpcBlock {
             .iter()
             .map(|tx| qfc_crypto::blake3_hash(&tx.to_bytes_without_signature()))
             .collect();
+
+        // Empty bloom filter (256 bytes of zeros)
+        let empty_bloom = "0x".to_string() + &"00".repeat(256);
 
         Self {
             number: format!("0x{:x}", block.number()),
@@ -107,8 +119,16 @@ impl RpcBlock {
             gas_limit: format!("0x{:x}", block.gas_limit()),
             gas_used: format!("0x{:x}", block.gas_used()),
             extra_data: format!("0x{}", hex::encode(&block.header.extra_data)),
-            transactions: if full_tx {
-                Some(
+            // Fields for ethers.js compatibility (PoC doesn't use these)
+            difficulty: "0x0".to_string(),
+            total_difficulty: "0x0".to_string(),
+            nonce: "0x0000000000000000".to_string(),
+            sha3_uncles: "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347".to_string(),
+            logs_bloom: empty_bloom,
+            size: "0x0".to_string(),
+            base_fee_per_gas: Some("0x0".to_string()),
+            transactions: Some(if full_tx {
+                serde_json::to_value(
                     block
                         .transactions
                         .iter()
@@ -117,16 +137,13 @@ impl RpcBlock {
                         .map(|(i, (tx, hash))| {
                             RpcTransaction::from_tx(tx.clone(), *hash, block_hash, block.number(), i as u32)
                         })
-                        .collect(),
-                )
+                        .collect::<Vec<_>>()
+                ).unwrap_or(serde_json::Value::Array(vec![]))
             } else {
-                None
-            },
-            transaction_hashes: if !full_tx {
-                Some(tx_hashes.iter().map(|h| h.to_string()).collect())
-            } else {
-                None
-            },
+                serde_json::to_value(
+                    tx_hashes.iter().map(|h| h.to_string()).collect::<Vec<_>>()
+                ).unwrap_or(serde_json::Value::Array(vec![]))
+            }),
         }
     }
 }
