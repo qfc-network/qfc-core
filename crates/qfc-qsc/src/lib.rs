@@ -47,6 +47,7 @@
 
 pub mod ast;
 pub mod codegen;
+pub mod fmt;
 pub mod lexer;
 pub mod parser;
 pub mod typeck;
@@ -55,6 +56,7 @@ use thiserror::Error;
 
 pub use ast::*;
 pub use codegen::{Codegen, ContractBytecode, FunctionBytecode, Instruction, Opcode};
+pub use fmt::{format, format_with_config, FormatConfig, FormatError, Formatter};
 pub use lexer::{Lexer, LexerError, Span, Token, TokenKind};
 pub use parser::{ParseError, Parser};
 pub use typeck::{TypeChecker, TypeError};

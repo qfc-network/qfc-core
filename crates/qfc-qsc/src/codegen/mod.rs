@@ -27,7 +27,7 @@ pub enum CodegenError {
 pub type CodegenResult<T> = Result<T, CodegenError>;
 
 /// QVM Opcodes
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[repr(u8)]
 pub enum Opcode {
     // Stack operations
@@ -147,7 +147,7 @@ impl From<Opcode> for u8 {
 }
 
 /// Bytecode instruction
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Instruction {
     pub opcode: Opcode,
     pub operand: Option<Vec<u8>>,
@@ -172,7 +172,7 @@ impl Instruction {
 }
 
 /// Function bytecode
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FunctionBytecode {
     pub name: String,
     pub selector: [u8; 4],
@@ -197,7 +197,7 @@ impl FunctionBytecode {
 }
 
 /// Contract bytecode
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ContractBytecode {
     pub name: String,
     pub functions: Vec<FunctionBytecode>,
