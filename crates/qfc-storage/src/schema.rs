@@ -32,6 +32,18 @@ pub mod cf {
     /// Validators: address -> ValidatorNode
     pub const VALIDATORS: &str = "validators";
 
+    /// Rewards: block_height (u64 BE) -> RewardDistribution
+    pub const REWARDS: &str = "rewards";
+
+    /// Delegations: delegator_address + validator_address -> Delegation
+    pub const DELEGATIONS: &str = "delegations";
+
+    /// Undelegations: delegator_address + validator_address + unlock_at -> Undelegation
+    pub const UNDELEGATIONS: &str = "undelegations";
+
+    /// Validator checkpoints: epoch (u64 BE) -> ValidatorCheckpoint
+    pub const CHECKPOINTS: &str = "checkpoints";
+
     /// All column families
     pub const ALL: &[&str] = &[
         BLOCK_HEADERS,
@@ -44,6 +56,10 @@ pub mod cf {
         CODE,
         METADATA,
         VALIDATORS,
+        REWARDS,
+        DELEGATIONS,
+        UNDELEGATIONS,
+        CHECKPOINTS,
     ];
 }
 

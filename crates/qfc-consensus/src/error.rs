@@ -42,6 +42,12 @@ pub enum ConsensusError {
 
     #[error("Network error: {0}")]
     Network(String),
+
+    #[error("Storage error: {0}")]
+    StorageError(String),
+
+    #[error("Double sign detected")]
+    DoubleSign,
 }
 
 pub type Result<T> = std::result::Result<T, ConsensusError>;

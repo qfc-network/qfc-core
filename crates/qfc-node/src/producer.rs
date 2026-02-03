@@ -7,7 +7,12 @@ use qfc_crypto::blake3_hash;
 use qfc_executor::Executor;
 use qfc_mempool::Mempool;
 use qfc_network::NetworkService;
-use qfc_types::{Heartbeat, Transaction, ValidatorMessage};
+use qfc_storage;
+use qfc_types::{
+    block_reward_for_year, DoubleSignEvidence, Heartbeat, RewardDistribution,
+    Transaction, ValidatorMessage, U256, BLOCK_TIME_MS, FEE_BURN_PERCENT,
+    FEE_PRODUCER_PERCENT, FEE_VOTERS_PERCENT, PRODUCER_REWARD_PERCENT, VOTERS_REWARD_PERCENT,
+};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::{interval, Instant};
@@ -235,6 +240,28 @@ impl BlockProducer {
             self.mempool.write().remove(&tx_hash);
         }
 
+        // Calculate total fees from receipts
+        let total_fees = self.calculate_total_fees(&transactions, &receipts);
+
+        // Get voters for this block (for reward distribution)
+        let voters = self.get_block_voters(&block_hash);
+
+        // Distribute rewards
+        match self.distribute_rewards(block_number, &our_address, total_fees, &voters) {
+            Ok(distribution) => {
+                debug!(
+                    "Distributed rewards for block #{}: producer={}, voters={}, burned={}",
+                    block_number,
+                    distribution.producer_reward,
+                    distribution.voter_reward,
+                    distribution.fee_burned
+                );
+            }
+            Err(e) => {
+                warn!("Failed to distribute rewards for block #{}: {}", block_number, e);
+            }
+        }
+
         info!(
             "Block #{} produced: {} txs, {} gas used",
             block_number, tx_count, gas_used
@@ -252,5 +279,205 @@ impl BlockProducer {
             qfc_types::DEFAULT_BLOCK_GAS_LIMIT,
             self.config.max_txs_per_block,
         )
+    }
+
+    /// Calculate the current year based on block height for reward halving
+    fn calculate_year(&self, block_height: u64) -> u64 {
+        // Estimate blocks per year based on block time
+        // BLOCK_TIME_MS = 3333ms => ~262,800 blocks per year (365 * 24 * 60 * 60 * 1000 / 3333)
+        let blocks_per_year = 365 * 24 * 60 * 60 * 1000 / BLOCK_TIME_MS;
+        block_height / blocks_per_year
+    }
+
+    /// Distribute block rewards and fees after block production
+    ///
+    /// Block rewards: 70% producer, 30% voters (proportional by contribution score)
+    /// Transaction fees: 50% producer, 30% voters, 20% burned
+    pub fn distribute_rewards(
+        &self,
+        block_height: u64,
+        producer: &qfc_types::Address,
+        total_fees: U256,
+        voters: &[(qfc_types::Address, u64)], // (voter_address, contribution_score)
+    ) -> anyhow::Result<RewardDistribution> {
+        let state = self.chain.state();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        // Calculate block reward with halving
+        let year = self.calculate_year(block_height);
+        let block_reward = block_reward_for_year(year);
+
+        // Producer block reward (70%)
+        let producer_block_reward = block_reward * U256::from_u64(PRODUCER_REWARD_PERCENT)
+            / U256::from_u64(100);
+
+        // Producer fee share (50%)
+        let producer_fee_share = total_fees * U256::from_u64(FEE_PRODUCER_PERCENT)
+            / U256::from_u64(100);
+
+        // Total producer reward
+        let producer_reward = producer_block_reward + producer_fee_share;
+
+        // Add producer reward to balance
+        state.add_balance(producer, producer_reward)?;
+
+        // Voter block reward pool (30%)
+        let voters_block_reward = block_reward * U256::from_u64(VOTERS_REWARD_PERCENT)
+            / U256::from_u64(100);
+
+        // Voter fee pool (30%)
+        let voters_fee_share = total_fees * U256::from_u64(FEE_VOTERS_PERCENT)
+            / U256::from_u64(100);
+
+        // Total voter reward pool
+        let voters_reward_pool = voters_block_reward + voters_fee_share;
+
+        // Distribute voter rewards proportionally by contribution score
+        let voter_reward = self.distribute_voter_rewards(&voters_reward_pool, voters)?;
+
+        // Fee burned (20%)
+        let fee_burned = total_fees * U256::from_u64(FEE_BURN_PERCENT) / U256::from_u64(100);
+        // Note: Burned fees are simply not distributed, effectively removed from circulation
+
+        debug!(
+            "Block #{} rewards: producer={}, voters={}, burned={}",
+            block_height, producer_reward, voter_reward, fee_burned
+        );
+
+        // Create reward distribution record
+        let distribution = RewardDistribution::new(
+            block_height,
+            producer_reward,
+            voter_reward,
+            fee_burned,
+            now,
+        );
+
+        // Store the distribution record
+        self.store_reward_distribution(&distribution)?;
+
+        Ok(distribution)
+    }
+
+    /// Distribute voter rewards proportionally by contribution score
+    fn distribute_voter_rewards(
+        &self,
+        total_reward: &U256,
+        voters: &[(qfc_types::Address, u64)], // (voter_address, contribution_score)
+    ) -> anyhow::Result<U256> {
+        if voters.is_empty() || total_reward.is_zero() {
+            return Ok(U256::ZERO);
+        }
+
+        let state = self.chain.state();
+
+        // Calculate total contribution score
+        let total_score: u64 = voters.iter().map(|(_, score)| score).sum();
+        if total_score == 0 {
+            return Ok(U256::ZERO);
+        }
+
+        let mut distributed = U256::ZERO;
+
+        // Distribute proportionally
+        for (voter_address, score) in voters {
+            if *score == 0 {
+                continue;
+            }
+
+            // reward = total_reward * score / total_score
+            let voter_reward = *total_reward * U256::from_u64(*score) / U256::from_u64(total_score);
+
+            if !voter_reward.is_zero() {
+                state.add_balance(voter_address, voter_reward)?;
+                distributed = distributed + voter_reward;
+
+                debug!(
+                    "Voter {} reward: {} (score: {}/{})",
+                    voter_address, voter_reward, score, total_score
+                );
+            }
+        }
+
+        Ok(distributed)
+    }
+
+    /// Store reward distribution record to database
+    fn store_reward_distribution(&self, distribution: &RewardDistribution) -> anyhow::Result<()> {
+        let db = self.chain.db();
+        let key = distribution.block_height.to_be_bytes();
+        db.put(
+            qfc_storage::cf::REWARDS,
+            &key,
+            &distribution.to_bytes(),
+        )?;
+        Ok(())
+    }
+
+    /// Broadcast double-sign evidence to the network
+    pub async fn broadcast_double_sign_evidence(&self, evidence: &DoubleSignEvidence) {
+        let Some(network) = &self.network else {
+            return;
+        };
+
+        let our_address = match self.consensus.our_address() {
+            Some(addr) => addr,
+            None => return,
+        };
+
+        // Convert to slashing evidence for network broadcast
+        let mut slashing = evidence.to_slashing_evidence(our_address);
+
+        // Sign the evidence
+        let evidence_hash = blake3_hash(&slashing.to_bytes_without_signature());
+        match self.consensus.sign_hash(&evidence_hash) {
+            Ok(sig) => slashing.set_signature(sig),
+            Err(_) => return,
+        }
+
+        // Broadcast
+        let msg = ValidatorMessage::SlashingEvidence(slashing);
+        if let Err(e) = network.broadcast_validator_msg(msg.to_bytes()).await {
+            warn!("Failed to broadcast double-sign evidence: {}", e);
+        } else {
+            info!(
+                "Broadcasted double-sign evidence for validator {} at height {}",
+                evidence.validator, evidence.height
+            );
+        }
+    }
+
+    /// Get voters who accepted a block with their contribution scores
+    fn get_block_voters(&self, _block_hash: &qfc_types::Hash) -> Vec<(qfc_types::Address, u64)> {
+        let validators = self.consensus.get_validators();
+
+        // Get pending votes for this block (accept votes only)
+        // Note: In a full implementation, we'd have access to the votes from consensus
+        // For now, we return all active validators as potential voters
+        validators
+            .iter()
+            .filter(|v| v.is_active())
+            .map(|v| (v.address, v.contribution_score))
+            .collect()
+    }
+
+    /// Calculate total fees from executed transactions
+    fn calculate_total_fees(
+        &self,
+        transactions: &[Transaction],
+        receipts: &[qfc_types::Receipt],
+    ) -> U256 {
+        let mut total = U256::ZERO;
+
+        for (tx, receipt) in transactions.iter().zip(receipts.iter()) {
+            // Fee = gas_used * gas_price
+            let fee = U256::from_u64(receipt.gas_used) * tx.gas_price;
+            total = total + fee;
+        }
+
+        total
     }
 }

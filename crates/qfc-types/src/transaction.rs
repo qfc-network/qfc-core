@@ -25,6 +25,12 @@ pub enum TransactionType {
     ValidatorRegister = 5,
     /// Exit as validator
     ValidatorExit = 6,
+    /// Delegate stake to a validator
+    Delegate = 7,
+    /// Undelegate stake from a validator
+    Undelegate = 8,
+    /// Claim delegation rewards
+    ClaimDelegationRewards = 9,
 }
 
 impl Default for TransactionType {
@@ -43,6 +49,9 @@ impl From<u8> for TransactionType {
             4 => Self::Unstake,
             5 => Self::ValidatorRegister,
             6 => Self::ValidatorExit,
+            7 => Self::Delegate,
+            8 => Self::Undelegate,
+            9 => Self::ClaimDelegationRewards,
             _ => Self::Transfer,
         }
     }
@@ -183,6 +192,62 @@ impl Transaction {
             to: None,
             value: U256::ZERO,
             data,
+            gas_limit: crate::MINIMUM_GAS * 2,
+            gas_price,
+            public_key: PublicKey::ZERO,
+            signature: Signature::ZERO,
+        }
+    }
+
+    /// Create a delegate transaction
+    /// `to` is the validator address to delegate to
+    /// `value` is the amount to delegate
+    pub fn delegate(validator: Address, amount: U256, nonce: u64, gas_price: U256) -> Self {
+        Self {
+            tx_type: TransactionType::Delegate,
+            chain_id: crate::DEFAULT_CHAIN_ID,
+            nonce,
+            to: Some(validator),
+            value: amount,
+            data: Vec::new(),
+            gas_limit: crate::MINIMUM_GAS * 3,
+            gas_price,
+            public_key: PublicKey::ZERO,
+            signature: Signature::ZERO,
+        }
+    }
+
+    /// Create an undelegate transaction
+    /// `to` is the validator address to undelegate from
+    /// `data` contains the amount to undelegate (32 bytes)
+    pub fn undelegate(validator: Address, amount: U256, nonce: u64, gas_price: U256) -> Self {
+        let mut data = Vec::with_capacity(32);
+        data.extend_from_slice(&amount.to_be_bytes());
+
+        Self {
+            tx_type: TransactionType::Undelegate,
+            chain_id: crate::DEFAULT_CHAIN_ID,
+            nonce,
+            to: Some(validator),
+            value: U256::ZERO,
+            data,
+            gas_limit: crate::MINIMUM_GAS * 3,
+            gas_price,
+            public_key: PublicKey::ZERO,
+            signature: Signature::ZERO,
+        }
+    }
+
+    /// Create a claim delegation rewards transaction
+    /// `to` is the validator address to claim rewards from (None for all validators)
+    pub fn claim_delegation_rewards(validator: Option<Address>, nonce: u64, gas_price: U256) -> Self {
+        Self {
+            tx_type: TransactionType::ClaimDelegationRewards,
+            chain_id: crate::DEFAULT_CHAIN_ID,
+            nonce,
+            to: validator,
+            value: U256::ZERO,
+            data: Vec::new(),
             gas_limit: crate::MINIMUM_GAS * 2,
             gas_price,
             public_key: PublicKey::ZERO,

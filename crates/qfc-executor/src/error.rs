@@ -48,6 +48,21 @@ pub enum ExecutorError {
 
     #[error("EVM error: {0}")]
     EvmError(String),
+
+    #[error("Delegation too low: minimum {minimum}, provided {provided}")]
+    DelegationTooLow { minimum: String, provided: String },
+
+    #[error("Already delegated to another validator")]
+    AlreadyDelegated,
+
+    #[error("Invalid validator (not registered or no stake)")]
+    InvalidValidator,
+
+    #[error("No active delegation")]
+    NoDelegation,
+
+    #[error("Insufficient delegation: need {need}, have {have}")]
+    InsufficientDelegation { need: String, have: String },
 }
 
 impl From<qfc_state::StateError> for ExecutorError {

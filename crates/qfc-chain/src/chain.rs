@@ -100,7 +100,10 @@ impl Chain {
                 }
             }
 
-            // Register genesis validators with consensus engine
+            // Try to load validators from checkpoint
+            self.load_validator_checkpoint();
+
+            // Register genesis validators with consensus engine (as fallback)
             self.register_genesis_validators();
 
             info!("Loaded chain with genesis: {}", hash);
@@ -173,6 +176,48 @@ impl Chain {
         if !validators.is_empty() {
             self.consensus.update_validators(validators);
         }
+    }
+
+    /// Load validator checkpoint from storage
+    fn load_validator_checkpoint(&self) {
+        match self.consensus.load_latest_checkpoint(&self.db) {
+            Ok(Some(checkpoint)) => {
+                self.consensus.restore_from_checkpoint(&checkpoint);
+                info!(
+                    "Loaded validator checkpoint: epoch={}, height={}",
+                    checkpoint.epoch, checkpoint.block_height
+                );
+            }
+            Ok(None) => {
+                debug!("No validator checkpoint found, using genesis validators");
+            }
+            Err(e) => {
+                debug!("Failed to load validator checkpoint: {}", e);
+            }
+        }
+    }
+
+    /// Create checkpoint if at epoch boundary
+    pub fn maybe_create_checkpoint(&self, block_height: u64) -> Result<()> {
+        // Check if at epoch boundary
+        let blocks_per_epoch = qfc_types::BLOCKS_PER_EPOCH;
+        if block_height % blocks_per_epoch != 0 {
+            return Ok(());
+        }
+
+        match self.consensus.create_checkpoint(&self.db, block_height) {
+            Ok(checkpoint) => {
+                info!(
+                    "Created checkpoint at epoch {} height {}",
+                    checkpoint.epoch, checkpoint.block_height
+                );
+            }
+            Err(e) => {
+                debug!("Failed to create checkpoint: {}", e);
+            }
+        }
+
+        Ok(())
     }
 
     /// Get genesis hash
@@ -312,6 +357,20 @@ impl Chain {
             return Err(ChainError::BlockAlreadyKnown);
         }
 
+        // Check for double-sign before processing
+        if let Some(evidence) = self.consensus.check_double_sign(&block) {
+            // Process the evidence (slash the validator)
+            if let Err(e) = self.consensus.process_double_sign_evidence(&evidence, &self.db) {
+                debug!("Failed to process double-sign evidence: {}", e);
+            }
+            // Store evidence for later broadcast
+            self.store_double_sign_evidence(&evidence);
+            // Block from double-signer should still be rejected if invalid
+        }
+
+        // Cache block for future double-sign detection
+        self.consensus.cache_block(&block);
+
         // Get parent block
         let parent = self
             .get_block_by_hash(&block.parent_hash())?
@@ -370,6 +429,9 @@ impl Chain {
         // Record block production in consensus engine for PoC scoring
         self.consensus.record_block_produced(&producer);
 
+        // Maybe create checkpoint at epoch boundary
+        let _ = self.maybe_create_checkpoint(block.number());
+
         info!(
             "Imported block {} at height {}",
             block_hash,
@@ -377,6 +439,20 @@ impl Chain {
         );
 
         Ok(block_hash)
+    }
+
+    /// Store double-sign evidence for later broadcast
+    fn store_double_sign_evidence(&self, evidence: &qfc_types::DoubleSignEvidence) {
+        let key = format!("double_sign:{}:{}", evidence.height, evidence.validator);
+        if let Err(e) = self.db.put(cf::METADATA, key.as_bytes(), &evidence.to_bytes()) {
+            debug!("Failed to store double-sign evidence: {}", e);
+        }
+    }
+
+    /// Get pending double-sign evidence (for broadcast)
+    pub fn get_pending_double_sign_evidence(&self) -> Vec<qfc_types::DoubleSignEvidence> {
+        // In a full implementation, we would scan for evidence to broadcast
+        Vec::new()
     }
 
     /// Store a block in the database

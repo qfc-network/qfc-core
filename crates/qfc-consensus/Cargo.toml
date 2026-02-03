@@ -10,6 +10,7 @@ rust-version.workspace = true
 [dependencies]
 qfc-types.workspace = true
 qfc-crypto.workspace = true
+qfc-storage.workspace = true
 qfc-state.workspace = true
 qfc-executor.workspace = true
 qfc-mempool.workspace = true

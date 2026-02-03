@@ -6,7 +6,8 @@ use qfc_crypto::{address_from_public_key, blake3_hash};
 use qfc_state::StateDB;
 use qfc_types::{
     create_bloom, Address, Log, Receipt, ReceiptStatus, SignedTransaction, Transaction,
-    TransactionType, U256, DEFAULT_CHAIN_ID, MIN_VALIDATOR_STAKE, MINIMUM_GAS, TRANSFER_GAS,
+    TransactionType, U256, DEFAULT_CHAIN_ID, MIN_DELEGATION, MIN_VALIDATOR_STAKE,
+    MINIMUM_GAS, TRANSFER_GAS, UNSTAKE_DELAY_SECS,
 };
 use tracing::{debug, trace, warn};
 
@@ -209,6 +210,11 @@ impl Executor {
                 self.execute_validator_register(&tx.tx, &sender, state)
             }
             TransactionType::ValidatorExit => self.execute_validator_exit(&tx.tx, &sender, state),
+            TransactionType::Delegate => self.execute_delegate(&tx.tx, &sender, state),
+            TransactionType::Undelegate => self.execute_undelegate(&tx.tx, &sender, state),
+            TransactionType::ClaimDelegationRewards => {
+                self.execute_claim_delegation_rewards(&tx.tx, &sender, state)
+            }
         };
 
         // 4. Handle result
@@ -488,6 +494,147 @@ impl Executor {
         debug!(
             "Validator exited: {} stake_returned={}",
             sender, current_stake
+        );
+
+        Ok(ExecutionResult::success(MINIMUM_GAS * 2))
+    }
+
+    // ============ Delegation Execution ============
+
+    /// Execute a delegation transaction
+    /// Locks tokens and delegates to a validator
+    fn execute_delegate(
+        &self,
+        tx: &Transaction,
+        sender: &Address,
+        state: &StateDB,
+    ) -> Result<ExecutionResult> {
+        let validator = tx.to.ok_or(ExecutorError::MissingRecipient)?;
+        let amount = tx.value;
+
+        // Check minimum delegation amount
+        if amount < U256::from_u128(MIN_DELEGATION) {
+            return Err(ExecutorError::DelegationTooLow {
+                minimum: U256::from_u128(MIN_DELEGATION).to_string(),
+                provided: amount.to_string(),
+            });
+        }
+
+        // Check if sender has existing delegation to a different validator
+        let (existing_validator, _) = state.get_delegation(sender)?;
+        if let Some(existing) = existing_validator {
+            if existing != validator {
+                return Err(ExecutorError::AlreadyDelegated);
+            }
+        }
+
+        // Check if validator exists (has stake)
+        let validator_stake = state.get_stake(&validator)?;
+        if validator_stake.is_zero() {
+            return Err(ExecutorError::InvalidValidator);
+        }
+
+        // Lock tokens (deduct from balance)
+        state.sub_balance(sender, amount)?;
+
+        // Record delegation in sender's account
+        if existing_validator.is_some() {
+            // Add to existing delegation
+            state.add_delegation_amount(sender, amount)?;
+        } else {
+            // New delegation
+            state.set_delegation(sender, &validator, amount)?;
+        }
+
+        debug!(
+            "Delegated: {} -> {} amount={}",
+            sender, validator, amount
+        );
+
+        Ok(ExecutionResult::success(MINIMUM_GAS * 3))
+    }
+
+    /// Execute an undelegation transaction
+    /// Creates an undelegation with a lockup period
+    fn execute_undelegate(
+        &self,
+        tx: &Transaction,
+        sender: &Address,
+        state: &StateDB,
+    ) -> Result<ExecutionResult> {
+        let validator = tx.to.ok_or(ExecutorError::MissingRecipient)?;
+
+        // Parse amount from data (or undelegate all if empty)
+        let amount = if tx.data.len() >= 32 {
+            let mut bytes = [0u8; 32];
+            bytes.copy_from_slice(&tx.data[0..32]);
+            U256::from_be_bytes(&bytes)
+        } else {
+            // Undelegate all
+            state.get_delegation_amount(sender, &validator)?
+        };
+
+        // Check if sender has delegation to this validator
+        let (existing_validator, existing_amount) = state.get_delegation(sender)?;
+        match existing_validator {
+            Some(v) if v == validator => {
+                if existing_amount < amount {
+                    return Err(ExecutorError::InsufficientDelegation {
+                        need: amount.to_string(),
+                        have: existing_amount.to_string(),
+                    });
+                }
+            }
+            _ => return Err(ExecutorError::NoDelegation),
+        }
+
+        // Reduce delegation amount
+        state.sub_delegation_amount(sender, amount)?;
+
+        // Calculate unlock time (current time + 7 days)
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let _unlock_at = now + UNSTAKE_DELAY_SECS;
+
+        // In a full implementation, we would store the undelegation record
+        // For now, we immediately return the funds (simplified)
+        // TODO: Store Undelegation record and process after lockup period
+        state.add_balance(sender, amount)?;
+
+        debug!(
+            "Undelegated: {} <- {} amount={} (immediate return, lockup not implemented)",
+            sender, validator, amount
+        );
+
+        Ok(ExecutionResult::success(MINIMUM_GAS * 3))
+    }
+
+    /// Execute a claim delegation rewards transaction
+    fn execute_claim_delegation_rewards(
+        &self,
+        _tx: &Transaction,
+        sender: &Address,
+        state: &StateDB,
+    ) -> Result<ExecutionResult> {
+        // Check if sender has delegation
+        let (existing_validator, _) = state.get_delegation(sender)?;
+        if existing_validator.is_none() {
+            return Err(ExecutorError::NoDelegation);
+        }
+
+        // In a full implementation, we would:
+        // 1. Calculate pending rewards based on delegation amount and time
+        // 2. Transfer rewards to sender
+        // 3. Reset pending rewards counter
+        //
+        // For now, this is a placeholder since reward distribution is handled
+        // at block production time by the producer
+
+        debug!(
+            "Claim delegation rewards: {} (rewards distributed at block production)",
+            sender
         );
 
         Ok(ExecutionResult::success(MINIMUM_GAS * 2))

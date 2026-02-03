@@ -36,6 +36,8 @@ impl From<u8> for AccountType {
     }
 }
 
+use crate::Address;
+
 /// Account state
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct Account {
@@ -59,6 +61,12 @@ pub struct Account {
 
     /// Contribution score (for validators)
     pub contribution_score: Option<u64>,
+
+    /// Validator this account has delegated to (for delegators)
+    pub delegated_to: Option<Address>,
+
+    /// Amount delegated (for delegators)
+    pub delegated_amount: Option<U256>,
 }
 
 impl Default for Account {
@@ -78,6 +86,8 @@ impl Account {
             storage_root: None,
             stake: None,
             contribution_score: None,
+            delegated_to: None,
+            delegated_amount: None,
         }
     }
 
@@ -91,6 +101,8 @@ impl Account {
             storage_root: None,
             stake: None,
             contribution_score: None,
+            delegated_to: None,
+            delegated_amount: None,
         }
     }
 
@@ -104,6 +116,8 @@ impl Account {
             storage_root: None,
             stake: None,
             contribution_score: None,
+            delegated_to: None,
+            delegated_amount: None,
         }
     }
 
@@ -117,6 +131,8 @@ impl Account {
             storage_root: None,
             stake: Some(stake),
             contribution_score: Some(0),
+            delegated_to: None,
+            delegated_amount: None,
         }
     }
 
@@ -193,6 +209,55 @@ impl Account {
         self.contribution_score = Some(score);
     }
 
+    /// Get delegation target
+    pub fn get_delegated_to(&self) -> Option<Address> {
+        self.delegated_to
+    }
+
+    /// Get delegated amount
+    pub fn get_delegated_amount(&self) -> U256 {
+        self.delegated_amount.unwrap_or(U256::ZERO)
+    }
+
+    /// Check if account has active delegation
+    pub fn has_delegation(&self) -> bool {
+        self.delegated_to.is_some() && self.delegated_amount.map(|a| !a.is_zero()).unwrap_or(false)
+    }
+
+    /// Set delegation (delegator -> validator)
+    pub fn set_delegation(&mut self, validator: Address, amount: U256) {
+        self.delegated_to = Some(validator);
+        self.delegated_amount = Some(amount);
+    }
+
+    /// Clear delegation
+    pub fn clear_delegation(&mut self) {
+        self.delegated_to = None;
+        self.delegated_amount = None;
+    }
+
+    /// Add to delegated amount
+    pub fn add_delegated_amount(&mut self, amount: U256) {
+        let current = self.delegated_amount.unwrap_or(U256::ZERO);
+        self.delegated_amount = Some(current.saturating_add(amount));
+    }
+
+    /// Subtract from delegated amount (returns false if insufficient)
+    pub fn sub_delegated_amount(&mut self, amount: U256) -> bool {
+        let current = self.delegated_amount.unwrap_or(U256::ZERO);
+        if current >= amount {
+            let new_amount = current - amount;
+            if new_amount.is_zero() {
+                self.clear_delegation();
+            } else {
+                self.delegated_amount = Some(new_amount);
+            }
+            true
+        } else {
+            false
+        }
+    }
+
     /// Serialize account
     pub fn to_bytes(&self) -> Vec<u8> {
         borsh::to_vec(self).expect("serialization should not fail")
@@ -247,5 +312,75 @@ mod tests {
         assert!(account.is_validator());
         assert_eq!(account.get_stake(), stake);
         assert_eq!(account.get_contribution_score(), 0);
+    }
+
+    #[test]
+    fn test_account_delegation() {
+        let mut account = Account::new_eoa_with_balance(U256::from_u64(10000));
+        let validator = Address::new([0x11; 20]);
+
+        assert!(!account.has_delegation());
+        assert_eq!(account.get_delegated_amount(), U256::ZERO);
+
+        account.set_delegation(validator, U256::from_u64(5000));
+
+        assert!(account.has_delegation());
+        assert_eq!(account.get_delegated_to(), Some(validator));
+        assert_eq!(account.get_delegated_amount(), U256::from_u64(5000));
+    }
+
+    #[test]
+    fn test_account_add_delegated_amount() {
+        let mut account = Account::new_eoa();
+        let validator = Address::new([0x11; 20]);
+
+        account.set_delegation(validator, U256::from_u64(1000));
+        account.add_delegated_amount(U256::from_u64(500));
+
+        assert_eq!(account.get_delegated_amount(), U256::from_u64(1500));
+    }
+
+    #[test]
+    fn test_account_sub_delegated_amount() {
+        let mut account = Account::new_eoa();
+        let validator = Address::new([0x11; 20]);
+
+        account.set_delegation(validator, U256::from_u64(1000));
+
+        // Partial withdrawal
+        assert!(account.sub_delegated_amount(U256::from_u64(400)));
+        assert_eq!(account.get_delegated_amount(), U256::from_u64(600));
+        assert!(account.has_delegation());
+
+        // Full withdrawal clears delegation
+        assert!(account.sub_delegated_amount(U256::from_u64(600)));
+        assert!(!account.has_delegation());
+        assert_eq!(account.get_delegated_to(), None);
+    }
+
+    #[test]
+    fn test_account_sub_delegated_amount_insufficient() {
+        let mut account = Account::new_eoa();
+        let validator = Address::new([0x11; 20]);
+
+        account.set_delegation(validator, U256::from_u64(1000));
+
+        // Cannot withdraw more than delegated
+        assert!(!account.sub_delegated_amount(U256::from_u64(1500)));
+        assert_eq!(account.get_delegated_amount(), U256::from_u64(1000));
+    }
+
+    #[test]
+    fn test_account_clear_delegation() {
+        let mut account = Account::new_eoa();
+        let validator = Address::new([0x11; 20]);
+
+        account.set_delegation(validator, U256::from_u64(1000));
+        assert!(account.has_delegation());
+
+        account.clear_delegation();
+        assert!(!account.has_delegation());
+        assert_eq!(account.get_delegated_to(), None);
+        assert_eq!(account.get_delegated_amount(), U256::ZERO);
     }
 }

@@ -318,6 +318,72 @@ impl StateDB {
         self.set_account(address, &account)
     }
 
+    // ============ Delegation Methods ============
+
+    /// Get delegation info for a delegator
+    pub fn get_delegation(&self, delegator: &Address) -> Result<(Option<Address>, U256)> {
+        let account = self.get_account(delegator)?;
+        Ok((account.get_delegated_to(), account.get_delegated_amount()))
+    }
+
+    /// Get delegation amount for a specific delegator->validator pair
+    pub fn get_delegation_amount(&self, delegator: &Address, validator: &Address) -> Result<U256> {
+        let account = self.get_account(delegator)?;
+        match account.get_delegated_to() {
+            Some(v) if v == *validator => Ok(account.get_delegated_amount()),
+            _ => Ok(U256::ZERO),
+        }
+    }
+
+    /// Set delegation for a delegator to a validator
+    pub fn set_delegation(
+        &self,
+        delegator: &Address,
+        validator: &Address,
+        amount: U256,
+    ) -> Result<()> {
+        let mut account = self.get_account(delegator)?;
+        account.set_delegation(*validator, amount);
+        self.set_account(delegator, &account)
+    }
+
+    /// Clear delegation for a delegator
+    pub fn clear_delegation(&self, delegator: &Address) -> Result<()> {
+        let mut account = self.get_account(delegator)?;
+        account.clear_delegation();
+        self.set_account(delegator, &account)
+    }
+
+    /// Add to delegated amount for a delegator
+    pub fn add_delegation_amount(&self, delegator: &Address, amount: U256) -> Result<()> {
+        let mut account = self.get_account(delegator)?;
+        account.add_delegated_amount(amount);
+        self.set_account(delegator, &account)
+    }
+
+    /// Subtract from delegated amount (for undelegation)
+    pub fn sub_delegation_amount(&self, delegator: &Address, amount: U256) -> Result<bool> {
+        let mut account = self.get_account(delegator)?;
+        let success = account.sub_delegated_amount(amount);
+        if success {
+            self.set_account(delegator, &account)?;
+        }
+        Ok(success)
+    }
+
+    /// Check if an address has an active delegation
+    pub fn has_delegation(&self, delegator: &Address) -> Result<bool> {
+        let account = self.get_account(delegator)?;
+        Ok(account.has_delegation())
+    }
+
+    /// Get total stake for a validator (direct stake + delegated stake)
+    /// Note: This requires validator state from consensus engine
+    /// This method only returns the direct stake from account state
+    pub fn get_direct_stake(&self, address: &Address) -> Result<U256> {
+        self.get_stake(address)
+    }
+
     /// Commit all changes and return new state root
     pub fn commit(&self) -> Result<Hash> {
         let new_root = self.trie.write().commit()?;
@@ -494,5 +560,97 @@ mod tests {
 
         state.revert(snapshot).unwrap();
         assert_eq!(state.get_balance(&addr).unwrap(), U256::from_u64(1000));
+    }
+
+    #[test]
+    fn test_delegation() {
+        let state = create_test_state();
+        let delegator = Address::new([0x11; 20]);
+        let validator = Address::new([0x22; 20]);
+
+        // Initially no delegation
+        assert!(!state.has_delegation(&delegator).unwrap());
+        let (target, amount) = state.get_delegation(&delegator).unwrap();
+        assert!(target.is_none());
+        assert_eq!(amount, U256::ZERO);
+
+        // Set delegation
+        state.set_delegation(&delegator, &validator, U256::from_u64(1000)).unwrap();
+
+        assert!(state.has_delegation(&delegator).unwrap());
+        let (target, amount) = state.get_delegation(&delegator).unwrap();
+        assert_eq!(target, Some(validator));
+        assert_eq!(amount, U256::from_u64(1000));
+
+        // Get delegation amount for specific validator
+        assert_eq!(
+            state.get_delegation_amount(&delegator, &validator).unwrap(),
+            U256::from_u64(1000)
+        );
+
+        // Other validator returns zero
+        let other_validator = Address::new([0x33; 20]);
+        assert_eq!(
+            state.get_delegation_amount(&delegator, &other_validator).unwrap(),
+            U256::ZERO
+        );
+    }
+
+    #[test]
+    fn test_add_delegation_amount() {
+        let state = create_test_state();
+        let delegator = Address::new([0x11; 20]);
+        let validator = Address::new([0x22; 20]);
+
+        state.set_delegation(&delegator, &validator, U256::from_u64(1000)).unwrap();
+        state.add_delegation_amount(&delegator, U256::from_u64(500)).unwrap();
+
+        let (_, amount) = state.get_delegation(&delegator).unwrap();
+        assert_eq!(amount, U256::from_u64(1500));
+    }
+
+    #[test]
+    fn test_sub_delegation_amount() {
+        let state = create_test_state();
+        let delegator = Address::new([0x11; 20]);
+        let validator = Address::new([0x22; 20]);
+
+        state.set_delegation(&delegator, &validator, U256::from_u64(1000)).unwrap();
+
+        // Partial withdrawal
+        assert!(state.sub_delegation_amount(&delegator, U256::from_u64(400)).unwrap());
+        let (_, amount) = state.get_delegation(&delegator).unwrap();
+        assert_eq!(amount, U256::from_u64(600));
+
+        // Full withdrawal clears delegation
+        assert!(state.sub_delegation_amount(&delegator, U256::from_u64(600)).unwrap());
+        assert!(!state.has_delegation(&delegator).unwrap());
+    }
+
+    #[test]
+    fn test_sub_delegation_amount_insufficient() {
+        let state = create_test_state();
+        let delegator = Address::new([0x11; 20]);
+        let validator = Address::new([0x22; 20]);
+
+        state.set_delegation(&delegator, &validator, U256::from_u64(1000)).unwrap();
+
+        // Cannot withdraw more than delegated
+        assert!(!state.sub_delegation_amount(&delegator, U256::from_u64(1500)).unwrap());
+        let (_, amount) = state.get_delegation(&delegator).unwrap();
+        assert_eq!(amount, U256::from_u64(1000));
+    }
+
+    #[test]
+    fn test_clear_delegation() {
+        let state = create_test_state();
+        let delegator = Address::new([0x11; 20]);
+        let validator = Address::new([0x22; 20]);
+
+        state.set_delegation(&delegator, &validator, U256::from_u64(1000)).unwrap();
+        assert!(state.has_delegation(&delegator).unwrap());
+
+        state.clear_delegation(&delegator).unwrap();
+        assert!(!state.has_delegation(&delegator).unwrap());
     }
 }

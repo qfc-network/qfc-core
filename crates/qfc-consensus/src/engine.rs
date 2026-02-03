@@ -4,9 +4,11 @@ use crate::error::{ConsensusError, Result};
 use crate::scoring::{calculate_contribution_score, NetworkState};
 use parking_lot::RwLock;
 use qfc_crypto::{blake3_hash, vrf_output_to_f64, vrf_verify_with_seed, VrfKeypair};
+use qfc_storage;
 use qfc_types::{
-    Address, Block, BlockHeader, Epoch, Hash, Receipt, Signature, Transaction, ValidatorNode,
-    Vote, BLOCK_VERSION, DEFAULT_BLOCK_GAS_LIMIT, FINALITY_THRESHOLD,
+    Address, Block, BlockHeader, DoubleSignEvidence, Epoch, Hash, Receipt, Signature, Transaction,
+    ValidatorCheckpoint, ValidatorNode, Vote, BLOCK_VERSION, DEFAULT_BLOCK_GAS_LIMIT,
+    FINALITY_THRESHOLD, SLASH_DOUBLE_SIGN_PERCENT,
 };
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -36,6 +38,14 @@ impl Default for ConsensusConfig {
     }
 }
 
+/// Block info for double-sign detection
+#[derive(Clone, Debug)]
+struct BlockRecord {
+    hash: Hash,
+    producer: Address,
+    signature: Signature,
+}
+
 /// Consensus engine
 pub struct ConsensusEngine {
     /// Configuration
@@ -54,6 +64,12 @@ pub struct ConsensusEngine {
     finalized_height: RwLock<u64>,
     /// Current network state for dynamic scoring
     network_state: RwLock<NetworkState>,
+    /// Block cache for double-sign detection: height -> list of blocks
+    block_cache: RwLock<HashMap<u64, Vec<BlockRecord>>>,
+    /// Maximum blocks to cache per height (for memory limits)
+    max_blocks_per_height: usize,
+    /// Cache depth (how many heights to keep)
+    cache_depth: u64,
 }
 
 impl ConsensusEngine {
@@ -68,6 +84,9 @@ impl ConsensusEngine {
             pending_votes: RwLock::new(HashMap::new()),
             finalized_height: RwLock::new(0),
             network_state: RwLock::new(NetworkState::default()),
+            block_cache: RwLock::new(HashMap::new()),
+            max_blocks_per_height: 10,
+            cache_depth: 100,
         }
     }
 
@@ -82,6 +101,9 @@ impl ConsensusEngine {
             pending_votes: RwLock::new(HashMap::new()),
             finalized_height: RwLock::new(0),
             network_state: RwLock::new(NetworkState::default()),
+            block_cache: RwLock::new(HashMap::new()),
+            max_blocks_per_height: 10,
+            cache_depth: 100,
         }
     }
 
@@ -121,8 +143,8 @@ impl ConsensusEngine {
         let mut validators = self.validators.write();
         let network_state = *self.network_state.read();
 
-        // Calculate totals for normalization
-        let total_stake: u128 = validators.iter().map(|v| v.stake.low_u128()).sum();
+        // Calculate totals for normalization - use total stake (direct + delegated)
+        let total_stake: u128 = validators.iter().map(|v| v.total_stake().low_u128()).sum();
         let total_hashrate: u64 = validators
             .iter()
             .filter(|v| v.provides_compute)
@@ -561,6 +583,292 @@ impl ConsensusEngine {
                 validator.jail_until = 0;
                 info!("Validator {} unjailed", validator.address);
             }
+        }
+    }
+
+    // ============ Validator Persistence ============
+
+    /// Save validators to database
+    pub fn save_validators(&self, db: &qfc_storage::Database) -> Result<()> {
+        let validators = self.validators.read();
+
+        for validator in validators.iter() {
+            let key = validator.address.as_bytes();
+            let value = validator.to_bytes();
+            db.put(qfc_storage::cf::VALIDATORS, key, &value)
+                .map_err(|e: qfc_storage::StorageError| ConsensusError::StorageError(e.to_string()))?;
+        }
+
+        debug!("Saved {} validators to database", validators.len());
+        Ok(())
+    }
+
+    /// Load validators from database
+    pub fn load_validators(&self, _db: &qfc_storage::Database) -> Result<Vec<ValidatorNode>> {
+        let validators = Vec::new();
+
+        // Iterate over all validators in the VALIDATORS column family
+        // Note: This is a simplified implementation. A full implementation would
+        // use an iterator over the column family.
+        // For now, we rely on validators being registered through genesis.
+
+        debug!("Loading validators from database");
+        Ok(validators)
+    }
+
+    /// Create a validator checkpoint at epoch boundary
+    pub fn create_checkpoint(
+        &self,
+        db: &qfc_storage::Database,
+        block_height: u64,
+    ) -> Result<ValidatorCheckpoint> {
+        let epoch = self.current_epoch.read();
+        let validators = self.validators.read();
+        let finalized = *self.finalized_height.read();
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        let checkpoint = ValidatorCheckpoint::new(
+            epoch.number,
+            block_height,
+            now,
+            validators.clone(),
+            epoch.seed,
+            finalized,
+        );
+
+        // Store checkpoint
+        let key = epoch.number.to_be_bytes();
+        db.put(qfc_storage::cf::CHECKPOINTS, &key, &checkpoint.to_bytes())
+            .map_err(|e: qfc_storage::StorageError| ConsensusError::StorageError(e.to_string()))?;
+
+        info!(
+            "Created checkpoint for epoch {} at height {}",
+            epoch.number, block_height
+        );
+
+        // Also save individual validators
+        self.save_validators(db)?;
+
+        Ok(checkpoint)
+    }
+
+    /// Load checkpoint from database
+    pub fn load_checkpoint(
+        &self,
+        db: &qfc_storage::Database,
+        epoch: u64,
+    ) -> Result<Option<ValidatorCheckpoint>> {
+        let key = epoch.to_be_bytes();
+
+        match db.get(qfc_storage::cf::CHECKPOINTS, &key) {
+            Ok(Some(data)) => {
+                let checkpoint = ValidatorCheckpoint::from_bytes(&data)
+                    .map_err(|e: borsh::io::Error| ConsensusError::StorageError(e.to_string()))?;
+                Ok(Some(checkpoint))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(ConsensusError::StorageError(e.to_string())),
+        }
+    }
+
+    /// Load latest checkpoint from database
+    pub fn load_latest_checkpoint(
+        &self,
+        _db: &qfc_storage::Database,
+    ) -> Result<Option<ValidatorCheckpoint>> {
+        // In a full implementation, we would scan for the latest epoch
+        // For now, we return None and rely on genesis initialization
+        Ok(None)
+    }
+
+    /// Restore state from checkpoint
+    pub fn restore_from_checkpoint(&self, checkpoint: &ValidatorCheckpoint) {
+        // Restore validators
+        *self.validators.write() = checkpoint.validators.clone();
+
+        // Restore epoch
+        let epoch = Epoch::new(
+            checkpoint.epoch,
+            checkpoint.epoch_seed,
+            checkpoint.timestamp,
+        );
+        *self.current_epoch.write() = epoch;
+
+        // Restore finalized height
+        *self.finalized_height.write() = checkpoint.finalized_height;
+
+        info!(
+            "Restored from checkpoint: epoch={}, height={}, finalized={}",
+            checkpoint.epoch, checkpoint.block_height, checkpoint.finalized_height
+        );
+    }
+
+    // ============ Double-Sign Detection ============
+
+    /// Add a block to the cache for double-sign detection
+    pub fn cache_block(&self, block: &Block) {
+        let height = block.number();
+        let hash = blake3_hash(&block.header_bytes());
+        let producer = block.producer();
+        let signature = block.signature.clone();
+
+        let record = BlockRecord {
+            hash,
+            producer,
+            signature,
+        };
+
+        let mut cache = self.block_cache.write();
+
+        // Add to cache
+        cache
+            .entry(height)
+            .or_insert_with(Vec::new)
+            .push(record);
+
+        // Prune old entries
+        let finalized = *self.finalized_height.read();
+        if finalized > self.cache_depth {
+            let prune_below = finalized - self.cache_depth;
+            cache.retain(|&h, _| h >= prune_below);
+        }
+
+        // Limit blocks per height
+        if let Some(blocks) = cache.get_mut(&height) {
+            if blocks.len() > self.max_blocks_per_height {
+                blocks.truncate(self.max_blocks_per_height);
+            }
+        }
+    }
+
+    /// Check for double-sign: returns evidence if found
+    pub fn check_double_sign(&self, block: &Block) -> Option<DoubleSignEvidence> {
+        let height = block.number();
+        let hash = blake3_hash(&block.header_bytes());
+        let producer = block.producer();
+        let signature = &block.signature;
+
+        let cache = self.block_cache.read();
+
+        if let Some(blocks) = cache.get(&height) {
+            for existing in blocks {
+                // Same producer, different block at same height = double sign
+                if existing.producer == producer && existing.hash != hash {
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as u64;
+
+                    let evidence = DoubleSignEvidence::new(
+                        producer,
+                        existing.hash,
+                        hash,
+                        height,
+                        existing.signature.clone(),
+                        signature.clone(),
+                        now,
+                    );
+
+                    info!(
+                        "Double-sign detected: validator {} at height {}",
+                        producer, height
+                    );
+
+                    return Some(evidence);
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Process double-sign evidence and apply slashing
+    pub fn process_double_sign_evidence(
+        &self,
+        evidence: &DoubleSignEvidence,
+        db: &qfc_storage::Database,
+    ) -> Result<()> {
+        let validator_addr = evidence.validator;
+
+        // Verify the evidence is valid (both signatures are from the same validator)
+        // In a full implementation, we would verify the signatures cryptographically
+
+        // Apply 50% slash and permanent jail
+        let mut validators = self.validators.write();
+        if let Some(validator) = validators.iter_mut().find(|v| v.address == validator_addr) {
+            // Slash 50% of stake (including delegated stake)
+            let total_stake = validator.total_stake();
+            let slash_amount = total_stake * qfc_types::U256::from_u64(SLASH_DOUBLE_SIGN_PERCENT)
+                / qfc_types::U256::from_u64(100);
+
+            // Reduce direct stake first
+            let direct_slash = slash_amount.min(validator.stake);
+            validator.stake = validator.stake.saturating_sub(direct_slash);
+
+            // Reduce delegated stake if needed
+            let remaining_slash = slash_amount - direct_slash;
+            if !remaining_slash.is_zero() {
+                validator.delegated_stake = validator.delegated_stake.saturating_sub(remaining_slash);
+            }
+
+            // Permanent jail
+            validator.is_jailed = true;
+            validator.jail_until = u64::MAX;
+
+            // Zero reputation
+            validator.reputation = 0;
+
+            info!(
+                "Processed double-sign evidence: validator {} slashed {} ({}%), permanently jailed",
+                validator_addr, slash_amount, SLASH_DOUBLE_SIGN_PERCENT
+            );
+        }
+
+        // Store evidence in database
+        let key = format!("{}:{}", evidence.height, evidence.validator);
+        db.put(
+            qfc_storage::cf::METADATA,
+            key.as_bytes(),
+            &evidence.to_bytes(),
+        )
+        .map_err(|e: qfc_storage::StorageError| ConsensusError::StorageError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// Update delegated stake for a validator
+    pub fn add_delegated_stake(&self, validator: &Address, amount: qfc_types::U256) {
+        let mut validators = self.validators.write();
+        if let Some(v) = validators.iter_mut().find(|v| v.address == *validator) {
+            v.delegated_stake = v.delegated_stake.saturating_add(amount);
+            v.delegator_count += 1;
+            debug!(
+                "Added delegated stake to {}: {} (total: {})",
+                validator,
+                amount,
+                v.delegated_stake
+            );
+        }
+    }
+
+    /// Remove delegated stake from a validator
+    pub fn sub_delegated_stake(&self, validator: &Address, amount: qfc_types::U256) {
+        let mut validators = self.validators.write();
+        if let Some(v) = validators.iter_mut().find(|v| v.address == *validator) {
+            v.delegated_stake = v.delegated_stake.saturating_sub(amount);
+            if v.delegator_count > 0 {
+                v.delegator_count -= 1;
+            }
+            debug!(
+                "Removed delegated stake from {}: {} (remaining: {})",
+                validator,
+                amount,
+                v.delegated_stake
+            );
         }
     }
 }

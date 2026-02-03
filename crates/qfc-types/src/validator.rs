@@ -13,8 +13,17 @@ pub struct ValidatorNode {
     /// Public key for signing
     pub public_key: PublicKey,
 
-    /// Staked amount
+    /// Staked amount (direct stake)
     pub stake: U256,
+
+    /// Delegated stake from other accounts
+    pub delegated_stake: U256,
+
+    /// Commission rate for delegation rewards (0-10000 = 0-100%)
+    pub commission_rate: u32,
+
+    /// Number of delegators
+    pub delegator_count: u32,
 
     /// Contribution score (calculated from multiple factors)
     pub contribution_score: u64,
@@ -52,7 +61,7 @@ pub struct ValidatorNode {
     /// Whether validator is jailed
     pub is_jailed: bool,
 
-    /// Jail release timestamp (0 if not jailed)
+    /// Jail release timestamp (0 if not jailed, u64::MAX for permanent)
     pub jail_until: u64,
 
     /// Total blocks produced
@@ -63,6 +72,9 @@ pub struct ValidatorNode {
 
     /// Total invalid votes cast
     pub invalid_votes: u64,
+
+    /// Accumulated rewards pending distribution
+    pub pending_rewards: U256,
 }
 
 impl Default for ValidatorNode {
@@ -71,6 +83,9 @@ impl Default for ValidatorNode {
             address: Address::ZERO,
             public_key: PublicKey::ZERO,
             stake: U256::ZERO,
+            delegated_stake: U256::ZERO,
+            commission_rate: 1000, // 10% default commission
+            delegator_count: 0,
             contribution_score: 0,
             uptime: 10000, // 100%
             accuracy: 10000, // 100%
@@ -87,6 +102,7 @@ impl Default for ValidatorNode {
             blocks_produced: 0,
             valid_votes: 0,
             invalid_votes: 0,
+            pending_rewards: U256::ZERO,
         }
     }
 }
@@ -106,14 +122,29 @@ impl ValidatorNode {
         }
     }
 
+    /// Get total stake (direct + delegated)
+    pub fn total_stake(&self) -> U256 {
+        self.stake.saturating_add(self.delegated_stake)
+    }
+
     /// Check if validator is active (not jailed and has stake)
     pub fn is_active(&self) -> bool {
-        !self.is_jailed && !self.stake.is_zero()
+        !self.is_jailed && !self.total_stake().is_zero()
+    }
+
+    /// Check if validator is permanently jailed
+    pub fn is_permanently_jailed(&self) -> bool {
+        self.is_jailed && self.jail_until == u64::MAX
     }
 
     /// Check if validator can be unjailed
     pub fn can_unjail(&self, current_time: u64) -> bool {
-        self.is_jailed && current_time >= self.jail_until
+        self.is_jailed && !self.is_permanently_jailed() && current_time >= self.jail_until
+    }
+
+    /// Get commission rate as float (0.0 - 1.0)
+    pub fn commission_ratio(&self) -> f64 {
+        self.commission_rate as f64 / 10000.0
     }
 
     /// Get uptime as float (0.0 - 1.0)
@@ -580,6 +611,264 @@ struct UnsignedSlashingEvidence {
     pub reporter: Address,
 }
 
+// ============ Reward Distribution ============
+
+/// Reward distribution record for a block
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+pub struct RewardDistribution {
+    /// Block height where rewards were distributed
+    pub block_height: u64,
+    /// Reward given to block producer
+    pub producer_reward: U256,
+    /// Total reward distributed to voters
+    pub voter_reward: U256,
+    /// Amount of fees burned
+    pub fee_burned: U256,
+    /// Timestamp of distribution
+    pub timestamp: u64,
+}
+
+impl RewardDistribution {
+    /// Create a new reward distribution record
+    pub fn new(
+        block_height: u64,
+        producer_reward: U256,
+        voter_reward: U256,
+        fee_burned: U256,
+        timestamp: u64,
+    ) -> Self {
+        Self {
+            block_height,
+            producer_reward,
+            voter_reward,
+            fee_burned,
+            timestamp,
+        }
+    }
+
+    /// Serialize reward distribution
+    pub fn to_bytes(&self) -> Vec<u8> {
+        borsh::to_vec(self).expect("serialization should not fail")
+    }
+
+    /// Deserialize reward distribution
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, borsh::io::Error> {
+        borsh::from_slice(bytes)
+    }
+}
+
+// ============ Delegation System ============
+
+/// Delegation record: a delegator's stake in a validator
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+pub struct Delegation {
+    /// Delegator address
+    pub delegator: Address,
+    /// Validator address
+    pub validator: Address,
+    /// Delegated amount
+    pub amount: U256,
+    /// Timestamp when delegation was created
+    pub delegated_at: u64,
+    /// Pending rewards to be claimed
+    pub pending_rewards: U256,
+}
+
+impl Delegation {
+    /// Create a new delegation
+    pub fn new(delegator: Address, validator: Address, amount: U256, delegated_at: u64) -> Self {
+        Self {
+            delegator,
+            validator,
+            amount,
+            delegated_at,
+            pending_rewards: U256::ZERO,
+        }
+    }
+
+    /// Serialize delegation
+    pub fn to_bytes(&self) -> Vec<u8> {
+        borsh::to_vec(self).expect("serialization should not fail")
+    }
+
+    /// Deserialize delegation
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, borsh::io::Error> {
+        borsh::from_slice(bytes)
+    }
+
+    /// Create storage key for delegation (delegator + validator)
+    pub fn storage_key(delegator: &Address, validator: &Address) -> Vec<u8> {
+        let mut key = Vec::with_capacity(40);
+        key.extend_from_slice(delegator.as_bytes());
+        key.extend_from_slice(validator.as_bytes());
+        key
+    }
+}
+
+/// Undelegation record: pending stake withdrawal
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+pub struct Undelegation {
+    /// Delegator address
+    pub delegator: Address,
+    /// Validator address
+    pub validator: Address,
+    /// Amount being undelegated
+    pub amount: U256,
+    /// Timestamp when funds can be withdrawn
+    pub unlock_at: u64,
+}
+
+impl Undelegation {
+    /// Create a new undelegation
+    pub fn new(delegator: Address, validator: Address, amount: U256, unlock_at: u64) -> Self {
+        Self {
+            delegator,
+            validator,
+            amount,
+            unlock_at,
+        }
+    }
+
+    /// Check if undelegation can be completed
+    pub fn is_unlocked(&self, current_time: u64) -> bool {
+        current_time >= self.unlock_at
+    }
+
+    /// Serialize undelegation
+    pub fn to_bytes(&self) -> Vec<u8> {
+        borsh::to_vec(self).expect("serialization should not fail")
+    }
+
+    /// Deserialize undelegation
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, borsh::io::Error> {
+        borsh::from_slice(bytes)
+    }
+
+    /// Create storage key for undelegation (delegator + validator + unlock_at)
+    pub fn storage_key(delegator: &Address, validator: &Address, unlock_at: u64) -> Vec<u8> {
+        let mut key = Vec::with_capacity(48);
+        key.extend_from_slice(delegator.as_bytes());
+        key.extend_from_slice(validator.as_bytes());
+        key.extend_from_slice(&unlock_at.to_be_bytes());
+        key
+    }
+}
+
+// ============ Validator Checkpoint ============
+
+/// Checkpoint for validator state persistence
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+pub struct ValidatorCheckpoint {
+    /// Epoch number
+    pub epoch: u64,
+    /// Block height at checkpoint
+    pub block_height: u64,
+    /// Timestamp of checkpoint
+    pub timestamp: u64,
+    /// Validator set at this checkpoint
+    pub validators: Vec<ValidatorNode>,
+    /// Epoch seed
+    pub epoch_seed: [u8; 32],
+    /// Finalized block height
+    pub finalized_height: u64,
+}
+
+impl ValidatorCheckpoint {
+    /// Create a new checkpoint
+    pub fn new(
+        epoch: u64,
+        block_height: u64,
+        timestamp: u64,
+        validators: Vec<ValidatorNode>,
+        epoch_seed: [u8; 32],
+        finalized_height: u64,
+    ) -> Self {
+        Self {
+            epoch,
+            block_height,
+            timestamp,
+            validators,
+            epoch_seed,
+            finalized_height,
+        }
+    }
+
+    /// Serialize checkpoint
+    pub fn to_bytes(&self) -> Vec<u8> {
+        borsh::to_vec(self).expect("serialization should not fail")
+    }
+
+    /// Deserialize checkpoint
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, borsh::io::Error> {
+        borsh::from_slice(bytes)
+    }
+}
+
+// ============ Double-Sign Detection ============
+
+/// Evidence of double-signing (producing conflicting blocks at same height)
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+pub struct DoubleSignEvidence {
+    /// Misbehaving validator address
+    pub validator: Address,
+    /// First conflicting block hash
+    pub block_hash_1: Hash,
+    /// Second conflicting block hash
+    pub block_hash_2: Hash,
+    /// Block height where double-sign occurred
+    pub height: u64,
+    /// Signature on first block
+    pub signature_1: Signature,
+    /// Signature on second block
+    pub signature_2: Signature,
+    /// Timestamp when evidence was created
+    pub timestamp: u64,
+}
+
+impl DoubleSignEvidence {
+    /// Create new double-sign evidence
+    pub fn new(
+        validator: Address,
+        block_hash_1: Hash,
+        block_hash_2: Hash,
+        height: u64,
+        signature_1: Signature,
+        signature_2: Signature,
+        timestamp: u64,
+    ) -> Self {
+        Self {
+            validator,
+            block_hash_1,
+            block_hash_2,
+            height,
+            signature_1,
+            signature_2,
+            timestamp,
+        }
+    }
+
+    /// Serialize evidence
+    pub fn to_bytes(&self) -> Vec<u8> {
+        borsh::to_vec(self).expect("serialization should not fail")
+    }
+
+    /// Deserialize evidence
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, borsh::io::Error> {
+        borsh::from_slice(bytes)
+    }
+
+    /// Convert to SlashingEvidence for network broadcast
+    pub fn to_slashing_evidence(&self, reporter: Address) -> SlashingEvidence {
+        SlashingEvidence::new(
+            self.validator,
+            SlashableOffense::DoubleSign,
+            self.to_bytes(),
+            self.height,
+            reporter,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -623,5 +912,145 @@ mod tests {
         assert!(epoch.contains(1000));
         assert!(epoch.contains(5000));
         assert!(!epoch.contains(epoch.end_time()));
+    }
+
+    #[test]
+    fn test_validator_total_stake() {
+        let mut validator = ValidatorNode::default();
+        validator.stake = U256::from_u64(10000);
+        validator.delegated_stake = U256::from_u64(5000);
+
+        assert_eq!(validator.total_stake(), U256::from_u64(15000));
+        assert!(validator.is_active());
+    }
+
+    #[test]
+    fn test_validator_active_with_delegated_only() {
+        let mut validator = ValidatorNode::default();
+        // No direct stake but has delegated stake
+        validator.delegated_stake = U256::from_u64(10000);
+
+        assert!(validator.is_active());
+    }
+
+    #[test]
+    fn test_validator_permanent_jail() {
+        let mut validator = ValidatorNode::default();
+        validator.stake = U256::from_u64(10000);
+        validator.is_jailed = true;
+        validator.jail_until = u64::MAX; // Permanent
+
+        assert!(validator.is_permanently_jailed());
+        assert!(!validator.can_unjail(u64::MAX - 1));
+        assert!(!validator.is_active());
+    }
+
+    #[test]
+    fn test_reward_distribution_serialization() {
+        let reward = RewardDistribution::new(
+            100,
+            U256::from_u64(7000),
+            U256::from_u64(3000),
+            U256::from_u64(200),
+            12345,
+        );
+
+        let bytes = reward.to_bytes();
+        let decoded = RewardDistribution::from_bytes(&bytes).unwrap();
+        assert_eq!(reward, decoded);
+    }
+
+    #[test]
+    fn test_delegation_serialization() {
+        let delegation = Delegation::new(
+            Address::new([0x11; 20]),
+            Address::new([0x22; 20]),
+            U256::from_u64(1000),
+            12345,
+        );
+
+        let bytes = delegation.to_bytes();
+        let decoded = Delegation::from_bytes(&bytes).unwrap();
+        assert_eq!(delegation, decoded);
+    }
+
+    #[test]
+    fn test_delegation_storage_key() {
+        let delegator = Address::new([0x11; 20]);
+        let validator = Address::new([0x22; 20]);
+
+        let key = Delegation::storage_key(&delegator, &validator);
+        assert_eq!(key.len(), 40);
+        assert_eq!(&key[0..20], delegator.as_bytes());
+        assert_eq!(&key[20..40], validator.as_bytes());
+    }
+
+    #[test]
+    fn test_undelegation_unlock() {
+        let undelegation = Undelegation::new(
+            Address::new([0x11; 20]),
+            Address::new([0x22; 20]),
+            U256::from_u64(1000),
+            10000, // unlock_at
+        );
+
+        assert!(!undelegation.is_unlocked(9999));
+        assert!(undelegation.is_unlocked(10000));
+        assert!(undelegation.is_unlocked(10001));
+    }
+
+    #[test]
+    fn test_validator_checkpoint_serialization() {
+        let validator = ValidatorNode::default();
+        let checkpoint = ValidatorCheckpoint::new(
+            1,
+            100,
+            12345,
+            vec![validator],
+            [0xab; 32],
+            90,
+        );
+
+        let bytes = checkpoint.to_bytes();
+        let decoded = ValidatorCheckpoint::from_bytes(&bytes).unwrap();
+        assert_eq!(checkpoint, decoded);
+    }
+
+    #[test]
+    fn test_double_sign_evidence_serialization() {
+        let evidence = DoubleSignEvidence::new(
+            Address::new([0x11; 20]),
+            Hash::new([0x22; 32]),
+            Hash::new([0x33; 32]),
+            100,
+            Signature::new([0x44; 64]),
+            Signature::new([0x55; 64]),
+            12345,
+        );
+
+        let bytes = evidence.to_bytes();
+        let decoded = DoubleSignEvidence::from_bytes(&bytes).unwrap();
+        assert_eq!(evidence, decoded);
+    }
+
+    #[test]
+    fn test_double_sign_to_slashing_evidence() {
+        let evidence = DoubleSignEvidence::new(
+            Address::new([0x11; 20]),
+            Hash::new([0x22; 32]),
+            Hash::new([0x33; 32]),
+            100,
+            Signature::new([0x44; 64]),
+            Signature::new([0x55; 64]),
+            12345,
+        );
+
+        let reporter = Address::new([0x66; 20]);
+        let slashing = evidence.to_slashing_evidence(reporter);
+
+        assert_eq!(slashing.offender, evidence.validator);
+        assert_eq!(slashing.offense, SlashableOffense::DoubleSign);
+        assert_eq!(slashing.block_height, evidence.height);
+        assert_eq!(slashing.reporter, reporter);
     }
 }
