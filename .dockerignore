@@ -1,0 +1,29 @@
+# Build artifacts
+target/
+*.o
+*.a
+*.so
+
+# Version control
+.git/
+.gitignore
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Documentation
+docs/
+*.md
+!README.md
+
+# Test data
+test_data/
+*.log
+
+# Temporary files
+tmp/
+temp/
+*.tmp
