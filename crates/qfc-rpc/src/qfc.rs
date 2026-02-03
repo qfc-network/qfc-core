@@ -13,6 +13,10 @@ pub struct RpcValidator {
     pub contribution_score: String,
     pub uptime: String,
     pub is_active: bool,
+    /// Whether this validator provides compute contribution
+    pub provides_compute: bool,
+    /// Current hashrate in H/s (0 if not mining)
+    pub hashrate: String,
 }
 
 /// Detailed validator score breakdown

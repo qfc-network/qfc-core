@@ -529,6 +529,8 @@ impl QfcApiServer for RpcServer {
                     contribution_score: format!("0x{:x}", score),
                     uptime: format!("0x{:x}", v.uptime),
                     is_active: v.is_active(),
+                    provides_compute: v.provides_compute,
+                    hashrate: v.hashrate.to_string(),
                 }
             })
             .collect();
