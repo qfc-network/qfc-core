@@ -54,3 +54,75 @@ impl NetworkConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_config() {
+        let config = NetworkConfig::default();
+
+        assert_eq!(config.max_inbound_peers, 50);
+        assert_eq!(config.max_outbound_peers, 25);
+        assert_eq!(config.idle_timeout, Duration::from_secs(60));
+        assert!(config.enable_mdns);
+        assert!(config.secret_key.is_none());
+        assert!(config.bootnodes.is_empty());
+        assert!(!config.listen_addresses.is_empty());
+    }
+
+    #[test]
+    fn test_default_listen_address() {
+        let config = NetworkConfig::default();
+
+        let addr = &config.listen_addresses[0];
+        let addr_str = addr.to_string();
+
+        assert!(addr_str.contains("0.0.0.0"));
+        assert!(addr_str.contains("30303"));
+    }
+
+    #[test]
+    fn test_dev_config() {
+        let config = NetworkConfig::dev();
+
+        assert!(config.enable_mdns);
+
+        let addr = &config.listen_addresses[0];
+        let addr_str = addr.to_string();
+
+        // Dev config uses localhost
+        assert!(addr_str.contains("127.0.0.1"));
+        // Port 0 means random port
+        assert!(addr_str.contains("/tcp/0"));
+    }
+
+    #[test]
+    fn test_config_clone() {
+        let config = NetworkConfig {
+            max_inbound_peers: 100,
+            max_outbound_peers: 50,
+            secret_key: Some([1u8; 32]),
+            ..Default::default()
+        };
+
+        let cloned = config.clone();
+
+        assert_eq!(cloned.max_inbound_peers, 100);
+        assert_eq!(cloned.max_outbound_peers, 50);
+        assert_eq!(cloned.secret_key, Some([1u8; 32]));
+    }
+
+    #[test]
+    fn test_config_with_bootnodes() {
+        let bootnode: Multiaddr = "/ip4/1.2.3.4/tcp/30303".parse().unwrap();
+        let config = NetworkConfig {
+            bootnodes: vec![bootnode.clone()],
+            ..Default::default()
+        };
+
+        assert_eq!(config.bootnodes.len(), 1);
+        assert_eq!(config.bootnodes[0].to_string(), "/ip4/1.2.3.4/tcp/30303");
+    }
+}

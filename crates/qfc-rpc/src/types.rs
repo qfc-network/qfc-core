@@ -291,3 +291,184 @@ pub struct CallRequest {
     pub value: Option<String>,
     pub data: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_block_number_parse_hex() {
+        let json = "\"0x10\"";
+        let bn: BlockNumber = serde_json::from_str(json).unwrap();
+        match bn {
+            BlockNumber::Number(n) => assert_eq!(n, 16),
+            _ => panic!("Expected Number"),
+        }
+    }
+
+    #[test]
+    fn test_block_number_parse_latest() {
+        let json = "\"latest\"";
+        let bn: BlockNumber = serde_json::from_str(json).unwrap();
+        match bn {
+            BlockNumber::Tag(BlockTag::Latest) => {}
+            _ => panic!("Expected Latest tag"),
+        }
+    }
+
+    #[test]
+    fn test_block_number_parse_earliest() {
+        let json = "\"earliest\"";
+        let bn: BlockNumber = serde_json::from_str(json).unwrap();
+        match bn {
+            BlockNumber::Tag(BlockTag::Earliest) => {}
+            _ => panic!("Expected Earliest tag"),
+        }
+    }
+
+    #[test]
+    fn test_block_number_parse_pending() {
+        let json = "\"pending\"";
+        let bn: BlockNumber = serde_json::from_str(json).unwrap();
+        match bn {
+            BlockNumber::Tag(BlockTag::Pending) => {}
+            _ => panic!("Expected Pending tag"),
+        }
+    }
+
+    #[test]
+    fn test_block_number_parse_finalized() {
+        let json = "\"finalized\"";
+        let bn: BlockNumber = serde_json::from_str(json).unwrap();
+        match bn {
+            BlockNumber::Tag(BlockTag::Finalized) => {}
+            _ => panic!("Expected Finalized tag"),
+        }
+    }
+
+    #[test]
+    fn test_block_number_parse_safe() {
+        let json = "\"safe\"";
+        let bn: BlockNumber = serde_json::from_str(json).unwrap();
+        match bn {
+            BlockNumber::Tag(BlockTag::Safe) => {}
+            _ => panic!("Expected Safe tag"),
+        }
+    }
+
+    #[test]
+    fn test_block_number_parse_case_insensitive() {
+        let json = "\"LATEST\"";
+        let bn: BlockNumber = serde_json::from_str(json).unwrap();
+        match bn {
+            BlockNumber::Tag(BlockTag::Latest) => {}
+            _ => panic!("Expected Latest tag"),
+        }
+    }
+
+    #[test]
+    fn test_block_number_serialize_number() {
+        let bn = BlockNumber::Number(255);
+        let json = serde_json::to_string(&bn).unwrap();
+        assert_eq!(json, "\"0xff\"");
+    }
+
+    #[test]
+    fn test_block_number_serialize_tag() {
+        let bn = BlockNumber::Tag(BlockTag::Latest);
+        let json = serde_json::to_string(&bn).unwrap();
+        assert_eq!(json, "\"latest\"");
+    }
+
+    #[test]
+    fn test_block_number_default() {
+        let bn = BlockNumber::default();
+        match bn {
+            BlockNumber::Tag(BlockTag::Latest) => {}
+            _ => panic!("Expected default to be Latest"),
+        }
+    }
+
+    #[test]
+    fn test_call_request_serialization() {
+        let req = CallRequest {
+            from: Some("0x1234".to_string()),
+            to: Some("0x5678".to_string()),
+            gas: Some("0x5208".to_string()),
+            gas_price: Some("0x3b9aca00".to_string()),
+            value: Some("0x0".to_string()),
+            data: Some("0x".to_string()),
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: CallRequest = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.from, req.from);
+        assert_eq!(parsed.to, req.to);
+        assert_eq!(parsed.gas, req.gas);
+    }
+
+    #[test]
+    fn test_rpc_log_from_log() {
+        let log = qfc_types::Log {
+            address: Address::default(),
+            topics: vec![Hash::default()],
+            data: vec![1, 2, 3, 4],
+        };
+
+        let rpc_log = RpcLog::from_log(&log);
+        assert_eq!(rpc_log.data, "0x01020304");
+        assert_eq!(rpc_log.topics.len(), 1);
+    }
+
+    #[test]
+    fn test_rpc_receipt_status_success() {
+        let receipt = Receipt {
+            tx_hash: Hash::default(),
+            tx_index: 0,
+            cumulative_gas_used: 21000,
+            gas_used: 21000,
+            status: qfc_types::ReceiptStatus::Success,
+            contract_address: None,
+            logs: vec![],
+            logs_bloom: qfc_types::Bloom::default(),
+        };
+
+        let rpc_receipt = RpcReceipt::from_receipt(
+            receipt,
+            Address::default(),
+            Some(Address::default()),
+            Some(Hash::default()),
+            Some(100),
+        );
+
+        assert_eq!(rpc_receipt.status, "0x1");
+        assert_eq!(rpc_receipt.gas_used, "0x5208");
+    }
+
+    #[test]
+    fn test_rpc_receipt_status_failure() {
+        let receipt = Receipt {
+            tx_hash: Hash::default(),
+            tx_index: 0,
+            cumulative_gas_used: 21000,
+            gas_used: 21000,
+            status: qfc_types::ReceiptStatus::Failure("test error".to_string()),
+            contract_address: None,
+            logs: vec![],
+            logs_bloom: qfc_types::Bloom::default(),
+        };
+
+        let rpc_receipt = RpcReceipt::from_receipt(
+            receipt,
+            Address::default(),
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(rpc_receipt.status, "0x0");
+        assert!(rpc_receipt.block_hash.is_none());
+        assert!(rpc_receipt.block_number.is_none());
+    }
+}
