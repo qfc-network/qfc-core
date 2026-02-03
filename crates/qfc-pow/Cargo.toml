@@ -1,0 +1,20 @@
+[package]
+name = "qfc-pow"
+description = "Proof of Work mining for QFC compute contribution"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+qfc-types.workspace = true
+qfc-crypto.workspace = true
+borsh.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+rand.workspace = true
+parking_lot.workspace = true
+
+[dev-dependencies]
