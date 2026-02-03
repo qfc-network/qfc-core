@@ -2,11 +2,13 @@
 //!
 //! Main entry point for running a QFC node.
 
+mod miner;
 mod producer;
 mod sync;
 
 use anyhow::Result;
 use clap::Parser;
+use miner::{MiningConfig, MiningService};
 use parking_lot::RwLock;
 use producer::{BlockProducer, ProducerConfig};
 use qfc_chain::{Chain, ChainConfig, GenesisConfig};
@@ -67,6 +69,14 @@ struct Args {
     /// Bootnode addresses (multiaddr format)
     #[arg(long)]
     bootnodes: Vec<String>,
+
+    /// Enable mining for compute contribution (20% weight in PoC)
+    #[arg(long)]
+    mine: bool,
+
+    /// Number of mining threads (default: number of CPUs)
+    #[arg(long)]
+    threads: Option<usize>,
 }
 
 #[tokio::main]
@@ -284,6 +294,38 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Start mining service if enabled
+    let mining_active = if args.mine && is_validator {
+        let validator_address = consensus.our_address().unwrap();
+        let threads = args.threads.unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+        });
+
+        let mining_config = MiningConfig::default().with_threads(threads);
+        let mining_service = Arc::new(MiningService::new(
+            chain.clone(),
+            consensus.clone(),
+            _network_service.clone(),
+            mining_config,
+            validator_address,
+        ));
+
+        let mining_service_clone = Arc::clone(&mining_service);
+        tokio::spawn(async move {
+            mining_service_clone.start().await;
+        });
+
+        info!("Mining enabled with {} threads", threads);
+        true
+    } else if args.mine && !is_validator {
+        warn!("Mining requires validator mode (--validator or --dev)");
+        false
+    } else {
+        false
+    };
+
     // Print startup info
     info!("===========================================");
     info!("QFC Node is running!");
@@ -295,6 +337,9 @@ async fn main() -> Result<()> {
     }
     if is_validator {
         info!("Block producer: ACTIVE");
+    }
+    if mining_active {
+        info!("Mining: ACTIVE (20% compute contribution)");
     }
     info!("===========================================");
 

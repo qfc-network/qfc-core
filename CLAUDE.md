@@ -16,6 +16,7 @@ qfc-core/
 │   ├── qfc-executor/          # 交易执行
 │   ├── qfc-mempool/           # 交易池
 │   ├── qfc-consensus/         # PoC 共识引擎
+│   ├── qfc-pow/               # Blake3 PoW 挖矿 (20%计算贡献)
 │   ├── qfc-chain/             # 链管理
 │   ├── qfc-network/           # P2P 网络 (libp2p)
 │   ├── qfc-rpc/               # JSON-RPC API
@@ -37,6 +38,12 @@ cargo run --bin qfc-node -- --dev
 
 # 运行验证者节点
 cargo run --bin qfc-node -- --validator <SECRET_KEY_HEX> --p2p-port 30303
+
+# 运行验证者节点 + 挖矿 (贡献算力)
+cargo run --bin qfc-node -- --validator <SECRET_KEY_HEX> --mine --threads 4
+
+# 开发模式 + 挖矿
+cargo run --bin qfc-node -- --dev --mine
 
 # 连接到其他节点
 cargo run --bin qfc-node -- --bootnodes "/ip4/127.0.0.1/tcp/30303/p2p/<PEER_ID>"

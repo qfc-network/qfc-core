@@ -430,6 +430,8 @@ pub enum ValidatorMessage {
     EpochAnnouncement(EpochAnnouncement),
     /// Slashing evidence
     SlashingEvidence(SlashingEvidence),
+    /// Work proof for compute contribution
+    WorkProof(crate::WorkProof),
 }
 
 impl ValidatorMessage {

@@ -5,10 +5,11 @@ use crate::scoring::{calculate_contribution_score, NetworkState};
 use parking_lot::RwLock;
 use qfc_crypto::{blake3_hash, vrf_output_to_f64, vrf_verify_with_seed, VrfKeypair};
 use qfc_storage;
+use qfc_pow::{calculate_hashrate, verify_proof, initial_difficulty};
 use qfc_types::{
-    Address, Block, BlockHeader, DoubleSignEvidence, Epoch, Hash, Receipt, Signature, Transaction,
-    ValidatorCheckpoint, ValidatorNode, Vote, BLOCK_VERSION, DEFAULT_BLOCK_GAS_LIMIT,
-    FINALITY_THRESHOLD, SLASH_DOUBLE_SIGN_PERCENT,
+    Address, Block, BlockHeader, DifficultyConfig, DoubleSignEvidence, Epoch, Hash, MiningTask,
+    Receipt, Signature, Transaction, ValidatorCheckpoint, ValidatorNode, Vote, WorkProof,
+    BLOCK_VERSION, DEFAULT_BLOCK_GAS_LIMIT, FINALITY_THRESHOLD, SLASH_DOUBLE_SIGN_PERCENT,
 };
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -870,6 +871,111 @@ impl ConsensusEngine {
                 v.delegated_stake
             );
         }
+    }
+
+    // ========================
+    // Mining/Compute Methods
+    // ========================
+
+    /// Set whether a validator provides compute contribution
+    pub fn set_provides_compute(&self, validator: &Address, provides: bool) {
+        let mut validators = self.validators.write();
+        if let Some(v) = validators.iter_mut().find(|v| v.address == *validator) {
+            v.provides_compute = provides;
+            debug!(
+                "Validator {} provides_compute set to {}",
+                validator, provides
+            );
+        }
+    }
+
+    /// Update a validator's hashrate from mining
+    pub fn update_hashrate(&self, validator: &Address, hashrate: u64) {
+        let mut validators = self.validators.write();
+        if let Some(v) = validators.iter_mut().find(|v| v.address == *validator) {
+            v.hashrate = hashrate;
+            debug!(
+                "Updated hashrate for {}: {} H/s",
+                validator, hashrate
+            );
+        }
+    }
+
+    /// Get a validator's current hashrate
+    pub fn get_hashrate(&self, validator: &Address) -> u64 {
+        let validators = self.validators.read();
+        validators
+            .iter()
+            .find(|v| v.address == *validator)
+            .map(|v| v.hashrate)
+            .unwrap_or(0)
+    }
+
+    /// Get total network hashrate
+    pub fn total_hashrate(&self) -> u64 {
+        let validators = self.validators.read();
+        validators
+            .iter()
+            .filter(|v| v.provides_compute)
+            .map(|v| v.hashrate)
+            .sum()
+    }
+
+    /// Process and verify a work proof from a miner
+    /// Returns the calculated hashrate if valid
+    pub fn process_work_proof(&self, proof: &WorkProof, task: &MiningTask) -> Result<u64> {
+        // 1. Verify the validator exists and is active
+        let validators = self.validators.read();
+        let validator = validators
+            .iter()
+            .find(|v| v.address == proof.validator)
+            .ok_or(ConsensusError::InvalidProducer)?;
+
+        if !validator.is_active() {
+            return Err(ConsensusError::ValidatorJailed);
+        }
+
+        if !validator.provides_compute {
+            return Err(ConsensusError::InvalidProducer);
+        }
+        drop(validators);
+
+        // 2. Verify the proof is valid (correct hash computation and meets difficulty)
+        verify_proof(proof, task)
+            .map_err(|_| ConsensusError::InvalidVrfProof)?;
+
+        // 3. Calculate hashrate from the proof
+        let hashrate = calculate_hashrate(proof, task);
+
+        // 4. Update the validator's hashrate
+        self.update_hashrate(&proof.validator, hashrate);
+
+        debug!(
+            "Processed work proof from {}: epoch={}, work_count={}, hashrate={}",
+            proof.validator, proof.epoch, proof.work_count, hashrate
+        );
+
+        Ok(hashrate)
+    }
+
+    /// Create a mining task for the current epoch
+    pub fn create_mining_task(&self, difficulty_config: &DifficultyConfig) -> MiningTask {
+        let epoch = self.current_epoch.read();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        // Use initial difficulty if no previous difficulty data
+        let difficulty = initial_difficulty(difficulty_config);
+
+        MiningTask::new(
+            epoch.number,
+            epoch.seed,
+            difficulty,
+            now,
+            now + self.config.epoch_duration_ms,
+        )
     }
 }
 

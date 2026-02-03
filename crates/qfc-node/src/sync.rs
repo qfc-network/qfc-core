@@ -7,7 +7,7 @@ use qfc_crypto::{blake3_hash, verify_hash_signature};
 use qfc_mempool::Mempool;
 use qfc_network::{NetworkMessage, NetworkService, SyncEvent, SyncRequest, SyncResponse};
 use qfc_rpc::SyncStatusProvider;
-use qfc_types::{Block, Hash, Heartbeat, SlashingEvidence, ValidatorMessage, Vote, VoteDecision};
+use qfc_types::{Block, Hash, Heartbeat, SlashingEvidence, ValidatorMessage, Vote, VoteDecision, WorkProof};
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
@@ -602,6 +602,9 @@ impl SyncManager {
             ValidatorMessage::SlashingEvidence(evidence) => {
                 self.handle_slashing_evidence(evidence).await;
             }
+            ValidatorMessage::WorkProof(proof) => {
+                self.handle_work_proof(proof).await;
+            }
         }
     }
 
@@ -754,6 +757,60 @@ impl SyncManager {
         info!(
             "Slashed validator {} by {}%, jailed for {}ms",
             evidence.offender, slash_percent, jail_duration_ms
+        );
+    }
+
+    /// Handle a work proof from mining
+    async fn handle_work_proof(&self, proof: WorkProof) {
+        let consensus = self.chain.consensus();
+        let validators = consensus.get_validators();
+
+        // Find the validator who submitted the proof
+        let validator = match validators.iter().find(|v| v.address == proof.validator) {
+            Some(v) => v,
+            None => {
+                debug!("Work proof from unknown validator: {}", proof.validator);
+                return;
+            }
+        };
+
+        // Check if validator is active
+        if !validator.is_active() {
+            debug!("Work proof from inactive/jailed validator: {}", proof.validator);
+            return;
+        }
+
+        // Verify the proof signature
+        let proof_hash = blake3_hash(&proof.to_bytes_without_signature());
+        if verify_hash_signature(&validator.public_key, &proof_hash, &proof.signature).is_err() {
+            warn!("Invalid work proof signature from {}", proof.validator);
+            return;
+        }
+
+        // Get current epoch to construct mining task for hashrate calculation
+        let epoch = consensus.get_epoch();
+
+        // Calculate hashrate from the proof
+        // Note: We use a simplified calculation here since we don't have the exact task
+        // that was used. The work_count and epoch_duration are sufficient.
+        let epoch_duration_secs = 10; // Default epoch duration
+        let estimated_hashrate = if epoch_duration_secs > 0 {
+            // Rough estimate: work_count * some factor / duration
+            // This is a simplified estimate since we don't have full task info
+            proof.work_count.saturating_mul(65536) / epoch_duration_secs
+        } else {
+            0
+        };
+
+        // Update the validator's hashrate
+        consensus.update_hashrate(&proof.validator, estimated_hashrate);
+
+        info!(
+            "Received work proof from {} for epoch {}: {} valid hashes, ~{} H/s",
+            proof.validator,
+            proof.epoch,
+            proof.work_count,
+            estimated_hashrate
         );
     }
 

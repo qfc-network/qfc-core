@@ -44,6 +44,9 @@ pub mod cf {
     /// Validator checkpoints: epoch (u64 BE) -> ValidatorCheckpoint
     pub const CHECKPOINTS: &str = "checkpoints";
 
+    /// Work proofs: epoch (u64 BE) + validator_address -> WorkProof
+    pub const WORK_PROOFS: &str = "work_proofs";
+
     /// All column families
     pub const ALL: &[&str] = &[
         BLOCK_HEADERS,
@@ -60,6 +63,7 @@ pub mod cf {
         DELEGATIONS,
         UNDELEGATIONS,
         CHECKPOINTS,
+        WORK_PROOFS,
     ];
 }
 

@@ -11,6 +11,7 @@ rust-version.workspace = true
 qfc-types.workspace = true
 qfc-crypto.workspace = true
 qfc-storage.workspace = true
+qfc-pow.workspace = true
 qfc-state.workspace = true
 qfc-executor.workspace = true
 qfc-mempool.workspace = true
