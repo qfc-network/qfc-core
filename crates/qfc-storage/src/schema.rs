@@ -47,6 +47,10 @@ pub mod cf {
     /// Work proofs: epoch (u64 BE) + validator_address -> WorkProof
     pub const WORK_PROOFS: &str = "work_proofs";
 
+    /// Ethereum transaction hash index: eth_keccak256_hash -> internal_blake3_hash
+    /// Used to look up transactions/receipts by Ethereum-computed hash
+    pub const ETH_TX_INDEX: &str = "eth_tx_index";
+
     /// All column families
     pub const ALL: &[&str] = &[
         BLOCK_HEADERS,
@@ -64,6 +68,7 @@ pub mod cf {
         UNDELEGATIONS,
         CHECKPOINTS,
         WORK_PROOFS,
+        ETH_TX_INDEX,
     ];
 }
 

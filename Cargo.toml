@@ -44,6 +44,9 @@ ed25519-dalek = { version = "2.1", features = ["serde", "rand_core"] }
 constant_time_eq = "=0.3.1"
 rand = "0.8"
 rand_core = "0.6"
+k256 = { version = "0.13", features = ["ecdsa-core", "sha256"] }
+rlp = "0.5"
+sha3 = "0.10"
 
 # Storage
 rocksdb = "0.22"

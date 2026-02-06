@@ -322,6 +322,29 @@ impl Chain {
         Ok(qfc_storage::decode_tx_location(&location_bytes))
     }
 
+    /// Store Ethereum transaction hash mapping (keccak256 -> blake3)
+    /// This allows looking up transactions/receipts by the hash returned to Ethereum wallets
+    pub fn store_eth_tx_hash_mapping(&self, eth_hash: &Hash, internal_hash: &Hash) -> Result<()> {
+        self.db.put(
+            cf::ETH_TX_INDEX,
+            eth_hash.as_bytes(),
+            internal_hash.as_bytes(),
+        )?;
+        Ok(())
+    }
+
+    /// Translate Ethereum hash to internal hash if it exists
+    /// Returns the internal hash if this is an Ethereum transaction, otherwise returns the original hash
+    pub fn translate_eth_hash(&self, hash: &Hash) -> Result<Hash> {
+        match self.db.get(cf::ETH_TX_INDEX, hash.as_bytes())? {
+            Some(internal_bytes) => {
+                Hash::from_slice(&internal_bytes)
+                    .ok_or_else(|| ChainError::Storage("Invalid internal hash".to_string()))
+            }
+            None => Ok(*hash), // Not an Ethereum tx, return as-is
+        }
+    }
+
     /// Get receipt with block info
     pub fn get_receipt_with_block_info(
         &self,

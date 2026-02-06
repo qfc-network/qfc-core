@@ -16,6 +16,8 @@ serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 revm.workspace = true
+sha3.workspace = true
+hex.workspace = true
 
 [dev-dependencies]
 tempfile = "3.9"

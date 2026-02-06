@@ -15,7 +15,7 @@ use qfc_consensus::NetworkState;
 use qfc_crypto::blake3_hash;
 use qfc_mempool::Mempool;
 use qfc_network::NetworkService;
-use qfc_types::{Address, Hash, Transaction, U256};
+use qfc_types::{Address, EthTransaction, Hash, Transaction, U256};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -255,52 +255,77 @@ impl EthApiServer for RpcServer {
     }
 
     async fn get_transaction_by_hash(&self, hash: String) -> RpcResult<Option<RpcTransaction>> {
-        let hash = Self::parse_hash(&hash)?;
+        let original_hash = Self::parse_hash(&hash)?;
 
-        // Check mempool first
-        if let Some(pooled) = self.mempool.read().get(&hash) {
+        // Translate Ethereum hash to internal hash if needed
+        let internal_hash = self
+            .chain
+            .translate_eth_hash(&original_hash)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        // Check mempool first (using internal hash)
+        if let Some(pooled) = self.mempool.read().get(&internal_hash) {
             let sender_hash = blake3_hash(pooled.tx.signature.as_bytes());
             let sender = Address::from_slice(&sender_hash.as_bytes()[12..32]).unwrap();
-            return Ok(Some(RpcTransaction::from_pending(pooled.tx, hash, sender)));
+            // Return the original hash that the user queried with
+            return Ok(Some(RpcTransaction::from_pending(pooled.tx, original_hash, sender)));
         }
 
-        // Check chain
+        // Check chain (using internal hash)
         let tx = self
             .chain
-            .get_transaction(&hash)
+            .get_transaction(&internal_hash)
             .map_err(|e| RpcError::Internal(e.to_string()))?;
 
         match tx {
             Some(t) => {
                 let sender_hash = blake3_hash(t.signature.as_bytes());
                 let sender = Address::from_slice(&sender_hash.as_bytes()[12..32]).unwrap();
-                Ok(Some(RpcTransaction::from_pending(t, hash, sender)))
+                // Return the original hash that the user queried with
+                Ok(Some(RpcTransaction::from_pending(t, original_hash, sender)))
             }
             None => Ok(None),
         }
     }
 
     async fn get_transaction_receipt(&self, hash: String) -> RpcResult<Option<RpcReceipt>> {
-        let hash = Self::parse_hash(&hash)?;
+        let original_hash = Self::parse_hash(&hash)?;
 
-        // Get receipt with block info
+        // Translate Ethereum hash to internal hash if needed
+        let internal_hash = self
+            .chain
+            .translate_eth_hash(&original_hash)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        // Get receipt with block info (using internal hash)
         let result = self
             .chain
-            .get_receipt_with_block_info(&hash)
+            .get_receipt_with_block_info(&internal_hash)
             .map_err(|e| RpcError::Internal(e.to_string()))?;
 
         match result {
-            Some((receipt, block_hash, block_number)) => {
-                // Get transaction to extract from/to
+            Some((mut receipt, block_hash, block_number)) => {
+                // Override the tx_hash in receipt with the original hash the user queried with
+                // This ensures Ethereum wallets see the hash they expect
+                receipt.tx_hash = original_hash;
+
+                // Get transaction to extract from/to (using internal hash)
                 let tx = self
                     .chain
-                    .get_transaction(&hash)
+                    .get_transaction(&internal_hash)
                     .map_err(|e| RpcError::Internal(e.to_string()))?;
 
-                let (from, to) = if let Some(tx) = tx {
-                    // Derive sender from public key
-                    let from = qfc_crypto::address_from_public_key(&tx.public_key);
-                    (from, tx.to)
+                let (from, to) = if let Some(ref tx) = tx {
+                    // Check if this is an Ethereum transaction (marker 0xEE)
+                    if tx.public_key.0[0] == 0xEE {
+                        // Extract sender from the stored bytes (bytes 2-21)
+                        let from = Address::from_slice(&tx.public_key.0[2..22]).unwrap_or(Address::ZERO);
+                        (from, tx.to)
+                    } else {
+                        // QFC native: derive sender from public key
+                        let from = qfc_crypto::address_from_public_key(&tx.public_key);
+                        (from, tx.to)
+                    }
                 } else {
                     (Address::ZERO, None)
                 };
@@ -332,33 +357,104 @@ impl EthApiServer for RpcServer {
         let data_str = data.strip_prefix("0x").unwrap_or(&data);
         let bytes = hex::decode(data_str).map_err(|e| RpcError::InvalidParams(e.to_string()))?;
 
-        let tx =
-            Transaction::from_bytes(&bytes).map_err(|e| RpcError::InvalidParams(e.to_string()))?;
+        // Try QFC native format first (Borsh + Ed25519)
+        if let Ok(tx) = Transaction::from_bytes(&bytes) {
+            let hash = blake3_hash(&tx.to_bytes_without_signature());
 
-        let hash = blake3_hash(&tx.to_bytes_without_signature());
+            // Derive sender from public key (Ed25519)
+            let sender = qfc_crypto::address_from_public_key(&tx.public_key);
 
-        // Derive sender from public key (Ed25519)
-        let sender = qfc_crypto::address_from_public_key(&tx.public_key);
+            // Add to mempool
+            self.mempool
+                .write()
+                .add(tx.clone(), sender)
+                .map_err(|e| RpcError::Execution(e.to_string()))?;
+
+            info!("Added QFC transaction {} to mempool from {}", hash, sender);
+
+            // Broadcast to network if available
+            if let Some(network) = &self.network {
+                let tx_bytes = tx.to_bytes();
+                if let Err(e) = network.broadcast_transaction(tx_bytes).await {
+                    warn!("Failed to broadcast transaction: {}", e);
+                } else {
+                    debug!("Broadcast transaction {} to network", hash);
+                }
+            }
+
+            return Ok(hash.to_string());
+        }
+
+        // Try Ethereum format (RLP + secp256k1)
+        let eth_tx = EthTransaction::decode(&bytes)
+            .map_err(|e| RpcError::InvalidParams(format!("Failed to decode transaction: {}", e)))?;
+
+        // Validate chain ID
+        if eth_tx.chain_id != self.chain_id {
+            return Err(RpcError::InvalidParams(format!(
+                "Chain ID mismatch: expected {}, got {}",
+                self.chain_id, eth_tx.chain_id
+            ))
+            .into());
+        }
+
+        // The sender is already recovered from the Ethereum signature
+        let sender = eth_tx.sender;
+
+        // Convert to QFC transaction format
+        let mut qfc_tx = eth_tx.to_qfc_transaction();
+
+        // Store the Ethereum signature in a special format for later verification
+        // We encode r, s into the signature field (first 32 bytes = r, next 32 bytes = s)
+        let mut eth_sig_bytes = [0u8; 64];
+        eth_sig_bytes[..32].copy_from_slice(&eth_tx.r);
+        eth_sig_bytes[32..].copy_from_slice(&eth_tx.s);
+        qfc_tx.signature = qfc_types::Signature::new(eth_sig_bytes);
+
+        // Use a special marker in public_key to indicate this is an Ethereum transaction
+        // Byte 0 = 0xEE (Ethereum marker)
+        // Byte 1 = v value (recovery id)
+        // Bytes 2-21 = sender address (20 bytes)
+        let mut eth_pubkey_marker = [0u8; 32];
+        eth_pubkey_marker[0] = 0xEE; // Ethereum transaction marker
+        eth_pubkey_marker[1] = eth_tx.v as u8; // Recovery ID / v value
+        eth_pubkey_marker[2..22].copy_from_slice(sender.as_bytes()); // Store recovered sender
+        qfc_tx.public_key = qfc_types::PublicKey::new(eth_pubkey_marker);
+
+        // Use keccak256 hash for Ethereum transactions (this is what the wallet expects)
+        let eth_hash = eth_tx.hash;
+
+        // Compute the internal blake3 hash (this is how the tx is indexed internally)
+        let internal_hash = blake3_hash(&qfc_tx.to_bytes_without_signature());
+
+        // Store the mapping from Ethereum hash to internal hash
+        // This allows receipt/tx lookup by the hash returned to the wallet
+        if let Err(e) = self.chain.store_eth_tx_hash_mapping(&eth_hash, &internal_hash) {
+            warn!("Failed to store Ethereum tx hash mapping: {}", e);
+        }
 
         // Add to mempool
         self.mempool
             .write()
-            .add(tx.clone(), sender)
+            .add(qfc_tx.clone(), sender)
             .map_err(|e| RpcError::Execution(e.to_string()))?;
 
-        info!("Added transaction {} to mempool from {}", hash, sender);
+        info!(
+            "Added Ethereum transaction {} to mempool from {} (internal: {}, is_eip1559: {})",
+            eth_hash, sender, internal_hash, eth_tx.is_eip1559
+        );
 
-        // Broadcast to network if available
+        // Broadcast to network - we send the original Ethereum-encoded bytes
+        // Other nodes will also decode it as Ethereum format
         if let Some(network) = &self.network {
-            let tx_bytes = tx.to_bytes();
-            if let Err(e) = network.broadcast_transaction(tx_bytes).await {
+            if let Err(e) = network.broadcast_transaction(bytes).await {
                 warn!("Failed to broadcast transaction: {}", e);
             } else {
-                debug!("Broadcast transaction {} to network", hash);
+                debug!("Broadcast transaction {} to network", eth_hash);
             }
         }
 
-        Ok(hash.to_string())
+        Ok(eth_hash.to_string())
     }
 
     async fn call(&self, request: CallRequest, _block: Option<BlockNumber>) -> RpcResult<String> {

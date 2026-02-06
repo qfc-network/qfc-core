@@ -11,6 +11,7 @@ mod validator;
 mod error;
 mod constants;
 mod pow;
+mod eth_transaction;
 
 pub use primitives::*;
 pub use block::*;
@@ -21,3 +22,4 @@ pub use validator::*;
 pub use error::*;
 pub use constants::*;
 pub use pow::*;
+pub use eth_transaction::*;
