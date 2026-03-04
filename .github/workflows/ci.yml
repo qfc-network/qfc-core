@@ -90,3 +90,4 @@ jobs:
           -A clippy::unused_enumerate_index
           -A clippy::new_without_default
           -A clippy::deref_addrof
+          -A clippy::default_constructed_unit_structs
