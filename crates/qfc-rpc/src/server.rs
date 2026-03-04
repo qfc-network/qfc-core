@@ -99,21 +99,24 @@ impl RpcServer {
     }
 
     /// Start the RPC server
-    pub async fn start(self, config: RpcConfig) -> Result<ServerHandle, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn start(
+        self,
+        config: RpcConfig,
+    ) -> Result<ServerHandle, Box<dyn std::error::Error + Send + Sync>> {
         if !config.http_enabled {
             return Err("HTTP not enabled".into());
         }
 
         info!("Starting RPC server on {}", config.http_addr);
 
-        let server = ServerBuilder::default()
-            .build(config.http_addr)
-            .await?;
+        let server = ServerBuilder::default().build(config.http_addr).await?;
 
         // Merge both RPC modules
         let mut eth_module = EthApiServer::into_rpc(self.clone());
         let qfc_module = QfcApiServer::into_rpc(self);
-        eth_module.merge(qfc_module).expect("Failed to merge RPC modules");
+        eth_module
+            .merge(qfc_module)
+            .expect("Failed to merge RPC modules");
 
         let handle = server.start(eth_module);
 
@@ -268,7 +271,11 @@ impl EthApiServer for RpcServer {
             let sender_hash = blake3_hash(pooled.tx.signature.as_bytes());
             let sender = Address::from_slice(&sender_hash.as_bytes()[12..32]).unwrap();
             // Return the original hash that the user queried with
-            return Ok(Some(RpcTransaction::from_pending(pooled.tx, original_hash, sender)));
+            return Ok(Some(RpcTransaction::from_pending(
+                pooled.tx,
+                original_hash,
+                sender,
+            )));
         }
 
         // Check chain (using internal hash)
@@ -319,7 +326,8 @@ impl EthApiServer for RpcServer {
                     // Check if this is an Ethereum transaction (marker 0xEE)
                     if tx.public_key.0[0] == 0xEE {
                         // Extract sender from the stored bytes (bytes 2-21)
-                        let from = Address::from_slice(&tx.public_key.0[2..22]).unwrap_or(Address::ZERO);
+                        let from =
+                            Address::from_slice(&tx.public_key.0[2..22]).unwrap_or(Address::ZERO);
                         (from, tx.to)
                     } else {
                         // QFC native: derive sender from public key
@@ -429,7 +437,10 @@ impl EthApiServer for RpcServer {
 
         // Store the mapping from Ethereum hash to internal hash
         // This allows receipt/tx lookup by the hash returned to the wallet
-        if let Err(e) = self.chain.store_eth_tx_hash_mapping(&eth_hash, &internal_hash) {
+        if let Err(e) = self
+            .chain
+            .store_eth_tx_hash_mapping(&eth_hash, &internal_hash)
+        {
             warn!("Failed to store Ethereum tx hash mapping: {}", e);
         }
 
@@ -461,7 +472,8 @@ impl EthApiServer for RpcServer {
         // Parse from address
         let from = if let Some(ref from_str) = request.from {
             let from_str = from_str.strip_prefix("0x").unwrap_or(from_str);
-            let bytes = hex::decode(from_str).map_err(|e| RpcError::InvalidParams(e.to_string()))?;
+            let bytes =
+                hex::decode(from_str).map_err(|e| RpcError::InvalidParams(e.to_string()))?;
             Address::from_slice(&bytes)
         } else {
             None
@@ -527,7 +539,8 @@ impl EthApiServer for RpcServer {
         // Parse from address
         let from = if let Some(ref from_str) = request.from {
             let from_str = from_str.strip_prefix("0x").unwrap_or(from_str);
-            let bytes = hex::decode(from_str).map_err(|e| RpcError::InvalidParams(e.to_string()))?;
+            let bytes =
+                hex::decode(from_str).map_err(|e| RpcError::InvalidParams(e.to_string()))?;
             Address::from_slice(&bytes)
         } else {
             None
@@ -712,7 +725,10 @@ impl QfcApiServer for RpcServer {
             .filter(|v| v.provides_compute)
             .map(|v| v.hashrate)
             .sum();
-        let total_storage: u64 = validators.iter().map(|v| v.storage_provided_gb as u64).sum();
+        let total_storage: u64 = validators
+            .iter()
+            .map(|v| v.storage_provided_gb as u64)
+            .sum();
 
         // Calculate stake score component (30% weight)
         let stake_ratio = if total_stake > 0 {
@@ -789,10 +805,16 @@ impl QfcApiServer for RpcServer {
         Ok(state_str.to_string())
     }
 
-    async fn request_faucet(&self, address: String, amount: String) -> RpcResult<RpcFaucetResponse> {
+    async fn request_faucet(
+        &self,
+        address: String,
+        amount: String,
+    ) -> RpcResult<RpcFaucetResponse> {
         // Only allow in dev mode (chain_id 9000)
         if self.chain_id != 9000 {
-            return Err(RpcError::Execution("Faucet only available in dev mode".to_string()).into());
+            return Err(
+                RpcError::Execution("Faucet only available in dev mode".to_string()).into(),
+            );
         }
 
         let to_address = Self::parse_address(&address)?;
@@ -812,7 +834,9 @@ impl QfcApiServer for RpcServer {
         let faucet_address = qfc_crypto::address_from_public_key(&faucet_public_key);
 
         // Get current nonce for faucet address
-        let nonce = self.chain.state()
+        let nonce = self
+            .chain
+            .state()
             .get_nonce(&faucet_address)
             .map_err(|e| RpcError::Internal(e.to_string()))?;
 
@@ -835,10 +859,7 @@ impl QfcApiServer for RpcServer {
         let tx_hash = blake3_hash(&tx_bytes);
         let signature = faucet_keypair.sign_hash(&tx_hash);
 
-        let signed_tx = Transaction {
-            signature,
-            ..tx
-        };
+        let signed_tx = Transaction { signature, ..tx };
 
         // tx_hash is already computed above
 
@@ -848,7 +869,10 @@ impl QfcApiServer for RpcServer {
             .add(signed_tx.clone(), faucet_address)
             .map_err(|e| RpcError::Execution(e.to_string()))?;
 
-        info!("Faucet: sent {} wei to {} (tx: {})", amount_value, to_address, tx_hash);
+        info!(
+            "Faucet: sent {} wei to {} (tx: {})",
+            amount_value, to_address, tx_hash
+        );
 
         // Broadcast to network if available
         if let Some(network) = &self.network {

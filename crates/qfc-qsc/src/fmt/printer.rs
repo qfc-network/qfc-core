@@ -1,7 +1,7 @@
 //! AST pretty printer.
 
-use crate::ast::*;
 use super::config::FormatConfig;
+use crate::ast::*;
 
 /// The formatter state.
 pub struct Formatter {
@@ -1197,7 +1197,8 @@ impl Formatter {
     }
 
     fn write_indent(&mut self) {
-        self.output.push_str(&self.config.indent_n(self.indent_level));
+        self.output
+            .push_str(&self.config.indent_n(self.indent_level));
     }
 }
 

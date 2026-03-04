@@ -87,7 +87,7 @@ impl Default for ValidatorNode {
             commission_rate: 1000, // 10% default commission
             delegator_count: 0,
             contribution_score: 0,
-            uptime: 10000, // 100%
+            uptime: 10000,   // 100%
             accuracy: 10000, // 100%
             avg_latency_ms: 100,
             bandwidth_mbps: 100,
@@ -175,7 +175,16 @@ impl ValidatorNode {
 
 /// Vote decision
 #[derive(
-    Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    BorshSerialize,
+    BorshDeserialize,
 )]
 pub enum VoteDecision {
     /// Accept the block
@@ -193,9 +202,7 @@ impl Default for VoteDecision {
 }
 
 /// Rejection reason
-#[derive(
-    Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
-)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub enum RejectReason {
     /// Invalid block producer
     InvalidProducer,
@@ -335,9 +342,7 @@ struct UnsignedVote {
 }
 
 /// Slashable offense types
-#[derive(
-    Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
-)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub enum SlashableOffense {
     /// Double signing (signing multiple blocks at same height)
     DoubleSign,
@@ -894,12 +899,7 @@ mod tests {
 
     #[test]
     fn test_vote_serialization() {
-        let vote = Vote::accept(
-            Hash::new([0x11; 32]),
-            100,
-            Address::new([0x22; 20]),
-            12345,
-        );
+        let vote = Vote::accept(Hash::new([0x11; 32]), 100, Address::new([0x22; 20]), 12345);
 
         let bytes = vote.to_bytes();
         let decoded = Vote::from_bytes(&bytes).unwrap();
@@ -1004,14 +1004,7 @@ mod tests {
     #[test]
     fn test_validator_checkpoint_serialization() {
         let validator = ValidatorNode::default();
-        let checkpoint = ValidatorCheckpoint::new(
-            1,
-            100,
-            12345,
-            vec![validator],
-            [0xab; 32],
-            90,
-        );
+        let checkpoint = ValidatorCheckpoint::new(1, 100, 12345, vec![validator], [0xab; 32], 90);
 
         let bytes = checkpoint.to_bytes();
         let decoded = ValidatorCheckpoint::from_bytes(&bytes).unwrap();

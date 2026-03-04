@@ -4,11 +4,11 @@
 
 pub mod token;
 
-use std::str::Chars;
 use std::iter::Peekable;
+use std::str::Chars;
 use thiserror::Error;
 
-pub use token::{Token, TokenKind, Span};
+pub use token::{Span, Token, TokenKind};
 
 /// Lexer errors
 #[derive(Debug, Error, Clone, PartialEq)]
@@ -183,7 +183,12 @@ impl<'src> Lexer<'src> {
     fn make_token(&self, kind: TokenKind) -> Token {
         Token::new(
             kind,
-            Span::new(self.token_start, self.pos, self.token_line, self.token_column),
+            Span::new(
+                self.token_start,
+                self.pos,
+                self.token_line,
+                self.token_column,
+            ),
         )
     }
 
@@ -199,13 +204,11 @@ impl<'src> Lexer<'src> {
                 Some(' ' | '\t' | '\r' | '\n') => {
                     self.advance();
                 }
-                Some('/') => {
-                    match self.peek_nth(1) {
-                        Some('/') => self.skip_line_comment(),
-                        Some('*') => self.skip_block_comment()?,
-                        _ => break,
-                    }
-                }
+                Some('/') => match self.peek_nth(1) {
+                    Some('/') => self.skip_line_comment(),
+                    Some('*') => self.skip_block_comment()?,
+                    _ => break,
+                },
                 _ => break,
             }
         }
@@ -236,7 +239,10 @@ impl<'src> Lexer<'src> {
         while depth > 0 {
             match (self.peek(), self.peek_nth(1)) {
                 (None, _) => {
-                    return Err(LexerError::UnterminatedBlockComment(start_line, start_column));
+                    return Err(LexerError::UnterminatedBlockComment(
+                        start_line,
+                        start_column,
+                    ));
                 }
                 (Some('/'), Some('*')) => {
                     self.advance();
@@ -479,7 +485,11 @@ impl<'src> Lexer<'src> {
                             }
                         }
                         Some(c) => {
-                            return Err(LexerError::InvalidEscapeSequence(c, self.line, self.column));
+                            return Err(LexerError::InvalidEscapeSequence(
+                                c,
+                                self.line,
+                                self.column,
+                            ));
                         }
                         None => {
                             return Err(LexerError::UnterminatedString(start_line, start_column));
@@ -548,7 +558,11 @@ impl<'src> Lexer<'src> {
                             value.push(hex);
                         }
                         Some(c) => {
-                            return Err(LexerError::InvalidEscapeSequence(c, self.line, self.column));
+                            return Err(LexerError::InvalidEscapeSequence(
+                                c,
+                                self.line,
+                                self.column,
+                            ));
                         }
                         None => {
                             return Err(LexerError::UnterminatedString(start_line, start_column));
@@ -791,18 +805,36 @@ mod tests {
     fn test_identifiers() {
         assert_eq!(lex("foo"), vec![TokenKind::Identifier("foo".to_string())]);
         assert_eq!(lex("_bar"), vec![TokenKind::Identifier("_bar".to_string())]);
-        assert_eq!(lex("baz123"), vec![TokenKind::Identifier("baz123".to_string())]);
+        assert_eq!(
+            lex("baz123"),
+            vec![TokenKind::Identifier("baz123".to_string())]
+        );
     }
 
     #[test]
     fn test_numbers() {
         assert_eq!(lex("123"), vec![TokenKind::IntLiteral("123".to_string())]);
         assert_eq!(lex("0xff"), vec![TokenKind::IntLiteral("0xff".to_string())]);
-        assert_eq!(lex("0b1010"), vec![TokenKind::IntLiteral("0b1010".to_string())]);
-        assert_eq!(lex("0o777"), vec![TokenKind::IntLiteral("0o777".to_string())]);
-        assert_eq!(lex("1_000_000"), vec![TokenKind::IntLiteral("1000000".to_string())]);
-        assert_eq!(lex("3.14"), vec![TokenKind::FloatLiteral("3.14".to_string())]);
-        assert_eq!(lex("1e10"), vec![TokenKind::FloatLiteral("1e10".to_string())]);
+        assert_eq!(
+            lex("0b1010"),
+            vec![TokenKind::IntLiteral("0b1010".to_string())]
+        );
+        assert_eq!(
+            lex("0o777"),
+            vec![TokenKind::IntLiteral("0o777".to_string())]
+        );
+        assert_eq!(
+            lex("1_000_000"),
+            vec![TokenKind::IntLiteral("1000000".to_string())]
+        );
+        assert_eq!(
+            lex("3.14"),
+            vec![TokenKind::FloatLiteral("3.14".to_string())]
+        );
+        assert_eq!(
+            lex("1e10"),
+            vec![TokenKind::FloatLiteral("1e10".to_string())]
+        );
     }
 
     #[test]
@@ -884,9 +916,18 @@ mod tests {
 
     #[test]
     fn test_comments() {
-        assert_eq!(lex("// comment\nfoo"), vec![TokenKind::Identifier("foo".to_string())]);
-        assert_eq!(lex("/* block */ foo"), vec![TokenKind::Identifier("foo".to_string())]);
-        assert_eq!(lex("/* nested /* comment */ */ foo"), vec![TokenKind::Identifier("foo".to_string())]);
+        assert_eq!(
+            lex("// comment\nfoo"),
+            vec![TokenKind::Identifier("foo".to_string())]
+        );
+        assert_eq!(
+            lex("/* block */ foo"),
+            vec![TokenKind::Identifier("foo".to_string())]
+        );
+        assert_eq!(
+            lex("/* nested /* comment */ */ foo"),
+            vec![TokenKind::Identifier("foo".to_string())]
+        );
     }
 
     #[test]

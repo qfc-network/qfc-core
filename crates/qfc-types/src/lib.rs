@@ -2,24 +2,24 @@
 //!
 //! This crate provides the fundamental types used throughout the QFC blockchain.
 
-mod primitives;
-mod block;
-mod transaction;
 mod account;
-mod receipt;
-mod validator;
-mod error;
+mod block;
 mod constants;
-mod pow;
+mod error;
 mod eth_transaction;
+mod pow;
+mod primitives;
+mod receipt;
+mod transaction;
+mod validator;
 
-pub use primitives::*;
-pub use block::*;
-pub use transaction::*;
 pub use account::*;
-pub use receipt::*;
-pub use validator::*;
-pub use error::*;
+pub use block::*;
 pub use constants::*;
-pub use pow::*;
+pub use error::*;
 pub use eth_transaction::*;
+pub use pow::*;
+pub use primitives::*;
+pub use receipt::*;
+pub use transaction::*;
+pub use validator::*;

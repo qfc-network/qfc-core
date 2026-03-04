@@ -75,7 +75,9 @@ impl EthTransaction {
             return Err(EthTxError::InvalidRlp("expected RLP list".to_string()));
         }
 
-        let item_count = rlp.item_count().map_err(|e| EthTxError::InvalidRlp(e.to_string()))?;
+        let item_count = rlp
+            .item_count()
+            .map_err(|e| EthTxError::InvalidRlp(e.to_string()))?;
         if item_count != 9 {
             return Err(EthTxError::InvalidRlp(format!(
                 "expected 9 items, got {}",
@@ -83,13 +85,21 @@ impl EthTransaction {
             )));
         }
 
-        let nonce: u64 = rlp.val_at(0).map_err(|e| EthTxError::InvalidRlp(e.to_string()))?;
+        let nonce: u64 = rlp
+            .val_at(0)
+            .map_err(|e| EthTxError::InvalidRlp(e.to_string()))?;
         let gas_price = decode_u256(&rlp, 1)?;
-        let gas_limit: u64 = rlp.val_at(2).map_err(|e| EthTxError::InvalidRlp(e.to_string()))?;
+        let gas_limit: u64 = rlp
+            .val_at(2)
+            .map_err(|e| EthTxError::InvalidRlp(e.to_string()))?;
         let to = decode_address(&rlp, 3)?;
         let value = decode_u256(&rlp, 4)?;
-        let data: Vec<u8> = rlp.val_at(5).map_err(|e| EthTxError::InvalidRlp(e.to_string()))?;
-        let v: u64 = rlp.val_at(6).map_err(|e| EthTxError::InvalidRlp(e.to_string()))?;
+        let data: Vec<u8> = rlp
+            .val_at(5)
+            .map_err(|e| EthTxError::InvalidRlp(e.to_string()))?;
+        let v: u64 = rlp
+            .val_at(6)
+            .map_err(|e| EthTxError::InvalidRlp(e.to_string()))?;
         let r = decode_bytes32(&rlp, 7)?;
         let s = decode_bytes32(&rlp, 8)?;
 
@@ -105,7 +115,10 @@ impl EthTransaction {
             // Legacy (pre-EIP-155), assume chain_id 1
             (1, (v - 27) as u8)
         } else {
-            return Err(EthTxError::InvalidSignature(format!("invalid v value: {}", v)));
+            return Err(EthTxError::InvalidSignature(format!(
+                "invalid v value: {}",
+                v
+            )));
         };
 
         // Build signing hash for legacy transaction
@@ -149,7 +162,9 @@ impl EthTransaction {
             return Err(EthTxError::InvalidRlp("expected RLP list".to_string()));
         }
 
-        let item_count = rlp.item_count().map_err(|e| EthTxError::InvalidRlp(e.to_string()))?;
+        let item_count = rlp
+            .item_count()
+            .map_err(|e| EthTxError::InvalidRlp(e.to_string()))?;
         if item_count != 12 {
             return Err(EthTxError::InvalidRlp(format!(
                 "expected 12 items for EIP-1559, got {}",
@@ -157,16 +172,26 @@ impl EthTransaction {
             )));
         }
 
-        let chain_id: u64 = rlp.val_at(0).map_err(|e| EthTxError::InvalidRlp(e.to_string()))?;
-        let nonce: u64 = rlp.val_at(1).map_err(|e| EthTxError::InvalidRlp(e.to_string()))?;
+        let chain_id: u64 = rlp
+            .val_at(0)
+            .map_err(|e| EthTxError::InvalidRlp(e.to_string()))?;
+        let nonce: u64 = rlp
+            .val_at(1)
+            .map_err(|e| EthTxError::InvalidRlp(e.to_string()))?;
         let max_priority_fee_per_gas = decode_u256(&rlp, 2)?;
         let max_fee_per_gas = decode_u256(&rlp, 3)?;
-        let gas_limit: u64 = rlp.val_at(4).map_err(|e| EthTxError::InvalidRlp(e.to_string()))?;
+        let gas_limit: u64 = rlp
+            .val_at(4)
+            .map_err(|e| EthTxError::InvalidRlp(e.to_string()))?;
         let to = decode_address(&rlp, 5)?;
         let value = decode_u256(&rlp, 6)?;
-        let data: Vec<u8> = rlp.val_at(7).map_err(|e| EthTxError::InvalidRlp(e.to_string()))?;
+        let data: Vec<u8> = rlp
+            .val_at(7)
+            .map_err(|e| EthTxError::InvalidRlp(e.to_string()))?;
         // Access list at index 8 - we skip it for now
-        let v: u64 = rlp.val_at(9).map_err(|e| EthTxError::InvalidRlp(e.to_string()))?;
+        let v: u64 = rlp
+            .val_at(9)
+            .map_err(|e| EthTxError::InvalidRlp(e.to_string()))?;
         let r = decode_bytes32(&rlp, 10)?;
         let s = decode_bytes32(&rlp, 11)?;
 
@@ -223,7 +248,9 @@ impl EthTransaction {
             return Err(EthTxError::InvalidRlp("expected RLP list".to_string()));
         }
 
-        let item_count = rlp.item_count().map_err(|e| EthTxError::InvalidRlp(e.to_string()))?;
+        let item_count = rlp
+            .item_count()
+            .map_err(|e| EthTxError::InvalidRlp(e.to_string()))?;
         if item_count != 11 {
             return Err(EthTxError::InvalidRlp(format!(
                 "expected 11 items for EIP-2930, got {}",
@@ -231,15 +258,25 @@ impl EthTransaction {
             )));
         }
 
-        let chain_id: u64 = rlp.val_at(0).map_err(|e| EthTxError::InvalidRlp(e.to_string()))?;
-        let nonce: u64 = rlp.val_at(1).map_err(|e| EthTxError::InvalidRlp(e.to_string()))?;
+        let chain_id: u64 = rlp
+            .val_at(0)
+            .map_err(|e| EthTxError::InvalidRlp(e.to_string()))?;
+        let nonce: u64 = rlp
+            .val_at(1)
+            .map_err(|e| EthTxError::InvalidRlp(e.to_string()))?;
         let gas_price = decode_u256(&rlp, 2)?;
-        let gas_limit: u64 = rlp.val_at(3).map_err(|e| EthTxError::InvalidRlp(e.to_string()))?;
+        let gas_limit: u64 = rlp
+            .val_at(3)
+            .map_err(|e| EthTxError::InvalidRlp(e.to_string()))?;
         let to = decode_address(&rlp, 4)?;
         let value = decode_u256(&rlp, 5)?;
-        let data: Vec<u8> = rlp.val_at(6).map_err(|e| EthTxError::InvalidRlp(e.to_string()))?;
+        let data: Vec<u8> = rlp
+            .val_at(6)
+            .map_err(|e| EthTxError::InvalidRlp(e.to_string()))?;
         // Access list at index 7 - we skip it
-        let v: u64 = rlp.val_at(8).map_err(|e| EthTxError::InvalidRlp(e.to_string()))?;
+        let v: u64 = rlp
+            .val_at(8)
+            .map_err(|e| EthTxError::InvalidRlp(e.to_string()))?;
         let r = decode_bytes32(&rlp, 9)?;
         let s = decode_bytes32(&rlp, 10)?;
 

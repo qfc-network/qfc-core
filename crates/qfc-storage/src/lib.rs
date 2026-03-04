@@ -2,12 +2,12 @@
 //!
 //! RocksDB-based persistent storage for the QFC blockchain.
 
-mod db;
-mod schema;
-mod error;
 mod batch;
+mod db;
+mod error;
+mod schema;
 
-pub use db::*;
-pub use schema::*;
-pub use error::*;
 pub use batch::*;
+pub use db::*;
+pub use error::*;
+pub use schema::*;

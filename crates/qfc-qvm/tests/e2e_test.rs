@@ -1,8 +1,8 @@
 //! End-to-end tests for compiling and executing QuantumScript contracts
 
-use qfc_qsc::{compile, CompilerOptions, Opcode, Instruction};
-use qfc_qvm::{Executor, ExecutionContext, Value};
 use primitive_types::{H160, U256};
+use qfc_qsc::{compile, CompilerOptions, Instruction, Opcode};
+use qfc_qvm::{ExecutionContext, Executor, Value};
 
 /// Helper to create a push instruction
 fn make_push(value: u64) -> Instruction {
@@ -31,11 +31,16 @@ fn test_simple_arithmetic_contract() {
     assert_eq!(contracts[0].name, "Calculator");
 
     // Find the add function
-    let add_fn = contracts[0].functions.iter()
+    let add_fn = contracts[0]
+        .functions
+        .iter()
         .find(|f| f.name == "add")
         .expect("add function not found");
 
-    println!("Compiled 'add' function with {} instructions", add_fn.code.len());
+    println!(
+        "Compiled 'add' function with {} instructions",
+        add_fn.code.len()
+    );
     for (i, instr) in add_fn.code.iter().enumerate() {
         println!("  {}: {:?}", i, instr);
     }
@@ -75,8 +80,8 @@ fn test_comparison_contract() {
 
     // Test the comparison logic with direct bytecode
     let code = vec![
-        make_push(100),  // a
-        make_push(50),   // b
+        make_push(100), // a
+        make_push(50),  // b
         Instruction::new(Opcode::Gt),
         Instruction::new(Opcode::Return),
     ];
@@ -117,13 +122,13 @@ fn test_storage_contract() {
     // Store initial value 0 at slot 0, then increment
     let code = vec![
         // Load current count (slot 0)
-        make_push(0),  // slot
+        make_push(0), // slot
         Instruction::new(Opcode::SLoad),
         // Add 1
         make_push(1),
         Instruction::new(Opcode::Add),
         // Store back to slot 0
-        make_push(0),  // slot (key)
+        make_push(0),                   // slot (key)
         Instruction::new(Opcode::Swap), // swap to get [key, value]
         Instruction::new(Opcode::SStore),
         // Load and return
@@ -171,20 +176,20 @@ fn test_conditional_contract() {
     // 10: sub
     // 11: return
     let code = vec![
-        make_push(10),  // 0: a
-        make_push(25),  // 1: b
-        Instruction::new(Opcode::Gt),  // 2: 10 > 25 = false
-        Instruction::with_operand(Opcode::JumpIfNot, vec![0, 8]),  // 3: jump to else if false
+        make_push(10),                                            // 0: a
+        make_push(25),                                            // 1: b
+        Instruction::new(Opcode::Gt),                             // 2: 10 > 25 = false
+        Instruction::with_operand(Opcode::JumpIfNot, vec![0, 8]), // 3: jump to else if false
         // Then branch (not executed since 10 > 25 is false)
-        make_push(10),  // 4
-        make_push(25),  // 5
-        Instruction::new(Opcode::Sub),  // 6
-        Instruction::new(Opcode::Return),  // 7
+        make_push(10),                    // 4
+        make_push(25),                    // 5
+        Instruction::new(Opcode::Sub),    // 6
+        Instruction::new(Opcode::Return), // 7
         // Else branch (instruction 8)
-        make_push(25),  // 8
-        make_push(10),  // 9
-        Instruction::new(Opcode::Sub),  // 10: 25 - 10 = 15
-        Instruction::new(Opcode::Return),  // 11
+        make_push(25),                    // 8
+        make_push(10),                    // 9
+        Instruction::new(Opcode::Sub),    // 10: 25 - 10 = 15
+        Instruction::new(Opcode::Return), // 11
     ];
 
     let mut executor = Executor::new(100_000);
@@ -221,37 +226,32 @@ fn test_loop_contract() {
         make_push(1),
         // 3: store to local 1
         Instruction::with_operand(Opcode::StoreLocal, vec![0, 1]),
-
         // 4: Loop start - Check: i <= 5
-        Instruction::with_operand(Opcode::LoadLocal, vec![0, 1]),  // load i
+        Instruction::with_operand(Opcode::LoadLocal, vec![0, 1]), // load i
         // 5: push 5
-        make_push(5),  // n
+        make_push(5), // n
         // 6: compare
         Instruction::new(Opcode::Le),
         // 7: Exit loop if false (jump to instruction 17)
         Instruction::with_operand(Opcode::JumpIfNot, vec![0, 17]),
-
         // 8: Loop body: sum = sum + i
-        Instruction::with_operand(Opcode::LoadLocal, vec![0, 0]),  // load sum
+        Instruction::with_operand(Opcode::LoadLocal, vec![0, 0]), // load sum
         // 9: load i
-        Instruction::with_operand(Opcode::LoadLocal, vec![0, 1]),  // load i
+        Instruction::with_operand(Opcode::LoadLocal, vec![0, 1]), // load i
         // 10: add
         Instruction::new(Opcode::Add),
         // 11: store sum
-        Instruction::with_operand(Opcode::StoreLocal, vec![0, 0]),  // store sum
-
+        Instruction::with_operand(Opcode::StoreLocal, vec![0, 0]), // store sum
         // 12: i = i + 1
-        Instruction::with_operand(Opcode::LoadLocal, vec![0, 1]),  // load i
+        Instruction::with_operand(Opcode::LoadLocal, vec![0, 1]), // load i
         // 13: push 1
         make_push(1),
         // 14: add
         Instruction::new(Opcode::Add),
         // 15: store i
-        Instruction::with_operand(Opcode::StoreLocal, vec![0, 1]),  // store i
-
+        Instruction::with_operand(Opcode::StoreLocal, vec![0, 1]), // store i
         // 16: Jump back to loop start (instruction 4)
         Instruction::with_operand(Opcode::Jump, vec![0, 4]),
-
         // 17: Loop exit: return sum
         Instruction::with_operand(Opcode::LoadLocal, vec![0, 0]),
         // 18: return
@@ -282,10 +282,10 @@ fn test_bitwise_contract() {
 
     // Test: (0xFF & 0x0F) << 4 = 0xF0
     let code = vec![
-        make_push(0xFF),  // value
-        make_push(0x0F),  // mask
+        make_push(0xFF), // value
+        make_push(0x0F), // mask
         Instruction::new(Opcode::BitAnd),
-        make_push(4),     // shift
+        make_push(4), // shift
         Instruction::new(Opcode::Shl),
         Instruction::new(Opcode::Return),
     ];
@@ -365,38 +365,34 @@ fn test_full_token_transfer_simulation() {
         Instruction::new(Opcode::Dup),
         make_push(30),
         Instruction::new(Opcode::Ge),
-        Instruction::with_operand(Opcode::JumpIfNot, vec![0, 20]),  // fail if insufficient
-
+        Instruction::with_operand(Opcode::JumpIfNot, vec![0, 20]), // fail if insufficient
         // Subtract 30 from sender
         make_push(30),
         Instruction::new(Opcode::Sub),
-        make_push(1),  // slot 1
+        make_push(1), // slot 1
         Instruction::new(Opcode::Swap),
         Instruction::new(Opcode::SStore),
-
         // Add 30 to recipient (slot 2)
         make_push(2),
         Instruction::new(Opcode::SLoad),
         make_push(30),
         Instruction::new(Opcode::Add),
-        make_push(2),  // slot 2
+        make_push(2), // slot 2
         Instruction::new(Opcode::Swap),
         Instruction::new(Opcode::SStore),
-
         // Return true
         make_push(1),
         Instruction::new(Opcode::Return),
-
         // Fail path (instruction 20)
-        Instruction::new(Opcode::Pop),  // pop the balance
-        make_push(0),  // return false
+        Instruction::new(Opcode::Pop), // pop the balance
+        make_push(0),                  // return false
         Instruction::new(Opcode::Return),
     ];
 
     // First, set up initial balance: 100 at slot 1
     let setup_code = vec![
-        make_push(1),    // slot
-        make_push(100),  // value
+        make_push(1),   // slot
+        make_push(100), // value
         Instruction::new(Opcode::SStore),
         Instruction::new(Opcode::Halt),
     ];
@@ -411,8 +407,8 @@ fn test_full_token_transfer_simulation() {
 
     // Set initial balance at slot 1 = 100
     let init_code = vec![
-        make_push(1),    // key
-        make_push(100),  // value
+        make_push(1),   // key
+        make_push(100), // value
         Instruction::new(Opcode::SStore),
     ];
 
@@ -426,7 +422,10 @@ fn test_full_token_transfer_simulation() {
     // The bytecode pushes 1 (truthy value) for success
     assert!(result.value == Some(Value::from_u64(1)) || result.value == Some(Value::Bool(true)));
     println!("Transfer result: {:?}", result.value);
-    println!("Storage changes: {} slots modified", result.storage_changes.len());
+    println!(
+        "Storage changes: {} slots modified",
+        result.storage_changes.len()
+    );
 
     for (slot, value) in &result.storage_changes {
         println!("  Slot {:?} = {:?}", slot, value);
@@ -467,7 +466,7 @@ fn test_out_of_gas() {
         Instruction::new(Opcode::Return),
     ];
 
-    let mut executor = Executor::new(5);  // Very low gas
+    let mut executor = Executor::new(5); // Very low gas
     let result = executor.execute(&code);
 
     assert!(result.is_err());

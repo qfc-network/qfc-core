@@ -9,9 +9,9 @@ use qfc_mempool::Mempool;
 use qfc_network::NetworkService;
 use qfc_storage;
 use qfc_types::{
-    block_reward_for_year, DoubleSignEvidence, Heartbeat, RewardDistribution,
-    Transaction, ValidatorMessage, U256, BLOCK_TIME_MS, FEE_BURN_PERCENT,
-    FEE_PRODUCER_PERCENT, FEE_VOTERS_PERCENT, PRODUCER_REWARD_PERCENT, VOTERS_REWARD_PERCENT,
+    block_reward_for_year, DoubleSignEvidence, Heartbeat, RewardDistribution, Transaction,
+    ValidatorMessage, BLOCK_TIME_MS, FEE_BURN_PERCENT, FEE_PRODUCER_PERCENT, FEE_VOTERS_PERCENT,
+    PRODUCER_REWARD_PERCENT, U256, VOTERS_REWARD_PERCENT,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -114,10 +114,7 @@ impl BlockProducer {
             match self.produce_block().await {
                 Ok(block_hash) => {
                     let elapsed = start.elapsed();
-                    info!(
-                        "Produced block {} in {:?}",
-                        block_hash, elapsed
-                    );
+                    info!("Produced block {} in {:?}", block_hash, elapsed);
                 }
                 Err(e) => {
                     error!("Failed to produce block: {}", e);
@@ -193,9 +190,9 @@ impl BlockProducer {
         // Take snapshot before execution (for potential rollback)
         let _snapshot = state.snapshot();
 
-        let (receipts, gas_used) = self
-            .executor
-            .execute_transactions(&transactions, &state, &our_address);
+        let (receipts, gas_used) =
+            self.executor
+                .execute_transactions(&transactions, &state, &our_address);
 
         // Commit state to get new state root
         let state_root = state.commit()?;
@@ -203,7 +200,13 @@ impl BlockProducer {
         // Produce the block
         let block = self
             .consensus
-            .produce_block(&parent_block, transactions.clone(), receipts.clone(), state_root, gas_used)
+            .produce_block(
+                &parent_block,
+                transactions.clone(),
+                receipts.clone(),
+                state_root,
+                gas_used,
+            )
             .map_err(|e| anyhow::anyhow!("Consensus error: {}", e))?;
 
         let block_hash = blake3_hash(&block.header_bytes());
@@ -258,7 +261,10 @@ impl BlockProducer {
                 );
             }
             Err(e) => {
-                warn!("Failed to distribute rewards for block #{}: {}", block_number, e);
+                warn!(
+                    "Failed to distribute rewards for block #{}: {}",
+                    block_number, e
+                );
             }
         }
 
@@ -311,12 +317,12 @@ impl BlockProducer {
         let block_reward = block_reward_for_year(year);
 
         // Producer block reward (70%)
-        let producer_block_reward = block_reward * U256::from_u64(PRODUCER_REWARD_PERCENT)
-            / U256::from_u64(100);
+        let producer_block_reward =
+            block_reward * U256::from_u64(PRODUCER_REWARD_PERCENT) / U256::from_u64(100);
 
         // Producer fee share (50%)
-        let producer_fee_share = total_fees * U256::from_u64(FEE_PRODUCER_PERCENT)
-            / U256::from_u64(100);
+        let producer_fee_share =
+            total_fees * U256::from_u64(FEE_PRODUCER_PERCENT) / U256::from_u64(100);
 
         // Total producer reward
         let producer_reward = producer_block_reward + producer_fee_share;
@@ -325,12 +331,12 @@ impl BlockProducer {
         state.add_balance(producer, producer_reward)?;
 
         // Voter block reward pool (30%)
-        let voters_block_reward = block_reward * U256::from_u64(VOTERS_REWARD_PERCENT)
-            / U256::from_u64(100);
+        let voters_block_reward =
+            block_reward * U256::from_u64(VOTERS_REWARD_PERCENT) / U256::from_u64(100);
 
         // Voter fee pool (30%)
-        let voters_fee_share = total_fees * U256::from_u64(FEE_VOTERS_PERCENT)
-            / U256::from_u64(100);
+        let voters_fee_share =
+            total_fees * U256::from_u64(FEE_VOTERS_PERCENT) / U256::from_u64(100);
 
         // Total voter reward pool
         let voters_reward_pool = voters_block_reward + voters_fee_share;
@@ -348,13 +354,8 @@ impl BlockProducer {
         );
 
         // Create reward distribution record
-        let distribution = RewardDistribution::new(
-            block_height,
-            producer_reward,
-            voter_reward,
-            fee_burned,
-            now,
-        );
+        let distribution =
+            RewardDistribution::new(block_height, producer_reward, voter_reward, fee_burned, now);
 
         // Store the distribution record
         self.store_reward_distribution(&distribution)?;
@@ -409,11 +410,7 @@ impl BlockProducer {
     fn store_reward_distribution(&self, distribution: &RewardDistribution) -> anyhow::Result<()> {
         let db = self.chain.db();
         let key = distribution.block_height.to_be_bytes();
-        db.put(
-            qfc_storage::cf::REWARDS,
-            &key,
-            &distribution.to_bytes(),
-        )?;
+        db.put(qfc_storage::cf::REWARDS, &key, &distribution.to_bytes())?;
         Ok(())
     }
 

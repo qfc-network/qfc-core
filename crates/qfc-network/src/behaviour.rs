@@ -1,10 +1,7 @@
 //! Network behaviour definition
 
 use crate::sync_protocol::SyncCodec;
-use libp2p::{
-    gossipsub, identify, kad, ping, request_response,
-    swarm::NetworkBehaviour,
-};
+use libp2p::{gossipsub, identify, kad, ping, request_response, swarm::NetworkBehaviour};
 
 /// Type alias for the sync request-response behaviour
 pub type SyncBehaviour = request_response::Behaviour<SyncCodec>;

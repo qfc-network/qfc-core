@@ -172,7 +172,7 @@ pub struct ResourceTracker {
 #[derive(Debug, Clone)]
 pub struct ResourceInfo {
     pub type_name: String,
-    pub owner: usize, // Frame index
+    pub owner: usize,      // Frame index
     pub created_at: usize, // Instruction index
 }
 
@@ -195,18 +195,21 @@ impl ResourceTracker {
     pub fn create(&mut self, type_name: String, owner: usize, pc: usize) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
-        self.resources.insert(id, ResourceInfo {
-            type_name,
-            owner,
-            created_at: pc,
-        });
+        self.resources.insert(
+            id,
+            ResourceInfo {
+                type_name,
+                owner,
+                created_at: pc,
+            },
+        );
         id
     }
 
     pub fn destroy(&mut self, id: u64) -> ExecutionResult<()> {
         if self.borrows.values().any(|b| b.resource_id == id) {
             return Err(ExecutionError::ResourceError(
-                "cannot destroy borrowed resource".to_string()
+                "cannot destroy borrowed resource".to_string(),
             ));
         }
         self.resources.remove(&id);
@@ -216,7 +219,7 @@ impl ResourceTracker {
     pub fn borrow(&mut self, id: u64, borrower: usize, is_mutable: bool) -> ExecutionResult<()> {
         if !self.resources.contains_key(&id) {
             return Err(ExecutionError::ResourceError(
-                "resource does not exist".to_string()
+                "resource does not exist".to_string(),
             ));
         }
 
@@ -225,35 +228,41 @@ impl ResourceTracker {
             if borrow.resource_id == id {
                 if is_mutable || borrow.is_mutable {
                     return Err(ExecutionError::ResourceError(
-                        "conflicting borrow".to_string()
+                        "conflicting borrow".to_string(),
                     ));
                 }
             }
         }
 
-        self.borrows.insert(id, BorrowInfo {
-            resource_id: id,
-            is_mutable,
-            borrower,
-        });
+        self.borrows.insert(
+            id,
+            BorrowInfo {
+                resource_id: id,
+                is_mutable,
+                borrower,
+            },
+        );
         Ok(())
     }
 
     pub fn release(&mut self, id: u64, borrower: usize) {
-        self.borrows.retain(|_, b| !(b.resource_id == id && b.borrower == borrower));
+        self.borrows
+            .retain(|_, b| !(b.resource_id == id && b.borrower == borrower));
     }
 
     pub fn transfer(&mut self, id: u64, new_owner: usize) -> ExecutionResult<()> {
         if self.borrows.values().any(|b| b.resource_id == id) {
             return Err(ExecutionError::ResourceError(
-                "cannot transfer borrowed resource".to_string()
+                "cannot transfer borrowed resource".to_string(),
             ));
         }
         if let Some(resource) = self.resources.get_mut(&id) {
             resource.owner = new_owner;
             Ok(())
         } else {
-            Err(ExecutionError::ResourceError("resource does not exist".to_string()))
+            Err(ExecutionError::ResourceError(
+                "resource does not exist".to_string(),
+            ))
         }
     }
 
@@ -261,9 +270,10 @@ impl ResourceTracker {
     pub fn check_frame_exit(&self, frame_index: usize) -> ExecutionResult<()> {
         for (id, info) in &self.resources {
             if info.owner == frame_index {
-                return Err(ExecutionError::ResourceError(
-                    format!("resource {} leaked on frame exit", id)
-                ));
+                return Err(ExecutionError::ResourceError(format!(
+                    "resource {} leaked on frame exit",
+                    id
+                )));
             }
         }
         Ok(())
@@ -356,16 +366,17 @@ impl Executor {
             gas_used: self.gas.used(),
             gas_refund: self.gas.refund(),
             logs: self.logs.clone(),
-            storage_changes: self.storage.get_modified()
-                .map(|(k, v)| (*k, *v))
-                .collect(),
+            storage_changes: self.storage.get_modified().map(|(k, v)| (*k, *v)).collect(),
             success: result.is_ok(),
         };
 
         match result {
             Ok(()) => Ok(output),
             Err(ExecutionError::Halt) => Ok(output),
-            Err(ExecutionError::Revert(_)) => Ok(ExecutionOutput { success: false, ..output }),
+            Err(ExecutionError::Revert(_)) => Ok(ExecutionOutput {
+                success: false,
+                ..output
+            }),
             Err(e) => Err(e),
         }
     }
@@ -469,7 +480,8 @@ impl Executor {
             }
             Opcode::Neg => {
                 let a = self.pop_u256()?;
-                self.stack.push(Value::U256(U256::zero().overflowing_sub(a).0))?;
+                self.stack
+                    .push(Value::U256(U256::zero().overflowing_sub(a).0))?;
             }
 
             // Comparison
@@ -588,12 +600,13 @@ impl Executor {
                 let key = self.pop_h256()?;
                 self.gas.consume_sload(key)?;
                 let value = self.storage.load(key);
-                self.stack.push(Value::U256(U256::from_big_endian(value.as_bytes())))?;
+                self.stack
+                    .push(Value::U256(U256::from_big_endian(value.as_bytes())))?;
             }
             Opcode::SStore => {
                 if self.context.is_static {
                     return Err(ExecutionError::ResourceError(
-                        "cannot write storage in static call".to_string()
+                        "cannot write storage in static call".to_string(),
                     ));
                 }
                 let value = self.pop_u256()?;
@@ -682,7 +695,8 @@ impl Executor {
                 self.stack.push(Value::from_u64(self.context.timestamp))?;
             }
             Opcode::BlockNumber => {
-                self.stack.push(Value::from_u64(self.context.block_number))?;
+                self.stack
+                    .push(Value::from_u64(self.context.block_number))?;
             }
             Opcode::Difficulty => {
                 self.stack.push(Value::U256(self.context.difficulty))?;
@@ -705,7 +719,7 @@ impl Executor {
             Opcode::Log0 | Opcode::Log1 | Opcode::Log2 | Opcode::Log3 | Opcode::Log4 => {
                 if self.context.is_static {
                     return Err(ExecutionError::ResourceError(
-                        "cannot emit log in static call".to_string()
+                        "cannot emit log in static call".to_string(),
                     ));
                 }
                 let topic_count = match instr.opcode {
@@ -727,7 +741,8 @@ impl Executor {
 
                 // Use blake3 for hashing
                 let hash = blake3::hash(data);
-                self.stack.push(Value::Bytes32(H256::from_slice(hash.as_bytes())))?;
+                self.stack
+                    .push(Value::Bytes32(H256::from_slice(hash.as_bytes())))?;
             }
 
             // Resource operations
@@ -787,13 +802,15 @@ impl Executor {
             Opcode::ResourceCopy => {
                 // Only allowed for resources with Copy ability
                 return Err(ExecutionError::ResourceError(
-                    "resource copy requires Copy ability".to_string()
+                    "resource copy requires Copy ability".to_string(),
                 ));
             }
 
             // Parallel hints (no-op in interpreter)
-            Opcode::ParallelStart | Opcode::ParallelEnd
-            | Opcode::StateRead | Opcode::StateWrite => {
+            Opcode::ParallelStart
+            | Opcode::ParallelEnd
+            | Opcode::StateRead
+            | Opcode::StateWrite => {
                 // These are hints for parallel execution
                 // In the interpreter, they are no-ops
             }
@@ -822,11 +839,15 @@ impl Executor {
     // Helper methods
 
     fn current_frame(&self) -> ExecutionResult<&CallFrame> {
-        self.frames.last().ok_or(ExecutionError::Internal("no frame".to_string()))
+        self.frames
+            .last()
+            .ok_or(ExecutionError::Internal("no frame".to_string()))
     }
 
     fn current_frame_mut(&mut self) -> ExecutionResult<&mut CallFrame> {
-        self.frames.last_mut().ok_or(ExecutionError::Internal("no frame".to_string()))
+        self.frames
+            .last_mut()
+            .ok_or(ExecutionError::Internal("no frame".to_string()))
     }
 
     fn pop_u256(&mut self) -> ExecutionResult<U256> {
@@ -1005,10 +1026,10 @@ mod tests {
     #[test]
     fn test_storage() {
         let code = vec![
-            make_push(0),   // key (pushed first, goes to bottom)
-            make_push(42),  // value (pushed second, goes to top)
+            make_push(0),  // key (pushed first, goes to bottom)
+            make_push(42), // value (pushed second, goes to top)
             Instruction::new(Opcode::SStore),
-            make_push(0),   // key
+            make_push(0), // key
             Instruction::new(Opcode::SLoad),
             Instruction::new(Opcode::Return),
         ];

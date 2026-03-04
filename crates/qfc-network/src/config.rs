@@ -31,9 +31,7 @@ pub struct NetworkConfig {
 impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
-            listen_addresses: vec![
-                "/ip4/0.0.0.0/tcp/30303".parse().unwrap(),
-            ],
+            listen_addresses: vec!["/ip4/0.0.0.0/tcp/30303".parse().unwrap()],
             bootnodes: Vec::new(),
             max_inbound_peers: 50,
             max_outbound_peers: 25,

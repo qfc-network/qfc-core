@@ -60,8 +60,7 @@ impl CompiledFunction {
     pub unsafe fn execute(&self, runtime: &mut JitRuntime) -> JitResult<u64> {
         // The compiled function signature is:
         // fn(runtime: *mut JitRuntime) -> u64
-        let func: extern "C" fn(*mut JitRuntime) -> u64 =
-            std::mem::transmute(self.fn_ptr);
+        let func: extern "C" fn(*mut JitRuntime) -> u64 = std::mem::transmute(self.fn_ptr);
 
         Ok(func(runtime as *mut JitRuntime))
     }
@@ -115,9 +114,9 @@ impl JitCompiler {
             2 => "speed",
             _ => "speed_and_size",
         };
-        flag_builder.set("opt_level", opt_level).map_err(|e| {
-            JitError::CraneliftError(format!("failed to set opt_level: {}", e))
-        })?;
+        flag_builder
+            .set("opt_level", opt_level)
+            .map_err(|e| JitError::CraneliftError(format!("failed to set opt_level: {}", e)))?;
 
         // Enable SIMD if available
         flag_builder.set("enable_simd", "true").ok();
@@ -131,10 +130,8 @@ impl JitCompiler {
             .map_err(|e| JitError::CraneliftError(format!("ISA error: {}", e)))?;
 
         // Create JIT module
-        let mut builder = JITBuilder::with_isa(
-            isa.clone(),
-            cranelift_module::default_libcall_names(),
-        );
+        let mut builder =
+            JITBuilder::with_isa(isa.clone(), cranelift_module::default_libcall_names());
 
         // Register runtime functions
         JitRuntime::register_symbols(&mut builder);
@@ -178,7 +175,8 @@ impl JitCompiler {
         let pointer_type = self.isa.pointer_type();
         let mut sig = Signature::new(CallConv::SystemV);
         sig.params.push(AbiParam::new(pointer_type)); // runtime pointer
-        sig.returns.push(AbiParam::new(cranelift_codegen::ir::types::I64)); // return value
+        sig.returns
+            .push(AbiParam::new(cranelift_codegen::ir::types::I64)); // return value
 
         // Declare the function
         let func_id = self
@@ -210,9 +208,9 @@ impl JitCompiler {
             .map_err(|e| JitError::CraneliftError(format!("define error: {}", e)))?;
 
         // Finalize and get code
-        self.module.finalize_definitions().map_err(|e| {
-            JitError::CraneliftError(format!("finalize error: {}", e))
-        })?;
+        self.module
+            .finalize_definitions()
+            .map_err(|e| JitError::CraneliftError(format!("finalize error: {}", e)))?;
 
         let code = self.module.get_finalized_function(func_id);
         let code_size = self.ctx.compiled_code().unwrap().code_buffer().len();
@@ -312,12 +310,16 @@ mod tests {
         ];
 
         // First compilation - cache miss
-        compiler.compile("cached_func", &instructions, 0, 0).unwrap();
+        compiler
+            .compile("cached_func", &instructions, 0, 0)
+            .unwrap();
         assert_eq!(compiler.stats().cache_misses, 1);
         assert_eq!(compiler.stats().cache_hits, 0);
 
         // Second call - cache hit
-        compiler.compile("cached_func", &instructions, 0, 0).unwrap();
+        compiler
+            .compile("cached_func", &instructions, 0, 0)
+            .unwrap();
         assert_eq!(compiler.stats().cache_hits, 1);
     }
 }

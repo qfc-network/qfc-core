@@ -36,7 +36,7 @@ mod runtime;
 #[cfg(feature = "jit")]
 pub use codegen::CodeGenerator;
 #[cfg(feature = "jit")]
-pub use compiler::{JitCompiler, JitConfig, CompiledFunction};
+pub use compiler::{CompiledFunction, JitCompiler, JitConfig};
 #[cfg(feature = "jit")]
 pub use runtime::JitRuntime;
 

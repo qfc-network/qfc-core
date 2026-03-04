@@ -166,10 +166,7 @@ async fn main() -> Result<()> {
         genesis,
     };
     let chain = Arc::new(Chain::new(db.clone(), chain_config, consensus.clone())?);
-    info!(
-        "Chain initialized at block {}",
-        chain.block_number()
-    );
+    info!("Chain initialized at block {}", chain.block_number());
 
     // Create mempool
     let mempool = Arc::new(RwLock::new(Mempool::new(MempoolConfig::default())));
@@ -183,9 +180,9 @@ async fn main() -> Result<()> {
         };
 
         // Set listen address with specified port
-        network_config.listen_addresses = vec![
-            format!("/ip4/0.0.0.0/tcp/{}", args.p2p_port).parse().unwrap()
-        ];
+        network_config.listen_addresses = vec![format!("/ip4/0.0.0.0/tcp/{}", args.p2p_port)
+            .parse()
+            .unwrap()];
 
         // Add bootnodes
         for bootnode in &args.bootnodes {

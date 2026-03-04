@@ -6,8 +6,8 @@ use qfc_crypto::{address_from_public_key, blake3_hash};
 use qfc_state::StateDB;
 use qfc_types::{
     create_bloom, Address, Log, Receipt, ReceiptStatus, SignedTransaction, Transaction,
-    TransactionType, U256, DEFAULT_CHAIN_ID, MIN_DELEGATION, MIN_VALIDATOR_STAKE,
-    MINIMUM_GAS, TRANSFER_GAS, UNSTAKE_DELAY_SECS,
+    TransactionType, DEFAULT_CHAIN_ID, MINIMUM_GAS, MIN_DELEGATION, MIN_VALIDATOR_STAKE,
+    TRANSFER_GAS, U256, UNSTAKE_DELAY_SECS,
 };
 use tracing::{debug, trace, warn};
 
@@ -206,9 +206,7 @@ impl Executor {
                 // Stake must meet minimum
                 let stake = tx.value;
                 let current_stake = state.get_stake(&sender)?;
-                if current_stake.is_zero()
-                    && stake < U256::from_u128(MIN_VALIDATOR_STAKE)
-                {
+                if current_stake.is_zero() && stake < U256::from_u128(MIN_VALIDATOR_STAKE) {
                     return Err(ExecutorError::StakeTooLow {
                         minimum: U256::from_u128(MIN_VALIDATOR_STAKE).to_string(),
                         provided: stake.to_string(),
@@ -305,12 +303,7 @@ impl Executor {
         // Transfer value
         state.transfer(sender, &to, tx.value)?;
 
-        trace!(
-            "Transfer: {} -> {} value={}",
-            sender,
-            to,
-            tx.value
-        );
+        trace!("Transfer: {} -> {} value={}", sender, to, tx.value);
 
         Ok(ExecutionResult::success(TRANSFER_GAS))
     }
@@ -338,7 +331,8 @@ impl Executor {
             let gas_used = result.gas_used.max(qfc_types::CONTRACT_CREATE_GAS);
             if let Some(contract_addr) = result.contract_address {
                 debug!("Contract created at {} by {}", contract_addr, sender);
-                let mut exec_result = ExecutionResult::success_with_contract(gas_used, contract_addr);
+                let mut exec_result =
+                    ExecutionResult::success_with_contract(gas_used, contract_addr);
                 exec_result.logs = result.logs;
                 Ok(exec_result)
             } else {
@@ -407,7 +401,9 @@ impl Executor {
         } else {
             Ok(ExecutionResult::failure(
                 result.gas_used,
-                result.error.unwrap_or_else(|| "Execution failed".to_string()),
+                result
+                    .error
+                    .unwrap_or_else(|| "Execution failed".to_string()),
             ))
         }
     }
@@ -425,9 +421,7 @@ impl Executor {
         let new_stake = current_stake + stake_amount;
 
         // Check minimum stake
-        if current_stake.is_zero()
-            && new_stake < U256::from_u128(MIN_VALIDATOR_STAKE)
-        {
+        if current_stake.is_zero() && new_stake < U256::from_u128(MIN_VALIDATOR_STAKE) {
             return Err(ExecutorError::StakeTooLow {
                 minimum: U256::from_u128(MIN_VALIDATOR_STAKE).to_string(),
                 provided: new_stake.to_string(),
@@ -513,10 +507,7 @@ impl Executor {
         state.set_stake(sender, stake_amount)?;
         state.set_contribution_score(sender, 0)?;
 
-        debug!(
-            "Validator registered: {} stake={}",
-            sender, stake_amount
-        );
+        debug!("Validator registered: {} stake={}", sender, stake_amount);
 
         Ok(ExecutionResult::success(MINIMUM_GAS * 3))
     }
@@ -592,10 +583,7 @@ impl Executor {
             state.set_delegation(sender, &validator, amount)?;
         }
 
-        debug!(
-            "Delegated: {} -> {} amount={}",
-            sender, validator, amount
-        );
+        debug!("Delegated: {} -> {} amount={}", sender, validator, amount);
 
         Ok(ExecutionResult::success(MINIMUM_GAS * 3))
     }
@@ -786,7 +774,9 @@ mod tests {
         let recipient = Address::new([0x22; 20]);
         let producer = Address::new([0x33; 20]);
 
-        state.set_balance(&sender, U256::from_u128(100_000_000_000_000_000)).unwrap(); // 0.1 ETH-equivalent
+        state
+            .set_balance(&sender, U256::from_u128(100_000_000_000_000_000))
+            .unwrap(); // 0.1 ETH-equivalent
 
         // Create transfer transaction
         let tx = Transaction::transfer(

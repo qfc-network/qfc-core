@@ -2,14 +2,14 @@
 //!
 //! Implementation of the Merkle Patricia Trie for state storage.
 
+mod error;
 mod nibbles;
 mod node;
-mod trie;
-mod error;
 mod proof;
+mod trie;
 
+pub use error::*;
 pub use nibbles::*;
 pub use node::*;
-pub use trie::*;
-pub use error::*;
 pub use proof::*;
+pub use trie::*;

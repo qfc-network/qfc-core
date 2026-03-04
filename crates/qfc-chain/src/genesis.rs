@@ -2,8 +2,8 @@
 
 use qfc_crypto::blake3_hash;
 use qfc_types::{
-    Address, Block, BlockHeader, Hash, Signature, U256, VrfProof, BLOCK_VERSION,
-    DEFAULT_BLOCK_GAS_LIMIT, DEFAULT_CHAIN_ID,
+    Address, Block, BlockHeader, Hash, Signature, VrfProof, BLOCK_VERSION, DEFAULT_BLOCK_GAS_LIMIT,
+    DEFAULT_CHAIN_ID, U256,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

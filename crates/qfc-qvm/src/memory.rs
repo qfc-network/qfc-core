@@ -361,14 +361,17 @@ impl Storage {
     pub fn store(&mut self, key: H256, value: H256) {
         // Track original value for gas refund
         if !self.original.contains_key(&key) {
-            self.original.insert(key, self.slots.get(&key).copied().unwrap_or_default());
+            self.original
+                .insert(key, self.slots.get(&key).copied().unwrap_or_default());
         }
         self.slots.insert(key, value);
     }
 
     /// Get original value (for gas calculation)
     pub fn original_value(&self, key: H256) -> H256 {
-        self.original.get(&key).copied()
+        self.original
+            .get(&key)
+            .copied()
             .unwrap_or_else(|| self.slots.get(&key).copied().unwrap_or_default())
     }
 

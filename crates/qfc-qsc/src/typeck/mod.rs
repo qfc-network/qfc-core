@@ -207,8 +207,15 @@ impl ResolvedType {
                 format!("fn({}) -> {}", param_names.join(", "), ret.display_name())
             }
             ResolvedType::Resource(inner, abilities) => {
-                let ability_names: Vec<_> = abilities.iter().map(|a| format!("{:?}", a).to_lowercase()).collect();
-                format!("resource {} : {}", inner.display_name(), ability_names.join(" + "))
+                let ability_names: Vec<_> = abilities
+                    .iter()
+                    .map(|a| format!("{:?}", a).to_lowercase())
+                    .collect();
+                format!(
+                    "resource {} : {}",
+                    inner.display_name(),
+                    ability_names.join(" + ")
+                )
             }
             ResolvedType::Unit => "()".to_string(),
             ResolvedType::Never => "!".to_string(),
@@ -287,9 +294,9 @@ impl Scope {
     }
 
     fn lookup(&self, name: &str) -> Option<&Symbol> {
-        self.symbols.get(name).or_else(|| {
-            self.parent.as_ref().and_then(|p| p.lookup(name))
-        })
+        self.symbols
+            .get(name)
+            .or_else(|| self.parent.as_ref().and_then(|p| p.lookup(name)))
     }
 }
 
@@ -400,83 +407,111 @@ impl TypeChecker {
     }
 
     fn collect_struct_def(&mut self, s: &StructDef) -> TypeResult<()> {
-        let fields: Vec<_> = s.fields.iter().map(|f| {
-            let ty = self.resolve_type(&f.ty).unwrap_or(ResolvedType::Error);
-            (f.name.name.clone(), ty)
-        }).collect();
+        let fields: Vec<_> = s
+            .fields
+            .iter()
+            .map(|f| {
+                let ty = self.resolve_type(&f.ty).unwrap_or(ResolvedType::Error);
+                (f.name.name.clone(), ty)
+            })
+            .collect();
 
-        self.types.insert(s.name.name.clone(), TypeDef {
-            name: s.name.name.clone(),
-            kind: TypeDefKind::Struct(fields),
-            abilities: s.abilities.clone(),
-        });
+        self.types.insert(
+            s.name.name.clone(),
+            TypeDef {
+                name: s.name.name.clone(),
+                kind: TypeDefKind::Struct(fields),
+                abilities: s.abilities.clone(),
+            },
+        );
         Ok(())
     }
 
     fn collect_enum_def(&mut self, e: &EnumDef) -> TypeResult<()> {
-        let variants: Vec<_> = e.variants.iter().map(|v| {
-            let def = match &v.fields {
-                VariantFields::Unit => VariantDef::Unit,
-                VariantFields::Tuple(types) => {
-                    let resolved: Vec<_> = types.iter()
-                        .map(|t| self.resolve_type(t).unwrap_or(ResolvedType::Error))
-                        .collect();
-                    VariantDef::Tuple(resolved)
-                }
-                VariantFields::Struct(fields) => {
-                    let resolved: Vec<_> = fields.iter()
-                        .map(|f| {
-                            let ty = self.resolve_type(&f.ty).unwrap_or(ResolvedType::Error);
-                            (f.name.name.clone(), ty)
-                        })
-                        .collect();
-                    VariantDef::Struct(resolved)
-                }
-            };
-            (v.name.name.clone(), def)
-        }).collect();
+        let variants: Vec<_> = e
+            .variants
+            .iter()
+            .map(|v| {
+                let def = match &v.fields {
+                    VariantFields::Unit => VariantDef::Unit,
+                    VariantFields::Tuple(types) => {
+                        let resolved: Vec<_> = types
+                            .iter()
+                            .map(|t| self.resolve_type(t).unwrap_or(ResolvedType::Error))
+                            .collect();
+                        VariantDef::Tuple(resolved)
+                    }
+                    VariantFields::Struct(fields) => {
+                        let resolved: Vec<_> = fields
+                            .iter()
+                            .map(|f| {
+                                let ty = self.resolve_type(&f.ty).unwrap_or(ResolvedType::Error);
+                                (f.name.name.clone(), ty)
+                            })
+                            .collect();
+                        VariantDef::Struct(resolved)
+                    }
+                };
+                (v.name.name.clone(), def)
+            })
+            .collect();
 
-        self.types.insert(e.name.name.clone(), TypeDef {
-            name: e.name.name.clone(),
-            kind: TypeDefKind::Enum(variants),
-            abilities: Vec::new(),
-        });
+        self.types.insert(
+            e.name.name.clone(),
+            TypeDef {
+                name: e.name.name.clone(),
+                kind: TypeDefKind::Enum(variants),
+                abilities: Vec::new(),
+            },
+        );
         Ok(())
     }
 
     fn collect_type_alias(&mut self, alias: &TypeAlias) -> TypeResult<()> {
         let ty = self.resolve_type(&alias.ty)?;
-        self.types.insert(alias.name.name.clone(), TypeDef {
-            name: alias.name.name.clone(),
-            kind: TypeDefKind::Alias(ty),
-            abilities: Vec::new(),
-        });
+        self.types.insert(
+            alias.name.name.clone(),
+            TypeDef {
+                name: alias.name.name.clone(),
+                kind: TypeDefKind::Alias(ty),
+                abilities: Vec::new(),
+            },
+        );
         Ok(())
     }
 
     fn collect_function_def(&mut self, sig: &FunctionSig) -> TypeResult<()> {
-        let params: Vec<_> = sig.params.iter().map(|p| {
-            let name = match &p.pattern.kind {
-                PatternKind::Ident(ident, _) => ident.name.clone(),
-                _ => "_".to_string(),
-            };
-            let ty = self.resolve_type(&p.ty).unwrap_or(ResolvedType::Error);
-            (name, ty)
-        }).collect();
+        let params: Vec<_> = sig
+            .params
+            .iter()
+            .map(|p| {
+                let name = match &p.pattern.kind {
+                    PatternKind::Ident(ident, _) => ident.name.clone(),
+                    _ => "_".to_string(),
+                };
+                let ty = self.resolve_type(&p.ty).unwrap_or(ResolvedType::Error);
+                (name, ty)
+            })
+            .collect();
 
-        let return_type = sig.return_type.as_ref()
+        let return_type = sig
+            .return_type
+            .as_ref()
             .map(|t| self.resolve_type(t).unwrap_or(ResolvedType::Error))
             .unwrap_or(ResolvedType::Unit);
 
-        self.functions.insert(sig.name.name.clone(), FunctionType {
-            name: sig.name.name.clone(),
-            params,
-            return_type,
-            is_pure: sig.modifiers.is_pure,
-            is_view: sig.modifiers.is_view,
-            is_payable: sig.modifiers.is_payable,
-            is_parallel: sig.modifiers.is_parallel,
-        });
+        self.functions.insert(
+            sig.name.name.clone(),
+            FunctionType {
+                name: sig.name.name.clone(),
+                params,
+                return_type,
+                is_pure: sig.modifiers.is_pure,
+                is_view: sig.modifiers.is_view,
+                is_payable: sig.modifiers.is_payable,
+                is_parallel: sig.modifiers.is_parallel,
+            },
+        );
         Ok(())
     }
 
@@ -533,8 +568,19 @@ impl TypeChecker {
                 let last_stmt = f.body.stmts.last();
                 let has_return = matches!(
                     last_stmt,
-                    Some(Stmt { kind: StmtKind::Expr(Expr { kind: ExprKind::Return(_), .. }), .. })
-                    | Some(Stmt { kind: StmtKind::Semi(Expr { kind: ExprKind::Return(_), .. }), .. })
+                    Some(Stmt {
+                        kind: StmtKind::Expr(Expr {
+                            kind: ExprKind::Return(_),
+                            ..
+                        }),
+                        ..
+                    }) | Some(Stmt {
+                        kind: StmtKind::Semi(Expr {
+                            kind: ExprKind::Return(_),
+                            ..
+                        }),
+                        ..
+                    })
                 );
                 if !has_return && !matches!(body_type, ResolvedType::Never) {
                     self.errors.push(TypeError::TypeMismatch {
@@ -593,12 +639,15 @@ impl TypeChecker {
         let ty = self.resolve_type(&param.ty)?;
 
         if let PatternKind::Ident(ident, mutable) = &param.pattern.kind {
-            self.scope.define(ident.name.clone(), Symbol {
-                name: ident.name.clone(),
-                ty,
-                mutable: *mutable,
-                span: param.span,
-            });
+            self.scope.define(
+                ident.name.clone(),
+                Symbol {
+                    name: ident.name.clone(),
+                    ty,
+                    mutable: *mutable,
+                    span: param.span,
+                },
+            );
         }
 
         Ok(())
@@ -657,12 +706,15 @@ impl TypeChecker {
 
         // Add to scope
         if let PatternKind::Ident(ident, _) = &local.pattern.kind {
-            self.scope.define(ident.name.clone(), Symbol {
-                name: ident.name.clone(),
-                ty: declared_ty,
-                mutable: local.is_mutable,
-                span: local.span,
-            });
+            self.scope.define(
+                ident.name.clone(),
+                Symbol {
+                    name: ident.name.clone(),
+                    ty: declared_ty,
+                    mutable: local.is_mutable,
+                    span: local.span,
+                },
+            );
         }
 
         Ok(())
@@ -686,7 +738,10 @@ impl TypeChecker {
                     // Check functions
                     if let Some(func) = self.functions.get(name) {
                         let params: Vec<_> = func.params.iter().map(|(_, t)| t.clone()).collect();
-                        return Ok(ResolvedType::Function(params, Box::new(func.return_type.clone())));
+                        return Ok(ResolvedType::Function(
+                            params,
+                            Box::new(func.return_type.clone()),
+                        ));
                     }
                     self.errors.push(TypeError::UndefinedVariable(
                         name.clone(),
@@ -775,7 +830,9 @@ impl TypeChecker {
 
                 if let Some(else_expr) = else_branch {
                     let else_ty = self.check_expr(else_expr)?;
-                    if then_ty != else_ty && !matches!(then_ty, ResolvedType::Error | ResolvedType::Never) {
+                    if then_ty != else_ty
+                        && !matches!(then_ty, ResolvedType::Error | ResolvedType::Never)
+                    {
                         self.errors.push(TypeError::TypeMismatch {
                             expected: then_ty.display_name(),
                             found: else_ty.display_name(),
@@ -884,7 +941,8 @@ impl TypeChecker {
             }
 
             ExprKind::Tuple(elements) => {
-                let types: Vec<_> = elements.iter()
+                let types: Vec<_> = elements
+                    .iter()
                     .map(|e| self.check_expr(e))
                     .collect::<TypeResult<Vec<_>>>()?;
                 Ok(ResolvedType::Tuple(types))
@@ -892,7 +950,9 @@ impl TypeChecker {
 
             ExprKind::Array(elements) => {
                 if elements.is_empty() {
-                    return Ok(ResolvedType::Slice(Box::new(ResolvedType::Unknown(self.fresh_type_var()))));
+                    return Ok(ResolvedType::Slice(Box::new(ResolvedType::Unknown(
+                        self.fresh_type_var(),
+                    ))));
                 }
 
                 let first_ty = self.check_expr(&elements[0])?;
@@ -919,7 +979,9 @@ impl TypeChecker {
             }
 
             ExprKind::Struct(path, fields) => {
-                let type_name = path.segments.last()
+                let type_name = path
+                    .segments
+                    .last()
                     .map(|s| s.ident.name.clone())
                     .unwrap_or_default();
 
@@ -928,10 +990,13 @@ impl TypeChecker {
                         for field_init in fields {
                             if let Some(ref value) = field_init.value {
                                 let value_ty = self.check_expr(value)?;
-                                if let Some((_, expected_ty)) = expected_fields.iter()
+                                if let Some((_, expected_ty)) = expected_fields
+                                    .iter()
                                     .find(|(name, _)| *name == field_init.name.name)
                                 {
-                                    if *expected_ty != value_ty && !matches!(value_ty, ResolvedType::Error) {
+                                    if *expected_ty != value_ty
+                                        && !matches!(value_ty, ResolvedType::Error)
+                                    {
                                         self.errors.push(TypeError::TypeMismatch {
                                             expected: expected_ty.display_name(),
                                             found: value_ty.display_name(),
@@ -988,10 +1053,21 @@ impl TypeChecker {
         })
     }
 
-    fn check_binary_op(&mut self, op: BinaryOp, left: &ResolvedType, right: &ResolvedType, span: Span) -> TypeResult<ResolvedType> {
+    fn check_binary_op(
+        &mut self,
+        op: BinaryOp,
+        left: &ResolvedType,
+        right: &ResolvedType,
+        span: Span,
+    ) -> TypeResult<ResolvedType> {
         match op {
             // Arithmetic operators
-            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem | BinaryOp::Pow => {
+            BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::Div
+            | BinaryOp::Rem
+            | BinaryOp::Pow => {
                 if !left.is_numeric() || !right.is_numeric() {
                     self.errors.push(TypeError::TypeMismatch {
                         expected: "numeric type".to_string(),
@@ -1013,8 +1089,18 @@ impl TypeChecker {
             }
 
             // Comparison operators
-            BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
-                if left != right && !matches!((left, right), (ResolvedType::Error, _) | (_, ResolvedType::Error)) {
+            BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::Lt
+            | BinaryOp::Le
+            | BinaryOp::Gt
+            | BinaryOp::Ge => {
+                if left != right
+                    && !matches!(
+                        (left, right),
+                        (ResolvedType::Error, _) | (_, ResolvedType::Error)
+                    )
+                {
                     self.errors.push(TypeError::TypeMismatch {
                         expected: left.display_name(),
                         found: right.display_name(),
@@ -1039,7 +1125,11 @@ impl TypeChecker {
             }
 
             // Bitwise operators
-            BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor | BinaryOp::Shl | BinaryOp::Shr => {
+            BinaryOp::BitAnd
+            | BinaryOp::BitOr
+            | BinaryOp::BitXor
+            | BinaryOp::Shl
+            | BinaryOp::Shr => {
                 if !left.is_integer() || !right.is_integer() {
                     self.errors.push(TypeError::TypeMismatch {
                         expected: "integer type".to_string(),
@@ -1053,10 +1143,23 @@ impl TypeChecker {
             }
 
             // Assignment operators
-            BinaryOp::Assign | BinaryOp::AddAssign | BinaryOp::SubAssign | BinaryOp::MulAssign
-            | BinaryOp::DivAssign | BinaryOp::RemAssign | BinaryOp::BitAndAssign
-            | BinaryOp::BitOrAssign | BinaryOp::BitXorAssign | BinaryOp::ShlAssign | BinaryOp::ShrAssign => {
-                if left != right && !matches!((left, right), (ResolvedType::Error, _) | (_, ResolvedType::Error)) {
+            BinaryOp::Assign
+            | BinaryOp::AddAssign
+            | BinaryOp::SubAssign
+            | BinaryOp::MulAssign
+            | BinaryOp::DivAssign
+            | BinaryOp::RemAssign
+            | BinaryOp::BitAndAssign
+            | BinaryOp::BitOrAssign
+            | BinaryOp::BitXorAssign
+            | BinaryOp::ShlAssign
+            | BinaryOp::ShrAssign => {
+                if left != right
+                    && !matches!(
+                        (left, right),
+                        (ResolvedType::Error, _) | (_, ResolvedType::Error)
+                    )
+                {
                     self.errors.push(TypeError::TypeMismatch {
                         expected: left.display_name(),
                         found: right.display_name(),
@@ -1069,7 +1172,12 @@ impl TypeChecker {
         }
     }
 
-    fn check_unary_op(&mut self, op: UnaryOp, operand: &ResolvedType, span: Span) -> TypeResult<ResolvedType> {
+    fn check_unary_op(
+        &mut self,
+        op: UnaryOp,
+        operand: &ResolvedType,
+        span: Span,
+    ) -> TypeResult<ResolvedType> {
         match op {
             UnaryOp::Neg => {
                 if !operand.is_numeric() {
@@ -1110,7 +1218,12 @@ impl TypeChecker {
         }
     }
 
-    fn check_call(&mut self, callee: &ResolvedType, args: &[Expr], span: Span) -> TypeResult<ResolvedType> {
+    fn check_call(
+        &mut self,
+        callee: &ResolvedType,
+        args: &[Expr],
+        span: Span,
+    ) -> TypeResult<ResolvedType> {
         match callee {
             ResolvedType::Function(params, ret) => {
                 if params.len() != args.len() {
@@ -1137,13 +1250,20 @@ impl TypeChecker {
             }
             ResolvedType::Error => Ok(ResolvedType::Error),
             _ => {
-                self.errors.push(TypeError::NotCallable(span.line, span.column));
+                self.errors
+                    .push(TypeError::NotCallable(span.line, span.column));
                 Ok(ResolvedType::Error)
             }
         }
     }
 
-    fn check_method_call(&mut self, _receiver: &ResolvedType, _method: &Ident, args: &[Expr], _span: Span) -> TypeResult<ResolvedType> {
+    fn check_method_call(
+        &mut self,
+        _receiver: &ResolvedType,
+        _method: &Ident,
+        args: &[Expr],
+        _span: Span,
+    ) -> TypeResult<ResolvedType> {
         // Simplified: just check args and return unknown
         for arg in args {
             self.check_expr(arg)?;
@@ -1151,7 +1271,12 @@ impl TypeChecker {
         Ok(ResolvedType::Unknown(self.fresh_type_var()))
     }
 
-    fn check_field_access(&mut self, expr_ty: &ResolvedType, field: &Ident, span: Span) -> TypeResult<ResolvedType> {
+    fn check_field_access(
+        &mut self,
+        expr_ty: &ResolvedType,
+        field: &Ident,
+        span: Span,
+    ) -> TypeResult<ResolvedType> {
         match expr_ty {
             ResolvedType::Struct(name) => {
                 if let Some(type_def) = self.types.get(name) {
@@ -1197,7 +1322,12 @@ impl TypeChecker {
         }
     }
 
-    fn check_index(&mut self, array: &ResolvedType, index: &ResolvedType, span: Span) -> TypeResult<ResolvedType> {
+    fn check_index(
+        &mut self,
+        array: &ResolvedType,
+        index: &ResolvedType,
+        span: Span,
+    ) -> TypeResult<ResolvedType> {
         if !index.is_integer() && !matches!(index, ResolvedType::Error) {
             self.errors.push(TypeError::TypeMismatch {
                 expected: "integer".to_string(),
@@ -1212,7 +1342,8 @@ impl TypeChecker {
             ResolvedType::Mapping(_, value) => Ok((**value).clone()),
             ResolvedType::Error => Ok(ResolvedType::Error),
             _ => {
-                self.errors.push(TypeError::NotIndexable(span.line, span.column));
+                self.errors
+                    .push(TypeError::NotIndexable(span.line, span.column));
                 Ok(ResolvedType::Error)
             }
         }
@@ -1222,12 +1353,15 @@ impl TypeChecker {
         match &pattern.kind {
             PatternKind::Wildcard => Ok(()),
             PatternKind::Ident(ident, mutable) => {
-                self.scope.define(ident.name.clone(), Symbol {
-                    name: ident.name.clone(),
-                    ty: expected_ty.clone(),
-                    mutable: *mutable,
-                    span: pattern.span,
-                });
+                self.scope.define(
+                    ident.name.clone(),
+                    Symbol {
+                        name: ident.name.clone(),
+                        ty: expected_ty.clone(),
+                        mutable: *mutable,
+                        span: pattern.span,
+                    },
+                );
                 Ok(())
             }
             PatternKind::Tuple(patterns) => {
@@ -1255,7 +1389,9 @@ impl TypeChecker {
             TypeKind::Primitive(p) => Ok(ResolvedType::Primitive(*p)),
 
             TypeKind::Path(path) => {
-                let name = path.segments.last()
+                let name = path
+                    .segments
+                    .last()
                     .map(|s| s.ident.name.clone())
                     .unwrap_or_default();
 
@@ -1266,11 +1402,8 @@ impl TypeChecker {
                         TypeDefKind::Alias(resolved) => Ok(resolved.clone()),
                     }
                 } else {
-                    self.errors.push(TypeError::UndefinedType(
-                        name,
-                        ty.span.line,
-                        ty.span.column,
-                    ));
+                    self.errors
+                        .push(TypeError::UndefinedType(name, ty.span.line, ty.span.column));
                     Ok(ResolvedType::Error)
                 }
             }
@@ -1286,7 +1419,8 @@ impl TypeChecker {
             }
 
             TypeKind::Tuple(types) => {
-                let resolved: Vec<_> = types.iter()
+                let resolved: Vec<_> = types
+                    .iter()
                     .map(|t| self.resolve_type(t))
                     .collect::<TypeResult<Vec<_>>>()?;
                 Ok(ResolvedType::Tuple(resolved))
@@ -1315,10 +1449,12 @@ impl TypeChecker {
             }
 
             TypeKind::Function(params, ret) => {
-                let param_types: Vec<_> = params.iter()
+                let param_types: Vec<_> = params
+                    .iter()
                     .map(|t| self.resolve_type(t))
                     .collect::<TypeResult<Vec<_>>>()?;
-                let ret_ty = ret.as_ref()
+                let ret_ty = ret
+                    .as_ref()
                     .map(|t| self.resolve_type(t))
                     .transpose()?
                     .unwrap_or(ResolvedType::Unit);
@@ -1327,7 +1463,10 @@ impl TypeChecker {
 
             TypeKind::Resource(inner, abilities) => {
                 let inner_ty = self.resolve_type(inner)?;
-                Ok(ResolvedType::Resource(Box::new(inner_ty), abilities.clone()))
+                Ok(ResolvedType::Resource(
+                    Box::new(inner_ty),
+                    abilities.clone(),
+                ))
             }
 
             TypeKind::Infer => Ok(ResolvedType::Unknown(self.fresh_type_var())),
@@ -1336,7 +1475,8 @@ impl TypeChecker {
                 if let Some(ref contract) = self.contract_context {
                     Ok(ResolvedType::Struct(contract.clone()))
                 } else {
-                    self.errors.push(TypeError::SelfOutsideContract(ty.span.line, ty.span.column));
+                    self.errors
+                        .push(TypeError::SelfOutsideContract(ty.span.line, ty.span.column));
                     Ok(ResolvedType::Error)
                 }
             }

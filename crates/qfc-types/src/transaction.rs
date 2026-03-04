@@ -6,7 +6,16 @@ use serde::{Deserialize, Serialize};
 
 /// Transaction type
 #[derive(
-    Clone, Copy, Debug, PartialEq, Eq, std::hash::Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    std::hash::Hash,
+    Serialize,
+    Deserialize,
+    BorshSerialize,
+    BorshDeserialize,
 )]
 #[borsh(use_discriminant = true)]
 #[repr(u8)]
@@ -126,7 +135,13 @@ impl Transaction {
     }
 
     /// Create a new contract creation transaction
-    pub fn contract_create(code: Vec<u8>, value: U256, nonce: u64, gas_limit: u64, gas_price: U256) -> Self {
+    pub fn contract_create(
+        code: Vec<u8>,
+        value: U256,
+        nonce: u64,
+        gas_limit: u64,
+        gas_price: U256,
+    ) -> Self {
         Self {
             tx_type: TransactionType::ContractCreate,
             chain_id: crate::DEFAULT_CHAIN_ID,
@@ -240,7 +255,11 @@ impl Transaction {
 
     /// Create a claim delegation rewards transaction
     /// `to` is the validator address to claim rewards from (None for all validators)
-    pub fn claim_delegation_rewards(validator: Option<Address>, nonce: u64, gas_price: U256) -> Self {
+    pub fn claim_delegation_rewards(
+        validator: Option<Address>,
+        nonce: u64,
+        gas_price: U256,
+    ) -> Self {
         Self {
             tx_type: TransactionType::ClaimDelegationRewards,
             chain_id: crate::DEFAULT_CHAIN_ID,

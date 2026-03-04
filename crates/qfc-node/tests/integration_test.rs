@@ -34,9 +34,15 @@ fn rpc_call(port: u16, method: &str, params: &str) -> Result<String, String> {
         .args([
             "-s",
             &format!("http://127.0.0.1:{}", port),
-            "-X", "POST",
-            "-H", "Content-Type: application/json",
-            "-d", &format!(r#"{{"jsonrpc":"2.0","method":"{}","params":{},"id":1}}"#, method, params),
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            &format!(
+                r#"{{"jsonrpc":"2.0","method":"{}","params":{},"id":1}}"#,
+                method, params
+            ),
         ])
         .output()
         .map_err(|e| e.to_string())?;
@@ -69,8 +75,11 @@ fn test_single_node_block_production() {
     // Start a dev node
     let mut node = start_node(&[
         "--dev",
-        "--datadir", "/tmp/qfc_test1",
-        "--rpc", "--rpc-addr", "127.0.0.1:18545",
+        "--datadir",
+        "/tmp/qfc_test1",
+        "--rpc",
+        "--rpc-addr",
+        "127.0.0.1:18545",
         "--no-network",
     ]);
 
@@ -85,7 +94,11 @@ fn test_single_node_block_production() {
     let height_str = height.strip_prefix("0x").unwrap_or(&height);
     let block_num = u64::from_str_radix(height_str, 16).expect("Invalid hex");
 
-    assert!(block_num >= 1, "Expected at least 1 block, got {}", block_num);
+    assert!(
+        block_num >= 1,
+        "Expected at least 1 block, got {}",
+        block_num
+    );
 
     // Cleanup
     node.kill().ok();
@@ -98,8 +111,11 @@ fn test_chain_id() {
 
     let mut node = start_node(&[
         "--dev",
-        "--datadir", "/tmp/qfc_test1",
-        "--rpc", "--rpc-addr", "127.0.0.1:18546",
+        "--datadir",
+        "/tmp/qfc_test1",
+        "--rpc",
+        "--rpc-addr",
+        "127.0.0.1:18546",
         "--no-network",
     ]);
 
@@ -121,8 +137,11 @@ fn test_get_balance() {
 
     let mut node = start_node(&[
         "--dev",
-        "--datadir", "/tmp/qfc_test1",
-        "--rpc", "--rpc-addr", "127.0.0.1:18547",
+        "--datadir",
+        "/tmp/qfc_test1",
+        "--rpc",
+        "--rpc-addr",
+        "127.0.0.1:18547",
         "--no-network",
     ]);
 
@@ -132,11 +151,16 @@ fn test_get_balance() {
     let response = rpc_call(
         18547,
         "eth_getBalance",
-        r#"["0x0000000000000000000000000000000000000001", "latest"]"#
-    ).expect("RPC call failed");
+        r#"["0x0000000000000000000000000000000000000001", "latest"]"#,
+    )
+    .expect("RPC call failed");
 
     // Should have some balance (dev genesis allocates funds)
-    assert!(response.contains("result"), "Expected balance result: {}", response);
+    assert!(
+        response.contains("result"),
+        "Expected balance result: {}",
+        response
+    );
 
     node.kill().ok();
     cleanup();
@@ -148,8 +172,11 @@ fn test_gas_price() {
 
     let mut node = start_node(&[
         "--dev",
-        "--datadir", "/tmp/qfc_test1",
-        "--rpc", "--rpc-addr", "127.0.0.1:18548",
+        "--datadir",
+        "/tmp/qfc_test1",
+        "--rpc",
+        "--rpc-addr",
+        "127.0.0.1:18548",
         "--no-network",
     ]);
 
@@ -159,7 +186,11 @@ fn test_gas_price() {
     let gas_price = extract_result(&response).expect("Failed to extract result");
 
     // Should return 1 Gwei = 0x3b9aca00
-    assert_eq!(gas_price, "0x3b9aca00", "Unexpected gas price: {}", gas_price);
+    assert_eq!(
+        gas_price, "0x3b9aca00",
+        "Unexpected gas price: {}",
+        gas_price
+    );
 
     node.kill().ok();
     cleanup();
@@ -171,8 +202,11 @@ fn test_estimate_gas() {
 
     let mut node = start_node(&[
         "--dev",
-        "--datadir", "/tmp/qfc_test1",
-        "--rpc", "--rpc-addr", "127.0.0.1:18549",
+        "--datadir",
+        "/tmp/qfc_test1",
+        "--rpc",
+        "--rpc-addr",
+        "127.0.0.1:18549",
         "--no-network",
     ]);
 
@@ -182,10 +216,15 @@ fn test_estimate_gas() {
     let response = rpc_call(
         18549,
         "eth_estimateGas",
-        r#"[{"to": "0x0000000000000000000000000000000000000001", "value": "0x100"}]"#
-    ).expect("RPC call failed");
+        r#"[{"to": "0x0000000000000000000000000000000000000001", "value": "0x100"}]"#,
+    )
+    .expect("RPC call failed");
 
-    assert!(response.contains("result"), "Expected gas estimate: {}", response);
+    assert!(
+        response.contains("result"),
+        "Expected gas estimate: {}",
+        response
+    );
 
     let gas = extract_result(&response).expect("Failed to extract result");
     let gas_str = gas.strip_prefix("0x").unwrap_or(&gas);
@@ -204,22 +243,25 @@ fn test_get_block_by_number() {
 
     let mut node = start_node(&[
         "--dev",
-        "--datadir", "/tmp/qfc_test1",
-        "--rpc", "--rpc-addr", "127.0.0.1:18550",
+        "--datadir",
+        "/tmp/qfc_test1",
+        "--rpc",
+        "--rpc-addr",
+        "127.0.0.1:18550",
         "--no-network",
     ]);
 
     thread::sleep(Duration::from_secs(5));
 
     // Get block 0 (genesis)
-    let response = rpc_call(
-        18550,
-        "eth_getBlockByNumber",
-        r#"["0x0", false]"#
-    ).expect("RPC call failed");
+    let response =
+        rpc_call(18550, "eth_getBlockByNumber", r#"["0x0", false]"#).expect("RPC call failed");
 
     assert!(response.contains("result"), "Expected block: {}", response);
-    assert!(response.contains("number"), "Block should have number field");
+    assert!(
+        response.contains("number"),
+        "Block should have number field"
+    );
     assert!(response.contains("hash"), "Block should have hash field");
 
     node.kill().ok();

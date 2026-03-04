@@ -28,7 +28,9 @@ impl From<RpcError> for ErrorObjectOwned {
     fn from(e: RpcError) -> Self {
         match e {
             RpcError::InvalidParams(msg) => ErrorObjectOwned::owned(-32602, msg, None::<()>),
-            RpcError::BlockNotFound => ErrorObjectOwned::owned(-32001, "Block not found", None::<()>),
+            RpcError::BlockNotFound => {
+                ErrorObjectOwned::owned(-32001, "Block not found", None::<()>)
+            }
             RpcError::TransactionNotFound => {
                 ErrorObjectOwned::owned(-32002, "Transaction not found", None::<()>)
             }

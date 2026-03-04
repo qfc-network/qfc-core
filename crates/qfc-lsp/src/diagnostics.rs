@@ -1,10 +1,6 @@
 //! Diagnostic conversion from compiler errors to LSP diagnostics.
 
-use qfc_qsc::{
-    lexer::LexerError,
-    parser::ParseError,
-    typeck::TypeError,
-};
+use qfc_qsc::{lexer::LexerError, parser::ParseError, typeck::TypeError};
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 
 use crate::document::Document;
@@ -80,7 +76,9 @@ pub fn type_error_to_diagnostic(error: &TypeError, doc: &Document) -> Diagnostic
         TypeError::MoveOutOfBorrow(line, col) => (*line, *col, DiagnosticSeverity::ERROR),
         TypeError::MissingAbility(_, _, line, col) => (*line, *col, DiagnosticSeverity::ERROR),
         TypeError::DuplicateDefinition(_, line, col) => (*line, *col, DiagnosticSeverity::ERROR),
-        TypeError::ArgumentCountMismatch { line, column, .. } => (*line, *column, DiagnosticSeverity::ERROR),
+        TypeError::ArgumentCountMismatch { line, column, .. } => {
+            (*line, *column, DiagnosticSeverity::ERROR)
+        }
         TypeError::NotCallable(line, col) => (*line, *col, DiagnosticSeverity::ERROR),
         TypeError::NotIndexable(line, col) => (*line, *col, DiagnosticSeverity::ERROR),
         TypeError::FieldNotFound(_, _, line, col) => (*line, *col, DiagnosticSeverity::ERROR),

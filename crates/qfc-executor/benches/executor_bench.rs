@@ -56,7 +56,9 @@ fn bench_execute_transfer(c: &mut Criterion) {
             let db = Database::open_temp().unwrap();
             let state = StateDB::new(db);
             let huge_balance = U256::from_u128(u128::MAX);
-            state.add_balance(&sender, huge_balance).expect("Failed to fund");
+            state
+                .add_balance(&sender, huge_balance)
+                .expect("Failed to fund");
 
             let start = std::time::Instant::now();
             for i in 0..iters {
@@ -91,7 +93,9 @@ fn bench_tx_throughput(c: &mut Criterion) {
                     let db = Database::open_temp().unwrap();
                     let state = StateDB::new(db);
                     let huge_balance = U256::from_u128(u128::MAX);
-                    state.add_balance(&sender, huge_balance).expect("Failed to fund");
+                    state
+                        .add_balance(&sender, huge_balance)
+                        .expect("Failed to fund");
 
                     // Pre-create all transactions
                     let txs: Vec<_> = (0..total_txs)
@@ -123,9 +127,7 @@ fn bench_transaction_serialization(c: &mut Criterion) {
     });
 
     let bytes = tx.to_bytes_without_signature();
-    group.bench_function("hash", |b| {
-        b.iter(|| blake3_hash(black_box(&bytes)))
-    });
+    group.bench_function("hash", |b| b.iter(|| blake3_hash(black_box(&bytes))));
 
     group.finish();
 }

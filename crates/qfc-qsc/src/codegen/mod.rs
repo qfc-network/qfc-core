@@ -155,11 +155,17 @@ pub struct Instruction {
 
 impl Instruction {
     pub fn new(opcode: Opcode) -> Self {
-        Self { opcode, operand: None }
+        Self {
+            opcode,
+            operand: None,
+        }
     }
 
     pub fn with_operand(opcode: Opcode, operand: Vec<u8>) -> Self {
-        Self { opcode, operand: Some(operand) }
+        Self {
+            opcode,
+            operand: Some(operand),
+        }
     }
 
     pub fn encode(&self) -> Vec<u8> {
@@ -297,7 +303,8 @@ impl Codegen {
         for item in &contract.items {
             if let ContractItem::Storage(storage) = item {
                 for field in &storage.fields {
-                    self.storage_slots.insert(field.name.name.clone(), self.next_storage_slot);
+                    self.storage_slots
+                        .insert(field.name.name.clone(), self.next_storage_slot);
                     self.next_storage_slot += 1;
                 }
             }
@@ -321,7 +328,8 @@ impl Codegen {
             }
         }
 
-        let storage_layout: Vec<_> = self.storage_slots
+        let storage_layout: Vec<_> = self
+            .storage_slots
             .iter()
             .map(|(k, v)| (k.clone(), *v))
             .collect();
@@ -351,11 +359,14 @@ impl Codegen {
         // Register parameters as locals
         for param in &func.sig.params {
             if let PatternKind::Ident(ident, mutable) = &param.pattern.kind {
-                self.locals.insert(ident.name.clone(), LocalVar {
-                    name: ident.name.clone(),
-                    index: self.local_count,
-                    mutable: *mutable,
-                });
+                self.locals.insert(
+                    ident.name.clone(),
+                    LocalVar {
+                        name: ident.name.clone(),
+                        index: self.local_count,
+                        mutable: *mutable,
+                    },
+                );
                 self.local_count += 1;
             }
         }
@@ -364,10 +375,12 @@ impl Codegen {
         self.generate_block(&func.body)?;
 
         // Add implicit return if needed
-        if self.instructions.is_empty() || !matches!(
-            self.instructions.last().map(|i| i.opcode),
-            Some(Opcode::Return) | Some(Opcode::Revert)
-        ) {
+        if self.instructions.is_empty()
+            || !matches!(
+                self.instructions.last().map(|i| i.opcode),
+                Some(Opcode::Return) | Some(Opcode::Revert)
+            )
+        {
             self.emit(Instruction::new(Opcode::Return));
         }
 
@@ -375,7 +388,10 @@ impl Codegen {
         self.resolve_jumps()?;
 
         // Build function bytecode
-        let param_types: Vec<&str> = func.sig.params.iter()
+        let param_types: Vec<&str> = func
+            .sig
+            .params
+            .iter()
             .map(|p| self.type_to_abi_string(&p.ty))
             .collect();
 
@@ -394,11 +410,14 @@ impl Codegen {
         // Register parameters
         for param in &ctor.params {
             if let PatternKind::Ident(ident, mutable) = &param.pattern.kind {
-                self.locals.insert(ident.name.clone(), LocalVar {
-                    name: ident.name.clone(),
-                    index: self.local_count,
-                    mutable: *mutable,
-                });
+                self.locals.insert(
+                    ident.name.clone(),
+                    LocalVar {
+                        name: ident.name.clone(),
+                        index: self.local_count,
+                        mutable: *mutable,
+                    },
+                );
                 self.local_count += 1;
             }
         }
@@ -447,11 +466,14 @@ impl Codegen {
         // Store in local variable
         if let PatternKind::Ident(ident, mutable) = &local.pattern.kind {
             let index = self.local_count;
-            self.locals.insert(ident.name.clone(), LocalVar {
-                name: ident.name.clone(),
-                index,
-                mutable: local.is_mutable || *mutable,
-            });
+            self.locals.insert(
+                ident.name.clone(),
+                LocalVar {
+                    name: ident.name.clone(),
+                    index,
+                    mutable: local.is_mutable || *mutable,
+                },
+            );
             self.local_count += 1;
             self.emit_store_local(index);
         }
@@ -742,7 +764,8 @@ impl Codegen {
                 let mut bytes = [0u8; 32];
                 if let Ok(decoded) = hex::decode(s) {
                     let start = 32 - decoded.len().min(20);
-                    bytes[start..start + decoded.len().min(20)].copy_from_slice(&decoded[..decoded.len().min(20)]);
+                    bytes[start..start + decoded.len().min(20)]
+                        .copy_from_slice(&decoded[..decoded.len().min(20)]);
                 }
                 self.emit_push_u256(&bytes);
             }
@@ -812,7 +835,13 @@ impl Codegen {
         ))
     }
 
-    fn generate_if(&mut self, cond: &Expr, then_block: &Block, else_branch: Option<&Expr>, _span: Span) -> CodegenResult<()> {
+    fn generate_if(
+        &mut self,
+        cond: &Expr,
+        then_block: &Block,
+        else_branch: Option<&Expr>,
+        _span: Span,
+    ) -> CodegenResult<()> {
         let else_label = self.fresh_label("else");
         let end_label = self.fresh_label("endif");
 
@@ -839,7 +868,8 @@ impl Codegen {
         let break_label = self.fresh_label("for_end");
         let continue_label = self.fresh_label("for_continue");
 
-        self.loop_stack.push((break_label.clone(), continue_label.clone()));
+        self.loop_stack
+            .push((break_label.clone(), continue_label.clone()));
 
         // Initialize iterator
         self.generate_expr(iter)?;
@@ -872,11 +902,14 @@ impl Codegen {
             self.emit(Instruction::new(Opcode::Load));
 
             let elem_local = self.local_count;
-            self.locals.insert(ident.name.clone(), LocalVar {
-                name: ident.name.clone(),
-                index: elem_local,
-                mutable: false,
-            });
+            self.locals.insert(
+                ident.name.clone(),
+                LocalVar {
+                    name: ident.name.clone(),
+                    index: elem_local,
+                    mutable: false,
+                },
+            );
             self.local_count += 1;
             self.emit_store_local(elem_local);
         }
@@ -903,7 +936,8 @@ impl Codegen {
         let loop_label = self.fresh_label("while");
         let break_label = self.fresh_label("while_end");
 
-        self.loop_stack.push((break_label.clone(), loop_label.clone()));
+        self.loop_stack
+            .push((break_label.clone(), loop_label.clone()));
 
         self.set_label(&loop_label);
         self.generate_expr(cond)?;
@@ -921,7 +955,8 @@ impl Codegen {
         let loop_label = self.fresh_label("loop");
         let break_label = self.fresh_label("loop_end");
 
-        self.loop_stack.push((break_label.clone(), loop_label.clone()));
+        self.loop_stack
+            .push((break_label.clone(), loop_label.clone()));
 
         self.set_label(&loop_label);
         self.generate_block(body)?;
@@ -971,16 +1006,19 @@ impl Codegen {
     }
 
     fn set_label(&mut self, label: &str) {
-        self.labels.insert(label.to_string(), self.instructions.len());
+        self.labels
+            .insert(label.to_string(), self.instructions.len());
     }
 
     fn emit_jump(&mut self, label: &str) {
-        self.unresolved_jumps.push((self.instructions.len(), label.to_string()));
+        self.unresolved_jumps
+            .push((self.instructions.len(), label.to_string()));
         self.emit(Instruction::with_operand(Opcode::Jump, vec![0, 0]));
     }
 
     fn emit_jump_if_not(&mut self, label: &str) {
-        self.unresolved_jumps.push((self.instructions.len(), label.to_string()));
+        self.unresolved_jumps
+            .push((self.instructions.len(), label.to_string()));
         self.emit(Instruction::with_operand(Opcode::JumpIfNot, vec![0, 0]));
     }
 

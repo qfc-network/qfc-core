@@ -4,8 +4,8 @@
 
 use primitive_types::{H160, U256};
 
-use crate::executor::{ExecutionError, ExecutionResult};
 use super::{CallType, CrossVmCall, CrossVmResult, EvmBackend, InteropManager};
+use crate::executor::{ExecutionError, ExecutionResult};
 
 /// Callback interface for EVM contracts to call back into QVM
 pub trait QvmCallback {
@@ -83,9 +83,7 @@ impl<'a, E: EvmBackend> MultiCall<'a, E> {
         for call in self.calls.drain(..) {
             let result = self.manager.call_evm(call)?;
             if !result.success {
-                return Err(ExecutionError::Revert(
-                    "Multi-call failed".to_string()
-                ));
+                return Err(ExecutionError::Revert("Multi-call failed".to_string()));
             }
             self.results.push(result);
         }
@@ -122,7 +120,7 @@ impl ReentrancyGuard {
     pub fn enter(&mut self, contract: H160) -> ExecutionResult<()> {
         if self.entered_contracts.contains(&contract) {
             return Err(ExecutionError::ResourceError(
-                "Reentrancy detected".to_string()
+                "Reentrancy detected".to_string(),
             ));
         }
         self.entered_contracts.push(contract);
@@ -140,7 +138,7 @@ impl ReentrancyGuard {
     pub fn lock(&mut self) -> ExecutionResult<()> {
         if self.locked {
             return Err(ExecutionError::ResourceError(
-                "Reentrancy guard already locked".to_string()
+                "Reentrancy guard already locked".to_string(),
             ));
         }
         self.locked = true;
@@ -178,7 +176,10 @@ pub struct ProxyCall<'a, E: EvmBackend> {
 
 impl<'a, E: EvmBackend> ProxyCall<'a, E> {
     pub fn new(manager: &'a mut InteropManager<E>, implementation: H160) -> Self {
-        Self { manager, implementation }
+        Self {
+            manager,
+            implementation,
+        }
     }
 
     /// Forward a call to the implementation
@@ -216,9 +217,7 @@ impl SafeCall {
     ) -> bool {
         match manager.call_evm(request) {
             Ok(result) => {
-                result.success
-                    && result.return_data.len() >= 32
-                    && result.return_data[31] != 0
+                result.success && result.return_data.len() >= 32 && result.return_data[31] != 0
             }
             Err(_) => false,
         }

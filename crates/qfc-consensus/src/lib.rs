@@ -3,9 +3,9 @@
 //! Implements the PoC consensus mechanism for block production and finality.
 
 mod engine;
-mod scoring;
 mod error;
+mod scoring;
 
 pub use engine::*;
-pub use scoring::*;
 pub use error::*;
+pub use scoring::*;

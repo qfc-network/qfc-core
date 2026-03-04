@@ -7,7 +7,9 @@ use qfc_crypto::{blake3_hash, verify_hash_signature};
 use qfc_mempool::Mempool;
 use qfc_network::{NetworkMessage, NetworkService, SyncEvent, SyncRequest, SyncResponse};
 use qfc_rpc::SyncStatusProvider;
-use qfc_types::{Block, Hash, Heartbeat, SlashingEvidence, ValidatorMessage, Vote, VoteDecision, WorkProof};
+use qfc_types::{
+    Block, Hash, Heartbeat, SlashingEvidence, ValidatorMessage, Vote, VoteDecision, WorkProof,
+};
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
@@ -131,26 +133,22 @@ impl SyncManager {
     /// Handle a sync request and return a response
     async fn handle_sync_request(&self, request: SyncRequest) -> SyncResponse {
         match request {
-            SyncRequest::GetBlockByHash(hash) => {
-                match self.chain.get_block_by_hash(&hash) {
-                    Ok(Some(block)) => {
-                        let data = borsh::to_vec(&block).unwrap();
-                        SyncResponse::Block(data)
-                    }
-                    Ok(None) => SyncResponse::NotFound,
-                    Err(e) => SyncResponse::Error(e.to_string()),
+            SyncRequest::GetBlockByHash(hash) => match self.chain.get_block_by_hash(&hash) {
+                Ok(Some(block)) => {
+                    let data = borsh::to_vec(&block).unwrap();
+                    SyncResponse::Block(data)
                 }
-            }
-            SyncRequest::GetBlockByNumber(number) => {
-                match self.chain.get_block_by_number(number) {
-                    Ok(Some(block)) => {
-                        let data = borsh::to_vec(&block).unwrap();
-                        SyncResponse::Block(data)
-                    }
-                    Ok(None) => SyncResponse::NotFound,
-                    Err(e) => SyncResponse::Error(e.to_string()),
+                Ok(None) => SyncResponse::NotFound,
+                Err(e) => SyncResponse::Error(e.to_string()),
+            },
+            SyncRequest::GetBlockByNumber(number) => match self.chain.get_block_by_number(number) {
+                Ok(Some(block)) => {
+                    let data = borsh::to_vec(&block).unwrap();
+                    SyncResponse::Block(data)
                 }
-            }
+                Ok(None) => SyncResponse::NotFound,
+                Err(e) => SyncResponse::Error(e.to_string()),
+            },
             SyncRequest::GetBlockRange { start, end } => {
                 let mut blocks = Vec::new();
                 let end = end.min(start + MAX_BLOCKS_PER_REQUEST);
@@ -260,7 +258,10 @@ impl SyncManager {
         // Broadcast our vote
         let vote_data = vote.to_bytes();
         if let Err(e) = self.network.broadcast_vote(vote_data).await {
-            warn!("Failed to broadcast vote for block #{}: {}", block_number, e);
+            warn!(
+                "Failed to broadcast vote for block #{}: {}",
+                block_number, e
+            );
         } else {
             info!(
                 "Broadcast accept vote for block #{} from {}",
@@ -304,8 +305,16 @@ impl SyncManager {
 
         // Spawn the request to avoid recursion issues
         tokio::spawn(async move {
-            info!("Fetching block {} from peer {}", hex::encode(&missing_parent.as_bytes()[..8]), peer);
-            match self_clone.network.request_block_by_hash(peer, missing_parent).await {
+            info!(
+                "Fetching block {} from peer {}",
+                hex::encode(&missing_parent.as_bytes()[..8]),
+                peer
+            );
+            match self_clone
+                .network
+                .request_block_by_hash(peer, missing_parent)
+                .await
+            {
                 Ok(SyncResponse::Block(data)) => {
                     info!("Received block data ({} bytes)", data.len());
                     // Parse and try to import the block
@@ -313,7 +322,11 @@ impl SyncManager {
                         Ok(block) => {
                             let block_number = block.number();
                             let block_parent = block.parent_hash();
-                            info!("Parsed block #{}, parent: {}", block_number, hex::encode(&block_parent.as_bytes()[..8]));
+                            info!(
+                                "Parsed block #{}, parent: {}",
+                                block_number,
+                                hex::encode(&block_parent.as_bytes()[..8])
+                            );
 
                             match self_clone.chain.import_block(block.clone()) {
                                 Ok(_) => {
@@ -329,7 +342,10 @@ impl SyncManager {
                                     self_clone.request_missing_blocks(block_parent);
                                 }
                                 Err(e) => {
-                                    warn!("Failed to import fetched block #{}: {}", block_number, e);
+                                    warn!(
+                                        "Failed to import fetched block #{}: {}",
+                                        block_number, e
+                                    );
                                 }
                             }
                         }
@@ -443,8 +459,7 @@ impl SyncManager {
 
         debug!(
             "Received vote for block #{} from {}",
-            vote.block_height,
-            vote.voter
+            vote.block_height, vote.voter
         );
 
         // 2. Get consensus engine and validators
@@ -519,7 +534,8 @@ impl SyncManager {
 
         // 10. If we're a validator and haven't voted yet, cast our vote
         if consensus.is_validator() {
-            self.maybe_cast_vote(&vote.block_hash, vote.block_height).await;
+            self.maybe_cast_vote(&vote.block_hash, vote.block_height)
+                .await;
         }
     }
 
@@ -662,7 +678,10 @@ impl SyncManager {
         let validators = consensus.get_validators();
 
         // Find the announcer
-        let announcer = match validators.iter().find(|v| v.address == announcement.announcer) {
+        let announcer = match validators
+            .iter()
+            .find(|v| v.address == announcement.announcer)
+        {
             Some(v) => v,
             None => {
                 warn!(
@@ -675,8 +694,12 @@ impl SyncManager {
 
         // Verify signature
         let announcement_hash = blake3_hash(&announcement.to_bytes_without_signature());
-        if verify_hash_signature(&announcer.public_key, &announcement_hash, &announcement.signature)
-            .is_err()
+        if verify_hash_signature(
+            &announcer.public_key,
+            &announcement_hash,
+            &announcement.signature,
+        )
+        .is_err()
         {
             warn!(
                 "Invalid epoch announcement signature from {}",
@@ -733,7 +756,10 @@ impl SyncManager {
 
         // Check if the offender exists
         if !validators.iter().any(|v| v.address == evidence.offender) {
-            warn!("Slashing evidence for unknown validator: {}", evidence.offender);
+            warn!(
+                "Slashing evidence for unknown validator: {}",
+                evidence.offender
+            );
             return;
         }
 
@@ -746,9 +772,9 @@ impl SyncManager {
         let (slash_percent, jail_duration_ms) = match evidence.offense {
             qfc_types::SlashableOffense::DoubleSign => (10, 24 * 60 * 60 * 1000), // 10%, 24 hours
             qfc_types::SlashableOffense::InvalidBlock => (5, 12 * 60 * 60 * 1000), // 5%, 12 hours
-            qfc_types::SlashableOffense::Censorship => (3, 6 * 60 * 60 * 1000),    // 3%, 6 hours
-            qfc_types::SlashableOffense::Offline => (1, 1 * 60 * 60 * 1000),       // 1%, 1 hour
-            qfc_types::SlashableOffense::FalseVote => (2, 2 * 60 * 60 * 1000),     // 2%, 2 hours
+            qfc_types::SlashableOffense::Censorship => (3, 6 * 60 * 60 * 1000),   // 3%, 6 hours
+            qfc_types::SlashableOffense::Offline => (1, 1 * 60 * 60 * 1000),      // 1%, 1 hour
+            qfc_types::SlashableOffense::FalseVote => (2, 2 * 60 * 60 * 1000),    // 2%, 2 hours
         };
 
         // Apply the slash
@@ -776,7 +802,10 @@ impl SyncManager {
 
         // Check if validator is active
         if !validator.is_active() {
-            debug!("Work proof from inactive/jailed validator: {}", proof.validator);
+            debug!(
+                "Work proof from inactive/jailed validator: {}",
+                proof.validator
+            );
             return;
         }
 
@@ -807,10 +836,7 @@ impl SyncManager {
 
         info!(
             "Received work proof from {} for epoch {}: {} valid hashes, ~{} H/s",
-            proof.validator,
-            proof.epoch,
-            proof.work_count,
-            estimated_hashrate
+            proof.validator, proof.epoch, proof.work_count, estimated_hashrate
         );
     }
 
@@ -861,9 +887,16 @@ impl SyncManager {
         while current <= end {
             let request_end = (current + MAX_BLOCKS_PER_REQUEST - 1).min(end);
 
-            info!("Requesting blocks {}..{} from peer {}", current, request_end, peer_id);
+            info!(
+                "Requesting blocks {}..{} from peer {}",
+                current, request_end, peer_id
+            );
 
-            match self.network.request_block_range(peer_id, current, request_end).await {
+            match self
+                .network
+                .request_block_range(peer_id, current, request_end)
+                .await
+            {
                 Ok(SyncResponse::Blocks(blocks)) => {
                     for block_data in blocks {
                         if let Ok(block) = borsh::from_slice::<Block>(&block_data) {

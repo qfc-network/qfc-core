@@ -2,10 +2,10 @@
 //!
 //! Built-in functions available to all QuantumScript contracts.
 
-pub mod math;
-pub mod crypto;
-pub mod collections;
 pub mod abi;
+pub mod collections;
+pub mod crypto;
+pub mod math;
 
 use primitive_types::{H160, U256};
 use std::collections::HashMap;

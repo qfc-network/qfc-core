@@ -4,9 +4,9 @@
 
 use primitive_types::{H160, H256, U256};
 
+use super::StdlibContext;
 use crate::executor::{ExecutionError, ExecutionResult};
 use crate::value::Value;
-use super::StdlibContext;
 
 /// Keccak-256 hash (Ethereum compatible)
 /// crypto::keccak256(data: bytes) -> bytes32
@@ -28,7 +28,7 @@ pub fn keccak256(_ctx: &mut StdlibContext, args: Vec<Value>) -> ExecutionResult<
 pub fn sha256(_ctx: &mut StdlibContext, args: Vec<Value>) -> ExecutionResult<Value> {
     let data = get_bytes(&args, 0, "sha256")?;
 
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(&data);
     let result = hasher.finalize();
@@ -50,7 +50,7 @@ pub fn blake3(_ctx: &mut StdlibContext, args: Vec<Value>) -> ExecutionResult<Val
 pub fn ecrecover(_ctx: &mut StdlibContext, args: Vec<Value>) -> ExecutionResult<Value> {
     if args.len() != 4 {
         return Err(ExecutionError::Internal(
-            "ecrecover() expects 4 arguments".to_string()
+            "ecrecover() expects 4 arguments".to_string(),
         ));
     }
 
@@ -91,14 +91,11 @@ pub fn ecrecover(_ctx: &mut StdlibContext, args: Vec<Value>) -> ExecutionResult<
     };
 
     // Recover public key
-    let recovered_key = match VerifyingKey::recover_from_prehash(
-        hash.as_bytes(),
-        &signature,
-        recovery_id,
-    ) {
-        Ok(key) => key,
-        Err(_) => return Ok(Value::Address(H160::zero())),
-    };
+    let recovered_key =
+        match VerifyingKey::recover_from_prehash(hash.as_bytes(), &signature, recovery_id) {
+            Ok(key) => key,
+            Err(_) => return Ok(Value::Address(H160::zero())),
+        };
 
     // Convert public key to Ethereum address
     let public_key_bytes = recovered_key.to_encoded_point(false);
@@ -123,7 +120,7 @@ pub fn ecrecover(_ctx: &mut StdlibContext, args: Vec<Value>) -> ExecutionResult<
 pub fn verify(_ctx: &mut StdlibContext, args: Vec<Value>) -> ExecutionResult<Value> {
     if args.len() != 3 {
         return Err(ExecutionError::Internal(
-            "verify() expects 3 arguments".to_string()
+            "verify() expects 3 arguments".to_string(),
         ));
     }
 
@@ -136,7 +133,7 @@ pub fn verify(_ctx: &mut StdlibContext, args: Vec<Value>) -> ExecutionResult<Val
         return Ok(Value::Bool(false));
     }
 
-    use ed25519_dalek::{Signature as Ed25519Sig, VerifyingKey, Verifier};
+    use ed25519_dalek::{Signature as Ed25519Sig, Verifier, VerifyingKey};
 
     let pubkey_bytes: [u8; 32] = match pubkey.try_into() {
         Ok(b) => b,
@@ -196,11 +193,9 @@ fn get_h256(value: &Value, _func: &str) -> ExecutionResult<H256> {
 }
 
 fn get_u256(value: &Value, _func: &str) -> ExecutionResult<U256> {
-    value.as_u256().ok_or_else(|| {
-        ExecutionError::TypeError {
-            expected: "u256".to_string(),
-            found: value.type_name().to_string(),
-        }
+    value.as_u256().ok_or_else(|| ExecutionError::TypeError {
+        expected: "u256".to_string(),
+        found: value.type_name().to_string(),
     })
 }
 
@@ -240,7 +235,9 @@ mod tests {
 
         if let Value::Bytes32(hash) = result {
             // SHA256("hello") = 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
-            let expected = hex::decode("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824").unwrap();
+            let expected =
+                hex::decode("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
+                    .unwrap();
             assert_eq!(hash.as_bytes(), expected.as_slice());
         } else {
             panic!("Expected Bytes32");

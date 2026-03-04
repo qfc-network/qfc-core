@@ -4,9 +4,9 @@
 
 use primitive_types::{H160, H256, U256};
 
+use super::StdlibContext;
 use crate::executor::{ExecutionError, ExecutionResult};
 use crate::value::Value;
-use super::StdlibContext;
 
 /// ABI encode values
 /// abi::encode(...args) -> bytes
@@ -155,24 +155,28 @@ pub fn encode_packed(_ctx: &mut StdlibContext, args: Vec<Value>) -> ExecutionRes
 pub fn decode(_ctx: &mut StdlibContext, args: Vec<Value>) -> ExecutionResult<Value> {
     if args.len() != 2 {
         return Err(ExecutionError::Internal(
-            "abi::decode expects 2 arguments".to_string()
+            "abi::decode expects 2 arguments".to_string(),
         ));
     }
 
     let data = match &args[0] {
         Value::Bytes(b) => b.clone(),
-        other => return Err(ExecutionError::TypeError {
-            expected: "bytes".to_string(),
-            found: other.type_name().to_string(),
-        }),
+        other => {
+            return Err(ExecutionError::TypeError {
+                expected: "bytes".to_string(),
+                found: other.type_name().to_string(),
+            })
+        }
     };
 
     let types_str = match &args[1] {
         Value::String(s) => s.clone(),
-        other => return Err(ExecutionError::TypeError {
-            expected: "string".to_string(),
-            found: other.type_name().to_string(),
-        }),
+        other => {
+            return Err(ExecutionError::TypeError {
+                expected: "string".to_string(),
+                found: other.type_name().to_string(),
+            })
+        }
     };
 
     let types: Vec<&str> = types_str.split(',').map(|s| s.trim()).collect();
@@ -207,7 +211,8 @@ pub fn decode(_ctx: &mut StdlibContext, args: Vec<Value>) -> ExecutionResult<Val
                 if data_offset + 32 > data.len() {
                     Value::Bytes(Vec::new())
                 } else {
-                    let len = U256::from_big_endian(&data[data_offset..data_offset + 32]).as_usize();
+                    let len =
+                        U256::from_big_endian(&data[data_offset..data_offset + 32]).as_usize();
                     let end = (data_offset + 32 + len).min(data.len());
                     Value::Bytes(data[data_offset + 32..end].to_vec())
                 }
@@ -218,7 +223,8 @@ pub fn decode(_ctx: &mut StdlibContext, args: Vec<Value>) -> ExecutionResult<Val
                 if data_offset + 32 > data.len() {
                     Value::String(String::new())
                 } else {
-                    let len = U256::from_big_endian(&data[data_offset..data_offset + 32]).as_usize();
+                    let len =
+                        U256::from_big_endian(&data[data_offset..data_offset + 32]).as_usize();
                     let end = (data_offset + 32 + len).min(data.len());
                     let bytes = &data[data_offset + 32..end];
                     Value::String(String::from_utf8_lossy(bytes).into_owned())
@@ -243,16 +249,18 @@ pub fn decode(_ctx: &mut StdlibContext, args: Vec<Value>) -> ExecutionResult<Val
 pub fn encode_call(_ctx: &mut StdlibContext, args: Vec<Value>) -> ExecutionResult<Value> {
     if args.is_empty() {
         return Err(ExecutionError::Internal(
-            "abi::encodeCall expects at least 1 argument (signature)".to_string()
+            "abi::encodeCall expects at least 1 argument (signature)".to_string(),
         ));
     }
 
     let signature = match &args[0] {
         Value::String(s) => s.clone(),
-        other => return Err(ExecutionError::TypeError {
-            expected: "string".to_string(),
-            found: other.type_name().to_string(),
-        }),
+        other => {
+            return Err(ExecutionError::TypeError {
+                expected: "string".to_string(),
+                found: other.type_name().to_string(),
+            })
+        }
     };
 
     // Calculate function selector (first 4 bytes of keccak256(signature))
@@ -291,12 +299,8 @@ fn encode_single(value: &Value) -> ExecutionResult<Vec<u8>> {
             bytes[12..32].copy_from_slice(a.as_bytes());
             Ok(bytes.to_vec())
         }
-        Value::Bytes32(h) => {
-            Ok(h.as_bytes().to_vec())
-        }
-        _ => {
-            Ok(bytes.to_vec())
-        }
+        Value::Bytes32(h) => Ok(h.as_bytes().to_vec()),
+        _ => Ok(bytes.to_vec()),
     }
 }
 
@@ -349,18 +353,19 @@ mod tests {
         let mut c = ctx();
 
         // Encode
-        let original = vec![
-            Value::from_u64(100),
-            Value::Bool(true),
-        ];
+        let original = vec![Value::from_u64(100), Value::Bool(true)];
         let encoded = encode(&mut c, original.clone()).unwrap();
 
         // Decode
         if let Value::Bytes(data) = encoded {
-            let decoded = decode(&mut c, vec![
-                Value::Bytes(data),
-                Value::String("uint256,bool".to_string()),
-            ]).unwrap();
+            let decoded = decode(
+                &mut c,
+                vec![
+                    Value::Bytes(data),
+                    Value::String("uint256,bool".to_string()),
+                ],
+            )
+            .unwrap();
 
             if let Value::Tuple(values) = decoded {
                 assert_eq!(values[0], Value::from_u64(100));
@@ -372,10 +377,14 @@ mod tests {
     #[test]
     fn test_encode_packed() {
         let mut c = ctx();
-        let result = encode_packed(&mut c, vec![
-            Value::Bool(true),
-            Value::Address(H160::from_low_u64_be(0x1234)),
-        ]).unwrap();
+        let result = encode_packed(
+            &mut c,
+            vec![
+                Value::Bool(true),
+                Value::Address(H160::from_low_u64_be(0x1234)),
+            ],
+        )
+        .unwrap();
 
         if let Value::Bytes(data) = result {
             // 1 byte for bool + 20 bytes for address
@@ -389,11 +398,15 @@ mod tests {
     #[test]
     fn test_encode_call() {
         let mut c = ctx();
-        let result = encode_call(&mut c, vec![
-            Value::String("transfer(address,uint256)".to_string()),
-            Value::Address(H160::from_low_u64_be(0x1234)),
-            Value::from_u64(100),
-        ]).unwrap();
+        let result = encode_call(
+            &mut c,
+            vec![
+                Value::String("transfer(address,uint256)".to_string()),
+                Value::Address(H160::from_low_u64_be(0x1234)),
+                Value::from_u64(100),
+            ],
+        )
+        .unwrap();
 
         if let Value::Bytes(data) = result {
             // 4 bytes selector + 32 bytes address + 32 bytes uint256

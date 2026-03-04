@@ -6,7 +6,16 @@ use serde::{Deserialize, Serialize};
 
 /// Account type
 #[derive(
-    Clone, Copy, Debug, PartialEq, Eq, std::hash::Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    std::hash::Hash,
+    Serialize,
+    Deserialize,
+    BorshSerialize,
+    BorshDeserialize,
 )]
 #[borsh(use_discriminant = true)]
 #[repr(u8)]

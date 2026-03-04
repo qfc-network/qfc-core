@@ -93,7 +93,8 @@ impl MiningService {
         );
 
         // Mark validator as providing compute
-        self.consensus.set_provides_compute(&self.validator_address, true);
+        self.consensus
+            .set_provides_compute(&self.validator_address, true);
 
         let mut epoch_timer = interval(Duration::from_millis(self.config.epoch_duration_ms));
         let mut current_epoch = 0u64;
@@ -123,14 +124,21 @@ impl MiningService {
 
             // Run mining in a blocking thread pool
             let result = tokio::task::spawn_blocking(move || {
-                let miner = Miner::new(mining_service.validator_address, mining_service.config.threads);
-                miner.mine_for_duration(&task_clone, Duration::from_millis(mining_service.config.epoch_duration_ms - 500))
+                let miner = Miner::new(
+                    mining_service.validator_address,
+                    mining_service.config.threads,
+                );
+                miner.mine_for_duration(
+                    &task_clone,
+                    Duration::from_millis(mining_service.config.epoch_duration_ms - 500),
+                )
             })
             .await;
 
             match result {
                 Ok(mining_result) => {
-                    self.handle_mining_result(current_epoch, &task, mining_result).await;
+                    self.handle_mining_result(current_epoch, &task, mining_result)
+                        .await;
                 }
                 Err(e) => {
                     error!("Mining task failed: {}", e);
@@ -200,7 +208,8 @@ impl MiningService {
 
         // Update local hashrate
         let hashrate = qfc_pow::calculate_hashrate(&proof, task);
-        self.consensus.update_hashrate(&self.validator_address, hashrate);
+        self.consensus
+            .update_hashrate(&self.validator_address, hashrate);
 
         info!(
             "Updated hashrate for {}: {} H/s",
@@ -229,7 +238,8 @@ impl MiningService {
         let proof_count = *self.epoch_proof_count.read();
         let current = *self.current_difficulty.read();
 
-        let new_difficulty = adjust_difficulty(&current, proof_count, &self.config.difficulty_config);
+        let new_difficulty =
+            adjust_difficulty(&current, proof_count, &self.config.difficulty_config);
 
         if new_difficulty != current {
             debug!(

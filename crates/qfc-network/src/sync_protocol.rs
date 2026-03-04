@@ -73,7 +73,10 @@ impl request_response::Codec for SyncCodec {
 
         if len > 1024 * 1024 {
             // Max 1MB
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "Request too large"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Request too large",
+            ));
         }
 
         // Read data
@@ -81,8 +84,7 @@ impl request_response::Codec for SyncCodec {
         io.read_exact(&mut buf).await?;
 
         // Deserialize
-        SyncRequest::try_from_slice(&buf)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        SyncRequest::try_from_slice(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
     async fn read_response<T>(
@@ -195,7 +197,10 @@ mod tests {
 
     #[test]
     fn test_sync_request_get_block_range_serialization() {
-        let request = SyncRequest::GetBlockRange { start: 100, end: 200 };
+        let request = SyncRequest::GetBlockRange {
+            start: 100,
+            end: 200,
+        };
 
         let serialized = borsh::to_vec(&request).unwrap();
         let deserialized: SyncRequest = SyncRequest::try_from_slice(&serialized).unwrap();

@@ -4,9 +4,9 @@
 
 use primitive_types::{H160, U256};
 
+use super::{CallType, ContractType, CrossVmCall, CrossVmResult, EvmBackend, InteropManager};
 use crate::executor::{ExecutionContext, ExecutionError, ExecutionResult};
 use crate::value::Value;
-use super::{CallType, ContractType, CrossVmCall, CrossVmResult, EvmBackend, InteropManager};
 
 /// Call bridge for QVM -> EVM calls
 pub struct CallBridge<'a, E: EvmBackend> {
@@ -114,10 +114,9 @@ impl<'a, E: EvmBackend> CallBridge<'a, E> {
                 continue;
             }
 
-            let value = self.manager.decode_from_evm(
-                &result.return_data[offset..],
-                return_type,
-            );
+            let value = self
+                .manager
+                .decode_from_evm(&result.return_data[offset..], return_type);
             values.push(value);
             offset += 32;
         }
@@ -154,8 +153,10 @@ impl EvmInterfaces {
     // ERC-1155 function signatures
     pub const ERC1155_BALANCE_OF: &'static str = "balanceOf(address,uint256)";
     pub const ERC1155_BALANCE_OF_BATCH: &'static str = "balanceOfBatch(address[],uint256[])";
-    pub const ERC1155_SAFE_TRANSFER_FROM: &'static str = "safeTransferFrom(address,address,uint256,uint256,bytes)";
-    pub const ERC1155_SAFE_BATCH_TRANSFER_FROM: &'static str = "safeBatchTransferFrom(address,address,uint256[],uint256[],bytes)";
+    pub const ERC1155_SAFE_TRANSFER_FROM: &'static str =
+        "safeTransferFrom(address,address,uint256,uint256,bytes)";
+    pub const ERC1155_SAFE_BATCH_TRANSFER_FROM: &'static str =
+        "safeBatchTransferFrom(address,address,uint256[],uint256[],bytes)";
     pub const ERC1155_SET_APPROVAL_FOR_ALL: &'static str = "setApprovalForAll(address,bool)";
     pub const ERC1155_IS_APPROVED_FOR_ALL: &'static str = "isApprovedForAll(address,address)";
 }
@@ -188,12 +189,7 @@ impl<'a, E: EvmBackend> Erc20Helper<'a, E> {
     }
 
     /// Transfer tokens
-    pub fn transfer(
-        &mut self,
-        to: H160,
-        amount: U256,
-        gas_limit: u64,
-    ) -> ExecutionResult<bool> {
+    pub fn transfer(&mut self, to: H160, amount: U256, gas_limit: u64) -> ExecutionResult<bool> {
         let result = self.bridge.call_function(
             self.token,
             EvmInterfaces::ERC20_TRANSFER,
@@ -295,12 +291,9 @@ mod tests {
 
         let mut bridge = CallBridge::new(&mut manager, &context);
 
-        let result = bridge.call_raw(
-            H160::from_low_u64_be(0x1234),
-            vec![],
-            U256::zero(),
-            100000,
-        ).unwrap();
+        let result = bridge
+            .call_raw(H160::from_low_u64_be(0x1234), vec![], U256::zero(), 100000)
+            .unwrap();
 
         assert!(result.success);
     }
@@ -315,16 +308,18 @@ mod tests {
 
         let mut bridge = CallBridge::new(&mut manager, &context);
 
-        let result = bridge.call_function(
-            H160::from_low_u64_be(0x1234),
-            "transfer(address,uint256)",
-            &[
-                Value::Address(H160::from_low_u64_be(0x5678)),
-                Value::from_u64(100),
-            ],
-            U256::zero(),
-            100000,
-        ).unwrap();
+        let result = bridge
+            .call_function(
+                H160::from_low_u64_be(0x1234),
+                "transfer(address,uint256)",
+                &[
+                    Value::Address(H160::from_low_u64_be(0x5678)),
+                    Value::from_u64(100),
+                ],
+                U256::zero(),
+                100000,
+            )
+            .unwrap();
 
         assert!(result.success);
     }

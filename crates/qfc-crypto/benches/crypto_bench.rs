@@ -43,9 +43,7 @@ fn bench_ed25519_sign(c: &mut Criterion) {
     let message = [0u8; 32];
     let hash = blake3_hash(&message);
 
-    group.bench_function("sign_32b", |b| {
-        b.iter(|| keypair.sign(black_box(&message)))
-    });
+    group.bench_function("sign_32b", |b| b.iter(|| keypair.sign(black_box(&message))));
 
     group.bench_function("sign_hash", |b| {
         b.iter(|| keypair.sign_hash(black_box(&hash)))

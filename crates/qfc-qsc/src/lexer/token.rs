@@ -17,7 +17,12 @@ pub struct Span {
 
 impl Span {
     pub fn new(start: usize, end: usize, line: u32, column: u32) -> Self {
-        Self { start, end, line, column }
+        Self {
+            start,
+            end,
+            line,
+            column,
+        }
     }
 
     pub fn merge(self, other: Span) -> Span {
@@ -25,14 +30,23 @@ impl Span {
             start: self.start.min(other.start),
             end: self.end.max(other.end),
             line: self.line.min(other.line),
-            column: if self.line <= other.line { self.column } else { other.column },
+            column: if self.line <= other.line {
+                self.column
+            } else {
+                other.column
+            },
         }
     }
 }
 
 impl Default for Span {
     fn default() -> Self {
-        Self { start: 0, end: 0, line: 1, column: 1 }
+        Self {
+            start: 0,
+            end: 0,
+            line: 1,
+            column: 1,
+        }
     }
 }
 
@@ -172,33 +186,33 @@ pub enum TokenKind {
     Enum,
 
     // Operators - Arithmetic
-    Plus,        // +
-    Minus,       // -
-    Star,        // *
-    Slash,       // /
-    Percent,     // %
-    StarStar,    // **
+    Plus,     // +
+    Minus,    // -
+    Star,     // *
+    Slash,    // /
+    Percent,  // %
+    StarStar, // **
 
     // Operators - Comparison
-    EqEq,        // ==
-    NotEq,       // !=
-    Lt,          // <
-    Gt,          // >
-    LtEq,        // <=
-    GtEq,        // >=
+    EqEq,  // ==
+    NotEq, // !=
+    Lt,    // <
+    Gt,    // >
+    LtEq,  // <=
+    GtEq,  // >=
 
     // Operators - Logical
-    And,         // &&
-    Or,          // ||
-    Not,         // !
+    And, // &&
+    Or,  // ||
+    Not, // !
 
     // Operators - Bitwise
-    Ampersand,   // &
-    Pipe,        // |
-    Caret,       // ^
-    Tilde,       // ~
-    Shl,         // <<
-    Shr,         // >>
+    Ampersand, // &
+    Pipe,      // |
+    Caret,     // ^
+    Tilde,     // ~
+    Shl,       // <<
+    Shr,       // >>
 
     // Operators - Assignment
     Eq,          // =
@@ -214,30 +228,30 @@ pub enum TokenKind {
     ShrEq,       // >>=
 
     // Operators - Other
-    Arrow,       // ->
-    FatArrow,    // =>
-    Question,    // ?
-    Colon,       // :
-    ColonColon,  // ::
-    Dot,         // .
-    DotDot,      // ..
-    DotDotEq,    // ..=
-    At,          // @
-    Hash,        // #
-    Dollar,      // $
+    Arrow,      // ->
+    FatArrow,   // =>
+    Question,   // ?
+    Colon,      // :
+    ColonColon, // ::
+    Dot,        // .
+    DotDot,     // ..
+    DotDotEq,   // ..=
+    At,         // @
+    Hash,       // #
+    Dollar,     // $
 
     // Delimiters
-    LParen,      // (
-    RParen,      // )
-    LBracket,    // [
-    RBracket,    // ]
-    LBrace,      // {
-    RBrace,      // }
+    LParen,   // (
+    RParen,   // )
+    LBracket, // [
+    RBracket, // ]
+    LBrace,   // {
+    RBrace,   // }
 
     // Punctuation
-    Comma,       // ,
-    Semi,        // ;
-    Underscore,  // _ (when standalone)
+    Comma,      // ,
+    Semi,       // ;
+    Underscore, // _ (when standalone)
 
     // Special
     Eof,

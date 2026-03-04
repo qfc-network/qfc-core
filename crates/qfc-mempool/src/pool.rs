@@ -118,11 +118,7 @@ impl Mempool {
         }
 
         // Check per-account limit
-        let sender_count = self
-            .by_sender
-            .get(&sender)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let sender_count = self.by_sender.get(&sender).map(|m| m.len()).unwrap_or(0);
 
         if sender_count >= self.config.max_per_account {
             return Err(MempoolError::AccountPoolFull);
@@ -138,9 +134,7 @@ impl Mempool {
             .or_default()
             .insert(tx.nonce, hash);
 
-        self.by_price
-            .write()
-            .insert((tx.gas_price, hash), hash);
+        self.by_price.write().insert((tx.gas_price, hash), hash);
 
         *self.size.write() += 1;
 
@@ -184,9 +178,7 @@ impl Mempool {
             }
 
             // Remove from by_price
-            self.by_price
-                .write()
-                .remove(&(pooled.tx.gas_price, *hash));
+            self.by_price.write().remove(&(pooled.tx.gas_price, *hash));
 
             *self.size.write() -= 1;
 
@@ -214,9 +206,7 @@ impl Mempool {
             for nonce in to_remove {
                 if let Some(hash) = nonce_map.remove(&nonce) {
                     if let Some((_, pooled)) = self.by_hash.remove(&hash) {
-                        self.by_price
-                            .write()
-                            .remove(&(pooled.tx.gas_price, hash));
+                        self.by_price.write().remove(&(pooled.tx.gas_price, hash));
                         *self.size.write() -= 1;
                     }
                 }
@@ -251,10 +241,7 @@ impl Mempool {
                 }
 
                 // Check nonce ordering
-                let _expected_nonce = seen_senders
-                    .get(&pooled.sender)
-                    .map(|n| n + 1)
-                    .unwrap_or(0); // TODO: Get from state
+                let _expected_nonce = seen_senders.get(&pooled.sender).map(|n| n + 1).unwrap_or(0); // TODO: Get from state
 
                 // For now, just accept any nonce (simplified)
                 // In production, we'd check against state

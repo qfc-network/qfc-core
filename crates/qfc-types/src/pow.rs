@@ -91,7 +91,13 @@ pub struct MiningTask {
 
 impl MiningTask {
     /// Create a new mining task
-    pub fn new(epoch: u64, seed: [u8; 32], difficulty: U256, epoch_start: u64, epoch_end: u64) -> Self {
+    pub fn new(
+        epoch: u64,
+        seed: [u8; 32],
+        difficulty: U256,
+        epoch_start: u64,
+        epoch_end: u64,
+    ) -> Self {
         Self {
             epoch,
             seed,
@@ -136,17 +142,15 @@ impl Default for DifficultyConfig {
             target_proofs_per_epoch: 10000,
             // Min difficulty: requires ~16 bits of leading zeros
             min_difficulty: U256::from_be_bytes(&[
-                0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-                0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-                0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-                0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                0xff, 0xff, 0xff, 0xff,
             ]),
             // Max difficulty: requires ~64 bits of leading zeros
             max_difficulty: U256::from_be_bytes(&[
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-                0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-                0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                0xff, 0xff, 0xff, 0xff,
             ]),
             max_adjustment_percent: 10,
         }
@@ -221,13 +225,7 @@ mod tests {
 
     #[test]
     fn test_mining_task_serialization() {
-        let task = MiningTask::new(
-            100,
-            [0u8; 32],
-            U256::from_u64(1000),
-            1000,
-            2000,
-        );
+        let task = MiningTask::new(100, [0u8; 32], U256::from_u64(1000), 1000, 2000);
 
         let bytes = task.to_bytes();
         let decoded = MiningTask::from_bytes(&bytes).unwrap();
@@ -238,17 +236,11 @@ mod tests {
 
     #[test]
     fn test_mining_task_is_active() {
-        let task = MiningTask::new(
-            100,
-            [0u8; 32],
-            U256::from_u64(1000),
-            1000,
-            2000,
-        );
+        let task = MiningTask::new(100, [0u8; 32], U256::from_u64(1000), 1000, 2000);
 
-        assert!(!task.is_active(999));  // Before start
-        assert!(task.is_active(1000));  // At start
-        assert!(task.is_active(1500));  // During
+        assert!(!task.is_active(999)); // Before start
+        assert!(task.is_active(1000)); // At start
+        assert!(task.is_active(1500)); // During
         assert!(!task.is_active(2000)); // At end (exclusive)
         assert!(!task.is_active(2001)); // After end
     }

@@ -56,7 +56,11 @@ impl std::fmt::Debug for Keypair {
 }
 
 /// Verify a signature against a public key and message
-pub fn verify_signature(public_key: &PublicKey, message: &[u8], signature: &Signature) -> Result<()> {
+pub fn verify_signature(
+    public_key: &PublicKey,
+    message: &[u8],
+    signature: &Signature,
+) -> Result<()> {
     let verifying_key = VerifyingKey::from_bytes(public_key.as_bytes())
         .map_err(|_| CryptoError::InvalidPublicKey)?;
 
@@ -68,7 +72,11 @@ pub fn verify_signature(public_key: &PublicKey, message: &[u8], signature: &Sign
 }
 
 /// Verify a signature against a public key and hash
-pub fn verify_hash_signature(public_key: &PublicKey, hash: &Hash, signature: &Signature) -> Result<()> {
+pub fn verify_hash_signature(
+    public_key: &PublicKey,
+    hash: &Hash,
+    signature: &Signature,
+) -> Result<()> {
     verify_signature(public_key, hash.as_bytes(), signature)
 }
 

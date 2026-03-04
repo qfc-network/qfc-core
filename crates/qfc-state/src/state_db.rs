@@ -73,9 +73,7 @@ impl StateDB {
                 let account = Account::from_bytes(&data)
                     .map_err(|e| StateError::Serialization(e.to_string()))?;
                 // Cache it
-                self.account_cache
-                    .write()
-                    .insert(*address, account.clone());
+                self.account_cache.write().insert(*address, account.clone());
                 Ok(account)
             }
             None => Ok(Account::new_eoa()),
@@ -496,7 +494,10 @@ mod tests {
         state.set_balance(&from, U256::from_u64(100)).unwrap();
         let result = state.transfer(&from, &to, U256::from_u64(200));
 
-        assert!(matches!(result, Err(StateError::InsufficientBalance { .. })));
+        assert!(matches!(
+            result,
+            Err(StateError::InsufficientBalance { .. })
+        ));
     }
 
     #[test]
@@ -575,7 +576,9 @@ mod tests {
         assert_eq!(amount, U256::ZERO);
 
         // Set delegation
-        state.set_delegation(&delegator, &validator, U256::from_u64(1000)).unwrap();
+        state
+            .set_delegation(&delegator, &validator, U256::from_u64(1000))
+            .unwrap();
 
         assert!(state.has_delegation(&delegator).unwrap());
         let (target, amount) = state.get_delegation(&delegator).unwrap();
@@ -591,7 +594,9 @@ mod tests {
         // Other validator returns zero
         let other_validator = Address::new([0x33; 20]);
         assert_eq!(
-            state.get_delegation_amount(&delegator, &other_validator).unwrap(),
+            state
+                .get_delegation_amount(&delegator, &other_validator)
+                .unwrap(),
             U256::ZERO
         );
     }
@@ -602,8 +607,12 @@ mod tests {
         let delegator = Address::new([0x11; 20]);
         let validator = Address::new([0x22; 20]);
 
-        state.set_delegation(&delegator, &validator, U256::from_u64(1000)).unwrap();
-        state.add_delegation_amount(&delegator, U256::from_u64(500)).unwrap();
+        state
+            .set_delegation(&delegator, &validator, U256::from_u64(1000))
+            .unwrap();
+        state
+            .add_delegation_amount(&delegator, U256::from_u64(500))
+            .unwrap();
 
         let (_, amount) = state.get_delegation(&delegator).unwrap();
         assert_eq!(amount, U256::from_u64(1500));
@@ -615,15 +624,21 @@ mod tests {
         let delegator = Address::new([0x11; 20]);
         let validator = Address::new([0x22; 20]);
 
-        state.set_delegation(&delegator, &validator, U256::from_u64(1000)).unwrap();
+        state
+            .set_delegation(&delegator, &validator, U256::from_u64(1000))
+            .unwrap();
 
         // Partial withdrawal
-        assert!(state.sub_delegation_amount(&delegator, U256::from_u64(400)).unwrap());
+        assert!(state
+            .sub_delegation_amount(&delegator, U256::from_u64(400))
+            .unwrap());
         let (_, amount) = state.get_delegation(&delegator).unwrap();
         assert_eq!(amount, U256::from_u64(600));
 
         // Full withdrawal clears delegation
-        assert!(state.sub_delegation_amount(&delegator, U256::from_u64(600)).unwrap());
+        assert!(state
+            .sub_delegation_amount(&delegator, U256::from_u64(600))
+            .unwrap());
         assert!(!state.has_delegation(&delegator).unwrap());
     }
 
@@ -633,10 +648,14 @@ mod tests {
         let delegator = Address::new([0x11; 20]);
         let validator = Address::new([0x22; 20]);
 
-        state.set_delegation(&delegator, &validator, U256::from_u64(1000)).unwrap();
+        state
+            .set_delegation(&delegator, &validator, U256::from_u64(1000))
+            .unwrap();
 
         // Cannot withdraw more than delegated
-        assert!(!state.sub_delegation_amount(&delegator, U256::from_u64(1500)).unwrap());
+        assert!(!state
+            .sub_delegation_amount(&delegator, U256::from_u64(1500))
+            .unwrap());
         let (_, amount) = state.get_delegation(&delegator).unwrap();
         assert_eq!(amount, U256::from_u64(1000));
     }
@@ -647,7 +666,9 @@ mod tests {
         let delegator = Address::new([0x11; 20]);
         let validator = Address::new([0x22; 20]);
 
-        state.set_delegation(&delegator, &validator, U256::from_u64(1000)).unwrap();
+        state
+            .set_delegation(&delegator, &validator, U256::from_u64(1000))
+            .unwrap();
         assert!(state.has_delegation(&delegator).unwrap());
 
         state.clear_delegation(&delegator).unwrap();

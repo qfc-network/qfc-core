@@ -87,7 +87,10 @@ pub trait QfcApi {
 
     /// Get detailed score breakdown for a validator
     #[method(name = "getValidatorScoreBreakdown")]
-    async fn get_validator_score_breakdown(&self, address: String) -> RpcResult<RpcValidatorScoreBreakdown>;
+    async fn get_validator_score_breakdown(
+        &self,
+        address: String,
+    ) -> RpcResult<RpcValidatorScoreBreakdown>;
 
     /// Get stake amount for an address
     #[method(name = "getStake")]
@@ -112,7 +115,8 @@ pub trait QfcApi {
     /// Request tokens from faucet (dev mode only)
     /// Returns transaction hash
     #[method(name = "requestFaucet")]
-    async fn request_faucet(&self, address: String, amount: String) -> RpcResult<RpcFaucetResponse>;
+    async fn request_faucet(&self, address: String, amount: String)
+        -> RpcResult<RpcFaucetResponse>;
 }
 
 /// Faucet response

@@ -4,9 +4,9 @@
 
 use primitive_types::U256;
 
+use super::StdlibContext;
 use crate::executor::{ExecutionError, ExecutionResult};
 use crate::value::Value;
-use super::StdlibContext;
 
 /// Returns the minimum of two values
 /// math::min(a: u256, b: u256) -> u256
@@ -238,11 +238,9 @@ fn check_args(args: &[Value], expected: usize, func: &str) -> ExecutionResult<()
 }
 
 fn get_u256(value: &Value, _func: &str) -> ExecutionResult<U256> {
-    value.as_u256().ok_or_else(|| {
-        ExecutionError::TypeError {
-            expected: "u256".to_string(),
-            found: value.type_name().to_string(),
-        }
+    value.as_u256().ok_or_else(|| ExecutionError::TypeError {
+        expected: "u256".to_string(),
+        found: value.type_name().to_string(),
     })
 }
 
@@ -264,7 +262,13 @@ fn full_mul(a: U256, b: U256) -> (U256, U256) {
     let (mid, carry1) = lo_hi.overflowing_add(hi_lo);
     let (low, carry2) = lo_lo.overflowing_add(mid << 128);
 
-    let high = hi_hi + (mid >> 128) + if carry1 { U256::one() << 128 } else { U256::zero() }
+    let high = hi_hi
+        + (mid >> 128)
+        + if carry1 {
+            U256::one() << 128
+        } else {
+            U256::zero()
+        }
         + if carry2 { U256::one() } else { U256::zero() };
 
     (low, high)
@@ -293,7 +297,9 @@ fn full_div(low: U256, high: U256, denominator: U256) -> ExecutionResult<U256> {
         remainder_low = remainder_low << 1;
 
         // If remainder >= denominator (shifted), subtract and set quotient bit
-        if remainder_high >= denominator || (remainder_high == denominator && remainder_low >= denominator) {
+        if remainder_high >= denominator
+            || (remainder_high == denominator && remainder_low >= denominator)
+        {
             remainder_high = remainder_high - denominator;
             quotient = quotient | (U256::one() << i);
         }
@@ -367,18 +373,18 @@ mod tests {
     #[test]
     fn test_clamp() {
         let mut c = ctx();
-        let result = clamp(&mut c, vec![
-            Value::from_u64(5),
-            Value::from_u64(0),
-            Value::from_u64(10),
-        ]).unwrap();
+        let result = clamp(
+            &mut c,
+            vec![Value::from_u64(5), Value::from_u64(0), Value::from_u64(10)],
+        )
+        .unwrap();
         assert_eq!(result, Value::from_u64(5));
 
-        let result = clamp(&mut c, vec![
-            Value::from_u64(15),
-            Value::from_u64(0),
-            Value::from_u64(10),
-        ]).unwrap();
+        let result = clamp(
+            &mut c,
+            vec![Value::from_u64(15), Value::from_u64(0), Value::from_u64(10)],
+        )
+        .unwrap();
         assert_eq!(result, Value::from_u64(10));
     }
 
@@ -386,11 +392,15 @@ mod tests {
     fn test_mul_div() {
         let mut c = ctx();
         // Simple case: (100 * 200) / 50 = 400
-        let result = mul_div(&mut c, vec![
-            Value::from_u64(100),
-            Value::from_u64(200),
-            Value::from_u64(50),
-        ]).unwrap();
+        let result = mul_div(
+            &mut c,
+            vec![
+                Value::from_u64(100),
+                Value::from_u64(200),
+                Value::from_u64(50),
+            ],
+        )
+        .unwrap();
         assert_eq!(result, Value::from_u64(400));
     }
 }

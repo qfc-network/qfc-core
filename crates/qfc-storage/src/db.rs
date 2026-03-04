@@ -3,7 +3,9 @@
 use crate::batch::{BatchOp, WriteBatch};
 use crate::error::{Result, StorageError};
 use crate::schema::{cf, meta, DB_VERSION};
-use rocksdb::{BoundColumnFamily, DBWithThreadMode, MultiThreaded, Options, WriteBatch as RocksWriteBatch};
+use rocksdb::{
+    BoundColumnFamily, DBWithThreadMode, MultiThreaded, Options, WriteBatch as RocksWriteBatch,
+};
 use std::path::Path;
 use std::sync::Arc;
 use tracing::{debug, info};

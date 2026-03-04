@@ -5,9 +5,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Receipt execution status
-#[derive(
-    Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
-)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub enum ReceiptStatus {
     /// Transaction succeeded
     Success,
@@ -33,7 +31,11 @@ impl ReceiptStatus {
 
     /// Get status code (1 = success, 0 = failure)
     pub fn status_code(&self) -> u8 {
-        if self.is_success() { 1 } else { 0 }
+        if self.is_success() {
+            1
+        } else {
+            0
+        }
     }
 }
 
@@ -94,7 +96,8 @@ impl Bloom {
 
         // Use first 6 bytes to set 3 bits
         for i in 0..3 {
-            let bit_index = ((hash_bytes[i * 2] as usize) << 8 | hash_bytes[i * 2 + 1] as usize) & 2047;
+            let bit_index =
+                ((hash_bytes[i * 2] as usize) << 8 | hash_bytes[i * 2 + 1] as usize) & 2047;
             let byte_index = bit_index / 8;
             let bit_position = bit_index % 8;
             self.0[byte_index] |= 1 << bit_position;
@@ -107,7 +110,8 @@ impl Bloom {
         let hash_bytes = hash.as_bytes();
 
         for i in 0..3 {
-            let bit_index = ((hash_bytes[i * 2] as usize) << 8 | hash_bytes[i * 2 + 1] as usize) & 2047;
+            let bit_index =
+                ((hash_bytes[i * 2] as usize) << 8 | hash_bytes[i * 2 + 1] as usize) & 2047;
             let byte_index = bit_index / 8;
             let bit_position = bit_index % 8;
             if self.0[byte_index] & (1 << bit_position) == 0 {
@@ -131,9 +135,7 @@ impl Bloom {
 }
 
 /// Event log
-#[derive(
-    Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
-)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct Log {
     /// Contract address that emitted the log
     pub address: Address,
@@ -148,7 +150,11 @@ pub struct Log {
 impl Log {
     /// Create a new log
     pub fn new(address: Address, topics: Vec<Hash>, data: Vec<u8>) -> Self {
-        Self { address, topics, data }
+        Self {
+            address,
+            topics,
+            data,
+        }
     }
 
     /// Create bloom filter for this log
@@ -163,9 +169,7 @@ impl Log {
 }
 
 /// Transaction receipt
-#[derive(
-    Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
-)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct Receipt {
     /// Transaction hash
     pub tx_hash: Hash,
@@ -316,12 +320,7 @@ mod tests {
 
     #[test]
     fn test_receipt_serialization() {
-        let receipt = Receipt::success(
-            Hash::new([0x11; 32]),
-            0,
-            21000,
-            21000,
-        );
+        let receipt = Receipt::success(Hash::new([0x11; 32]), 0, 21000, 21000);
 
         let bytes = receipt.to_bytes();
         let decoded = Receipt::from_bytes(&bytes).unwrap();

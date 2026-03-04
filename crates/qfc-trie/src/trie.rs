@@ -46,9 +46,7 @@ impl Trie {
         Self {
             db,
             root: Hash::ZERO,
-            cache: RwLock::new(LruCache::new(
-                NonZeroUsize::new(config.cache_size).unwrap(),
-            )),
+            cache: RwLock::new(LruCache::new(NonZeroUsize::new(config.cache_size).unwrap())),
             dirty: RwLock::new(HashMap::new()),
         }
     }
@@ -173,7 +171,8 @@ impl Trie {
                         let old_remaining = leaf_nibbles.offset(common_len + 1);
                         if old_remaining.is_empty() {
                             // Old value is exactly at branch
-                            let old_leaf = TrieNode::leaf(NibbleSlice::from_nibbles(&[]), leaf_value);
+                            let old_leaf =
+                                TrieNode::leaf(NibbleSlice::from_nibbles(&[]), leaf_value);
                             children[old_nibble] = Some(self.store_node(old_leaf)?);
                         } else {
                             let old_leaf = TrieNode::leaf(old_remaining, leaf_value);
@@ -186,7 +185,8 @@ impl Trie {
                         let new_nibble = key.at(common_len) as usize;
                         let new_remaining = key.offset(common_len + 1);
                         if new_remaining.is_empty() {
-                            let new_leaf = TrieNode::leaf(NibbleSlice::from_nibbles(&[]), value.clone());
+                            let new_leaf =
+                                TrieNode::leaf(NibbleSlice::from_nibbles(&[]), value.clone());
                             children[new_nibble] = Some(self.store_node(new_leaf)?);
                         } else {
                             let new_leaf = TrieNode::leaf(new_remaining, value.clone());
@@ -262,7 +262,10 @@ impl Trie {
                 }
             }
 
-            TrieNode::Branch { mut children, value: branch_value } => {
+            TrieNode::Branch {
+                mut children,
+                value: branch_value,
+            } => {
                 if key.is_empty() {
                     // Update branch value
                     let new_branch = TrieNode::branch(children, Some(value));
@@ -316,7 +319,10 @@ impl Trie {
                 }
             }
 
-            TrieNode::Extension { key: ext_key, child } => {
+            TrieNode::Extension {
+                key: ext_key,
+                child,
+            } => {
                 let ext_nibbles = NibbleSlice::from_nibbles(&ext_key);
                 if key.starts_with(&ext_nibbles) {
                     let remaining = key.offset(ext_nibbles.len());
@@ -327,7 +333,10 @@ impl Trie {
                             // Might need to collapse
                             let child_node = self.get_node(&new_child)?;
                             match child_node {
-                                TrieNode::Extension { key: child_key, child: grandchild } => {
+                                TrieNode::Extension {
+                                    key: child_key,
+                                    child: grandchild,
+                                } => {
                                     // Merge extensions
                                     let child_nibbles = NibbleSlice::from_nibbles(&child_key);
                                     let mut merged = ext_nibbles.to_nibbles();
@@ -338,15 +347,16 @@ impl Trie {
                                     );
                                     Ok(Some(self.store_node(merged_ext)?))
                                 }
-                                TrieNode::Leaf { key: child_key, value } => {
+                                TrieNode::Leaf {
+                                    key: child_key,
+                                    value,
+                                } => {
                                     // Merge extension with leaf
                                     let child_nibbles = NibbleSlice::from_nibbles(&child_key);
                                     let mut merged = ext_nibbles.to_nibbles();
                                     merged.extend(child_nibbles.to_nibbles());
-                                    let merged_leaf = TrieNode::leaf(
-                                        NibbleSlice::from_nibbles(&merged),
-                                        value,
-                                    );
+                                    let merged_leaf =
+                                        TrieNode::leaf(NibbleSlice::from_nibbles(&merged), value);
                                     Ok(Some(self.store_node(merged_leaf)?))
                                 }
                                 _ => {
@@ -363,7 +373,10 @@ impl Trie {
                 }
             }
 
-            TrieNode::Branch { mut children, value } => {
+            TrieNode::Branch {
+                mut children,
+                value,
+            } => {
                 if key.is_empty() {
                     if value.is_none() {
                         return Ok(None);
@@ -377,7 +390,9 @@ impl Trie {
                         return Ok(None);
                     }
                     let remaining = key.offset(1);
-                    if let Some(new_child) = self.delete_at(&children[nibble].unwrap(), &remaining)? {
+                    if let Some(new_child) =
+                        self.delete_at(&children[nibble].unwrap(), &remaining)?
+                    {
                         children[nibble] = if new_child == Hash::ZERO {
                             None
                         } else {
@@ -432,10 +447,8 @@ impl Trie {
                     }
                     _ => {
                         // Can't collapse, create extension
-                        let ext = TrieNode::extension(
-                            NibbleSlice::from_nibbles(&[nibble]),
-                            child_hash,
-                        );
+                        let ext =
+                            TrieNode::extension(NibbleSlice::from_nibbles(&[nibble]), child_hash);
                         return self.store_node(ext);
                     }
                 }

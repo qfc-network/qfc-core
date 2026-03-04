@@ -212,15 +212,9 @@ impl Value {
     /// Decode value from 32-byte slot
     pub fn from_slot(slot: H256, ty: &ValueType) -> Self {
         match ty {
-            ValueType::U256 => {
-                Value::U256(U256::from_big_endian(slot.as_bytes()))
-            }
-            ValueType::Bool => {
-                Value::Bool(slot.as_bytes()[31] != 0)
-            }
-            ValueType::Address => {
-                Value::Address(H160::from_slice(&slot.as_bytes()[12..32]))
-            }
+            ValueType::U256 => Value::U256(U256::from_big_endian(slot.as_bytes())),
+            ValueType::Bool => Value::Bool(slot.as_bytes()[31] != 0),
+            ValueType::Address => Value::Address(H160::from_slice(&slot.as_bytes()[12..32])),
             ValueType::Bytes32 => Value::Bytes32(slot),
             _ => Value::U256(U256::from_big_endian(slot.as_bytes())),
         }

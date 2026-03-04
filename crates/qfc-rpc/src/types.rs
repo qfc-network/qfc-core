@@ -123,7 +123,8 @@ impl RpcBlock {
             difficulty: "0x0".to_string(),
             total_difficulty: "0x0".to_string(),
             nonce: "0x0000000000000000".to_string(),
-            sha3_uncles: "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347".to_string(),
+            sha3_uncles: "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+                .to_string(),
             logs_bloom: empty_bloom,
             size: "0x0".to_string(),
             base_fee_per_gas: Some("0x0".to_string()),
@@ -135,14 +136,20 @@ impl RpcBlock {
                         .zip(tx_hashes.iter())
                         .enumerate()
                         .map(|(i, (tx, hash))| {
-                            RpcTransaction::from_tx(tx.clone(), *hash, block_hash, block.number(), i as u32)
+                            RpcTransaction::from_tx(
+                                tx.clone(),
+                                *hash,
+                                block_hash,
+                                block.number(),
+                                i as u32,
+                            )
                         })
-                        .collect::<Vec<_>>()
-                ).unwrap_or(serde_json::Value::Array(vec![]))
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap_or(serde_json::Value::Array(vec![]))
             } else {
-                serde_json::to_value(
-                    tx_hashes.iter().map(|h| h.to_string()).collect::<Vec<_>>()
-                ).unwrap_or(serde_json::Value::Array(vec![]))
+                serde_json::to_value(tx_hashes.iter().map(|h| h.to_string()).collect::<Vec<_>>())
+                    .unwrap_or(serde_json::Value::Array(vec![]))
             }),
         }
     }
@@ -459,13 +466,7 @@ mod tests {
             logs_bloom: qfc_types::Bloom::default(),
         };
 
-        let rpc_receipt = RpcReceipt::from_receipt(
-            receipt,
-            Address::default(),
-            None,
-            None,
-            None,
-        );
+        let rpc_receipt = RpcReceipt::from_receipt(receipt, Address::default(), None, None, None);
 
         assert_eq!(rpc_receipt.status, "0x0");
         assert!(rpc_receipt.block_hash.is_none());

@@ -136,13 +136,29 @@ impl GasCosts {
             Opcode::Pop | Opcode::Dup | Opcode::Swap => self.base,
 
             // Very low cost (simple arithmetic)
-            Opcode::Add | Opcode::Sub | Opcode::Not | Opcode::Lt | Opcode::Gt
-            | Opcode::Eq | Opcode::And | Opcode::Or
-            | Opcode::BitAnd | Opcode::BitOr | Opcode::BitXor | Opcode::BitNot => self.very_low,
+            Opcode::Add
+            | Opcode::Sub
+            | Opcode::Not
+            | Opcode::Lt
+            | Opcode::Gt
+            | Opcode::Eq
+            | Opcode::And
+            | Opcode::Or
+            | Opcode::BitAnd
+            | Opcode::BitOr
+            | Opcode::BitXor
+            | Opcode::BitNot => self.very_low,
 
             // Low cost
-            Opcode::Mul | Opcode::Div | Opcode::Mod | Opcode::Shl | Opcode::Shr
-            | Opcode::Ne | Opcode::Le | Opcode::Ge | Opcode::Neg => self.low,
+            Opcode::Mul
+            | Opcode::Div
+            | Opcode::Mod
+            | Opcode::Shl
+            | Opcode::Shr
+            | Opcode::Ne
+            | Opcode::Le
+            | Opcode::Ge
+            | Opcode::Neg => self.low,
 
             // Mid cost
             Opcode::Push | Opcode::LoadLocal | Opcode::StoreLocal => self.mid,
@@ -165,10 +181,18 @@ impl GasCosts {
             Opcode::Halt => self.zero,
 
             // Contract info
-            Opcode::Address | Opcode::Caller | Opcode::CallValue
-            | Opcode::Origin | Opcode::GasPrice | Opcode::Coinbase
-            | Opcode::Timestamp | Opcode::BlockNumber | Opcode::Difficulty
-            | Opcode::GasLimit | Opcode::ChainId | Opcode::SelfBalance
+            Opcode::Address
+            | Opcode::Caller
+            | Opcode::CallValue
+            | Opcode::Origin
+            | Opcode::GasPrice
+            | Opcode::Coinbase
+            | Opcode::Timestamp
+            | Opcode::BlockNumber
+            | Opcode::Difficulty
+            | Opcode::GasLimit
+            | Opcode::ChainId
+            | Opcode::SelfBalance
             | Opcode::Gas => self.base,
             Opcode::Balance | Opcode::BlockHash => self.sload_warm, // Account/block access
 
@@ -195,8 +219,10 @@ impl GasCosts {
             Opcode::ResourceBorrow | Opcode::ResourceBorrowMut => self.resource_borrow,
 
             // Parallel hints
-            Opcode::ParallelStart | Opcode::ParallelEnd
-            | Opcode::StateRead | Opcode::StateWrite => self.parallel_hint,
+            Opcode::ParallelStart
+            | Opcode::ParallelEnd
+            | Opcode::StateRead
+            | Opcode::StateWrite => self.parallel_hint,
         }
     }
 
@@ -219,7 +245,12 @@ impl GasCosts {
     }
 
     /// Calculate storage write cost with refund
-    pub fn sstore_cost(&self, original: bool, current_is_zero: bool, new_is_zero: bool) -> (u64, i64) {
+    pub fn sstore_cost(
+        &self,
+        original: bool,
+        current_is_zero: bool,
+        new_is_zero: bool,
+    ) -> (u64, i64) {
         // EIP-2200 style gas calculation
         if original {
             // Original value is zero
@@ -262,7 +293,8 @@ impl GasCosts {
     /// Calculate hash cost
     pub fn hash_cost(&self, data_size: usize, cost_per_word: u64) -> u64 {
         let words = (data_size + 31) / 32;
-        self.mid.saturating_add(cost_per_word.saturating_mul(words as u64))
+        self.mid
+            .saturating_add(cost_per_word.saturating_mul(words as u64))
     }
 }
 
@@ -390,7 +422,9 @@ impl GasMeter {
         new_is_zero: bool,
     ) -> GasResult<()> {
         self.warm_slot(slot);
-        let (cost, refund) = self.costs.sstore_cost(original_is_zero, current_is_zero, new_is_zero);
+        let (cost, refund) = self
+            .costs
+            .sstore_cost(original_is_zero, current_is_zero, new_is_zero);
         self.consume(cost)?;
         self.add_refund(refund);
         Ok(())
@@ -407,7 +441,11 @@ impl GasMeter {
     }
 
     /// Consume gas for memory expansion
-    pub fn consume_memory_expansion(&mut self, current_words: u64, new_words: u64) -> GasResult<()> {
+    pub fn consume_memory_expansion(
+        &mut self,
+        current_words: u64,
+        new_words: u64,
+    ) -> GasResult<()> {
         let cost = self.costs.memory_expansion_cost(current_words, new_words);
         self.consume(cost)
     }

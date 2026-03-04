@@ -258,7 +258,11 @@ pub struct BlockBody {
 
 impl BlockBody {
     pub fn new(transactions: Vec<Transaction>, votes: Vec<Vote>, signature: Signature) -> Self {
-        Self { transactions, votes, signature }
+        Self {
+            transactions,
+            votes,
+            signature,
+        }
     }
 
     pub fn from_block(block: &Block) -> Self {

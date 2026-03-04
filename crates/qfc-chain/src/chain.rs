@@ -10,7 +10,7 @@ use qfc_state::StateDB;
 use qfc_storage::{cf, encode_block_number, Database, WriteBatch};
 use qfc_types::{
     Address, Block, BlockBody, BlockHeader, Epoch, Hash, Receipt, SealedBlock, Signature,
-    Transaction, TransactionType, U256, ValidatorNode,
+    Transaction, TransactionType, ValidatorNode, U256,
 };
 use std::sync::Arc;
 use tracing::{debug, info};
@@ -53,11 +53,7 @@ pub struct Chain {
 
 impl Chain {
     /// Create a new chain
-    pub fn new(
-        db: Database,
-        config: ChainConfig,
-        consensus: Arc<ConsensusEngine>,
-    ) -> Result<Self> {
+    pub fn new(db: Database, config: ChainConfig, consensus: Arc<ConsensusEngine>) -> Result<Self> {
         let state = Arc::new(StateDB::new(db.clone()));
         let executor = Executor::new(config.chain_id);
 
@@ -88,8 +84,9 @@ impl Chain {
             *self.genesis_hash.write() = Some(hash);
 
             // Load head block
-            if let Some(head_bytes) =
-                self.db.get(cf::METADATA, qfc_storage::meta::LATEST_BLOCK_NUMBER)?
+            if let Some(head_bytes) = self
+                .db
+                .get(cf::METADATA, qfc_storage::meta::LATEST_BLOCK_NUMBER)?
             {
                 if head_bytes.len() == 8 {
                     let height = u64::from_le_bytes(head_bytes.try_into().unwrap());
@@ -138,7 +135,11 @@ impl Chain {
         self.store_block(&genesis)?;
 
         // Update metadata
-        self.db.put(cf::METADATA, qfc_storage::meta::GENESIS_HASH, hash.as_bytes())?;
+        self.db.put(
+            cf::METADATA,
+            qfc_storage::meta::GENESIS_HASH,
+            hash.as_bytes(),
+        )?;
         self.db.put(
             cf::METADATA,
             qfc_storage::meta::CHAIN_ID,
@@ -250,8 +251,8 @@ impl Chain {
             None => return Ok(None),
         };
 
-        let header: BlockHeader = borsh::from_slice(&header_bytes)
-            .map_err(|e| ChainError::Storage(e.to_string()))?;
+        let header: BlockHeader =
+            borsh::from_slice(&header_bytes).map_err(|e| ChainError::Storage(e.to_string()))?;
 
         // Get body
         let body_bytes = match self.db.get(cf::BLOCK_BODIES, &key)? {
@@ -337,19 +338,14 @@ impl Chain {
     /// Returns the internal hash if this is an Ethereum transaction, otherwise returns the original hash
     pub fn translate_eth_hash(&self, hash: &Hash) -> Result<Hash> {
         match self.db.get(cf::ETH_TX_INDEX, hash.as_bytes())? {
-            Some(internal_bytes) => {
-                Hash::from_slice(&internal_bytes)
-                    .ok_or_else(|| ChainError::Storage("Invalid internal hash".to_string()))
-            }
+            Some(internal_bytes) => Hash::from_slice(&internal_bytes)
+                .ok_or_else(|| ChainError::Storage("Invalid internal hash".to_string())),
             None => Ok(*hash), // Not an Ethereum tx, return as-is
         }
     }
 
     /// Get receipt with block info
-    pub fn get_receipt_with_block_info(
-        &self,
-        hash: &Hash,
-    ) -> Result<Option<(Receipt, Hash, u64)>> {
+    pub fn get_receipt_with_block_info(&self, hash: &Hash) -> Result<Option<(Receipt, Hash, u64)>> {
         let receipt = match self.get_receipt(hash)? {
             Some(r) => r,
             None => return Ok(None),
@@ -376,14 +372,21 @@ impl Chain {
         let block_hash = blake3_hash(&block.header_bytes());
 
         // Check if block already exists
-        if self.db.get(cf::BLOCK_HASH_INDEX, block_hash.as_bytes())?.is_some() {
+        if self
+            .db
+            .get(cf::BLOCK_HASH_INDEX, block_hash.as_bytes())?
+            .is_some()
+        {
             return Err(ChainError::BlockAlreadyKnown);
         }
 
         // Check for double-sign before processing
         if let Some(evidence) = self.consensus.check_double_sign(&block) {
             // Process the evidence (slash the validator)
-            if let Err(e) = self.consensus.process_double_sign_evidence(&evidence, &self.db) {
+            if let Err(e) = self
+                .consensus
+                .process_double_sign_evidence(&evidence, &self.db)
+            {
                 debug!("Failed to process double-sign evidence: {}", e);
             }
             // Store evidence for later broadcast
@@ -455,11 +458,7 @@ impl Chain {
         // Maybe create checkpoint at epoch boundary
         let _ = self.maybe_create_checkpoint(block.number());
 
-        info!(
-            "Imported block {} at height {}",
-            block_hash,
-            block.number()
-        );
+        info!("Imported block {} at height {}", block_hash, block.number());
 
         Ok(block_hash)
     }
@@ -467,7 +466,10 @@ impl Chain {
     /// Store double-sign evidence for later broadcast
     fn store_double_sign_evidence(&self, evidence: &qfc_types::DoubleSignEvidence) {
         let key = format!("double_sign:{}:{}", evidence.height, evidence.validator);
-        if let Err(e) = self.db.put(cf::METADATA, key.as_bytes(), &evidence.to_bytes()) {
+        if let Err(e) = self
+            .db
+            .put(cf::METADATA, key.as_bytes(), &evidence.to_bytes())
+        {
             debug!("Failed to store double-sign evidence: {}", e);
         }
     }
@@ -494,7 +496,11 @@ impl Chain {
 
         // Store body
         let body = BlockBody::from_block(block);
-        batch.put(cf::BLOCK_BODIES, key.to_vec(), borsh::to_vec(&body).unwrap());
+        batch.put(
+            cf::BLOCK_BODIES,
+            key.to_vec(),
+            borsh::to_vec(&body).unwrap(),
+        );
 
         // Store hash index
         batch.put(
@@ -508,11 +514,7 @@ impl Chain {
             let tx_hash = blake3_hash(&tx.to_bytes_without_signature());
 
             // Store transaction data
-            batch.put(
-                cf::TRANSACTIONS,
-                tx_hash.as_bytes().to_vec(),
-                tx.to_bytes(),
-            );
+            batch.put(cf::TRANSACTIONS, tx_hash.as_bytes().to_vec(), tx.to_bytes());
 
             // Store transaction location index (block_height, tx_index)
             let tx_location = qfc_storage::encode_tx_location(block.number(), index as u32);
@@ -683,7 +685,9 @@ impl Chain {
         let signed_tx = qfc_types::SignedTransaction::new(tx, tx_hash, sender);
 
         // Execute
-        let result = self.executor.execute(&signed_tx, &self.state, &Address::ZERO);
+        let result = self
+            .executor
+            .execute(&signed_tx, &self.state, &Address::ZERO);
 
         // Revert state changes
         let _ = self.state.revert(snapshot);

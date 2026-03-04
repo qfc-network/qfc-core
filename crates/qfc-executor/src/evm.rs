@@ -85,7 +85,9 @@ impl<'a> EvmExecutor<'a> {
         evm.tx_mut().gas_price = gas_price;
 
         // Execute
-        let result = evm.transact().map_err(|e| ExecutorError::EvmError(e.to_string()))?;
+        let result = evm
+            .transact()
+            .map_err(|e| ExecutorError::EvmError(e.to_string()))?;
         let execution_result = result.result;
 
         // Process result
@@ -119,7 +121,9 @@ impl<'a> EvmExecutor<'a> {
         evm.tx_mut().gas_price = gas_price;
 
         // Execute
-        let result = evm.transact().map_err(|e| ExecutorError::EvmError(e.to_string()))?;
+        let result = evm
+            .transact()
+            .map_err(|e| ExecutorError::EvmError(e.to_string()))?;
         let execution_result = result.result;
 
         // Process result
@@ -153,7 +157,9 @@ impl<'a> EvmExecutor<'a> {
         evm.tx_mut().gas_price = gas_price;
 
         // Execute (static call doesn't modify state)
-        let result = evm.transact().map_err(|e| ExecutorError::EvmError(e.to_string()))?;
+        let result = evm
+            .transact()
+            .map_err(|e| ExecutorError::EvmError(e.to_string()))?;
 
         // For static calls, we don't apply state changes
         self.process_result_no_state(result.result)
@@ -394,14 +400,7 @@ mod tests {
     #[test]
     fn test_evm_executor_creation() {
         let state = create_test_state();
-        let executor = EvmExecutor::new(
-            &state,
-            9000,
-            1,
-            1234567890,
-            Address::ZERO,
-            30_000_000,
-        );
+        let executor = EvmExecutor::new(&state, 9000, 1, 1234567890, Address::ZERO, 30_000_000);
 
         assert_eq!(executor.chain_id, 9000);
     }
@@ -416,9 +415,7 @@ mod tests {
         state
             .set_balance(&sender, U256::from_u128(1_000_000_000_000_000_000))
             .unwrap();
-        state
-            .set_balance(&recipient, U256::from_u64(0))
-            .unwrap();
+        state.set_balance(&recipient, U256::from_u64(0)).unwrap();
 
         let executor = EvmExecutor::new(&state, 9000, 1, 1234567890, Address::ZERO, 30_000_000);
 
@@ -450,14 +447,17 @@ mod tests {
         // PUSH1 32, PUSH1 0, RETURN (return empty)
         // Runtime code: PUSH1 0, SLOAD, PUSH1 0, MSTORE, PUSH1 32, PUSH1 0, RETURN
         // This is minimal bytecode for a contract that stores 42
-        let init_code = hex::decode(
-            "602a60005560208060106000396000f3fe60005460005260206000f3"
-        ).unwrap();
+        let init_code =
+            hex::decode("602a60005560208060106000396000f3fe60005460005260206000f3").unwrap();
 
         let result = executor.create(&sender, init_code, U256::ZERO, 1_000_000);
         assert!(result.is_ok());
         let evm_result = result.unwrap();
-        assert!(evm_result.success, "Contract creation failed: {:?}", evm_result.error);
+        assert!(
+            evm_result.success,
+            "Contract creation failed: {:?}",
+            evm_result.error
+        );
         assert!(evm_result.contract_address.is_some());
 
         // Gas should be consumed

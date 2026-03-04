@@ -269,11 +269,7 @@ impl StateVerifier {
     }
 
     /// Generate a state proof
-    pub fn generate_proof(
-        _contract: H160,
-        _slot: H256,
-        value: H256,
-    ) -> StateProof {
+    pub fn generate_proof(_contract: H160, _slot: H256, value: H256) -> StateProof {
         // Simplified proof generation
         StateProof {
             contract: H160::zero(),

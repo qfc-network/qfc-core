@@ -2,8 +2,8 @@
 //!
 //! Manages pending transactions waiting to be included in blocks.
 
-mod pool;
 mod error;
+mod pool;
 
-pub use pool::*;
 pub use error::*;
+pub use pool::*;

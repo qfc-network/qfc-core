@@ -4,8 +4,8 @@ use crate::error::{ConsensusError, Result};
 use crate::scoring::{calculate_contribution_score, NetworkState};
 use parking_lot::RwLock;
 use qfc_crypto::{blake3_hash, vrf_output_to_f64, vrf_verify_with_seed, VrfKeypair};
+use qfc_pow::{calculate_hashrate, initial_difficulty, verify_proof};
 use qfc_storage;
-use qfc_pow::{calculate_hashrate, verify_proof, initial_difficulty};
 use qfc_types::{
     Address, Block, BlockHeader, DifficultyConfig, DoubleSignEvidence, Epoch, Hash, MiningTask,
     Receipt, Signature, Transaction, ValidatorCheckpoint, ValidatorNode, Vote, WorkProof,
@@ -151,7 +151,10 @@ impl ConsensusEngine {
             .filter(|v| v.provides_compute)
             .map(|v| v.hashrate)
             .sum();
-        let total_storage: u64 = validators.iter().map(|v| v.storage_provided_gb as u64).sum();
+        let total_storage: u64 = validators
+            .iter()
+            .map(|v| v.storage_provided_gb as u64)
+            .sum();
 
         // Update each validator's contribution score
         for validator in validators.iter_mut() {
@@ -277,7 +280,10 @@ impl ConsensusEngine {
             .collect();
         let transactions_root = qfc_crypto::merkle_root(&tx_hashes);
 
-        let receipt_hashes: Vec<Hash> = receipts.iter().map(|r| blake3_hash(&r.to_bytes())).collect();
+        let receipt_hashes: Vec<Hash> = receipts
+            .iter()
+            .map(|r| blake3_hash(&r.to_bytes()))
+            .collect();
         let receipts_root = qfc_crypto::merkle_root(&receipt_hashes);
 
         let our_address = self.address.ok_or(ConsensusError::NotValidator)?;
@@ -312,11 +318,7 @@ impl ConsensusEngine {
         let signature = validator_key.prove(block_hash.as_bytes()).proof;
         block.signature = Signature::new(signature);
 
-        info!(
-            "Produced block {} at height {}",
-            block_hash,
-            block.number()
-        );
+        info!("Produced block {} at height {}", block_hash, block.number());
 
         Ok(block)
     }
@@ -596,8 +598,9 @@ impl ConsensusEngine {
         for validator in validators.iter() {
             let key = validator.address.as_bytes();
             let value = validator.to_bytes();
-            db.put(qfc_storage::cf::VALIDATORS, key, &value)
-                .map_err(|e: qfc_storage::StorageError| ConsensusError::StorageError(e.to_string()))?;
+            db.put(qfc_storage::cf::VALIDATORS, key, &value).map_err(
+                |e: qfc_storage::StorageError| ConsensusError::StorageError(e.to_string()),
+            )?;
         }
 
         debug!("Saved {} validators to database", validators.len());
@@ -726,10 +729,7 @@ impl ConsensusEngine {
         let mut cache = self.block_cache.write();
 
         // Add to cache
-        cache
-            .entry(height)
-            .or_insert_with(Vec::new)
-            .push(record);
+        cache.entry(height).or_insert_with(Vec::new).push(record);
 
         // Prune old entries
         let finalized = *self.finalized_height.read();
@@ -813,7 +813,8 @@ impl ConsensusEngine {
             // Reduce delegated stake if needed
             let remaining_slash = slash_amount - direct_slash;
             if !remaining_slash.is_zero() {
-                validator.delegated_stake = validator.delegated_stake.saturating_sub(remaining_slash);
+                validator.delegated_stake =
+                    validator.delegated_stake.saturating_sub(remaining_slash);
             }
 
             // Permanent jail
@@ -849,9 +850,7 @@ impl ConsensusEngine {
             v.delegator_count += 1;
             debug!(
                 "Added delegated stake to {}: {} (total: {})",
-                validator,
-                amount,
-                v.delegated_stake
+                validator, amount, v.delegated_stake
             );
         }
     }
@@ -866,9 +865,7 @@ impl ConsensusEngine {
             }
             debug!(
                 "Removed delegated stake from {}: {} (remaining: {})",
-                validator,
-                amount,
-                v.delegated_stake
+                validator, amount, v.delegated_stake
             );
         }
     }
@@ -894,10 +891,7 @@ impl ConsensusEngine {
         let mut validators = self.validators.write();
         if let Some(v) = validators.iter_mut().find(|v| v.address == *validator) {
             v.hashrate = hashrate;
-            debug!(
-                "Updated hashrate for {}: {} H/s",
-                validator, hashrate
-            );
+            debug!("Updated hashrate for {}: {} H/s", validator, hashrate);
         }
     }
 
@@ -941,8 +935,7 @@ impl ConsensusEngine {
         drop(validators);
 
         // 2. Verify the proof is valid (correct hash computation and meets difficulty)
-        verify_proof(proof, task)
-            .map_err(|_| ConsensusError::InvalidVrfProof)?;
+        verify_proof(proof, task).map_err(|_| ConsensusError::InvalidVrfProof)?;
 
         // 3. Calculate hashrate from the proof
         let hashrate = calculate_hashrate(proof, task);
@@ -1008,8 +1001,7 @@ mod tests {
     fn test_validator_engine() {
         let key = VrfKeypair::generate();
         let address = Address::new([0x11; 20]);
-        let engine =
-            ConsensusEngine::new_validator(ConsensusConfig::default(), key, address);
+        let engine = ConsensusEngine::new_validator(ConsensusConfig::default(), key, address);
 
         assert!(engine.is_validator());
         assert_eq!(engine.our_address(), Some(address));

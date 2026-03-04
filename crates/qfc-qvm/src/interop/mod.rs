@@ -194,21 +194,11 @@ impl<E: EvmBackend> InteropManager<E> {
         }
 
         match expected_type {
-            "uint256" | "int256" => {
-                Value::U256(U256::from_big_endian(&data[0..32]))
-            }
-            "bool" => {
-                Value::Bool(data[31] != 0)
-            }
-            "address" => {
-                Value::Address(H160::from_slice(&data[12..32]))
-            }
-            "bytes32" => {
-                Value::Bytes32(H256::from_slice(&data[0..32]))
-            }
-            _ => {
-                Value::Bytes(data.to_vec())
-            }
+            "uint256" | "int256" => Value::U256(U256::from_big_endian(&data[0..32])),
+            "bool" => Value::Bool(data[31] != 0),
+            "address" => Value::Address(H160::from_slice(&data[12..32])),
+            "bytes32" => Value::Bytes32(H256::from_slice(&data[0..32])),
+            _ => Value::Bytes(data.to_vec()),
         }
     }
 
@@ -282,7 +272,10 @@ impl EvmBackend for MockEvmBackend {
     }
 
     fn get_storage(&self, address: H160, slot: H256) -> H256 {
-        self.storage.get(&(address, slot)).copied().unwrap_or_default()
+        self.storage
+            .get(&(address, slot))
+            .copied()
+            .unwrap_or_default()
     }
 }
 

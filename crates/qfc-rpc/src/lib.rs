@@ -2,14 +2,14 @@
 //!
 //! Provides JSON-RPC endpoints compatible with Ethereum tooling.
 
-mod server;
+mod error;
 mod eth;
 mod qfc;
+mod server;
 mod types;
-mod error;
 
-pub use server::*;
+pub use error::*;
 pub use eth::*;
 pub use qfc::*;
+pub use server::*;
 pub use types::*;
-pub use error::*;

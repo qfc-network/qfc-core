@@ -33,10 +33,16 @@ pub fn merkle_root(hashes: &[Hash]) -> Hash {
 
         for chunk in current_level.chunks(2) {
             if chunk.len() == 2 {
-                next_level.push(blake3_hash_many(&[chunk[0].as_bytes(), chunk[1].as_bytes()]));
+                next_level.push(blake3_hash_many(&[
+                    chunk[0].as_bytes(),
+                    chunk[1].as_bytes(),
+                ]));
             } else {
                 // Odd number of elements: hash the last one with itself
-                next_level.push(blake3_hash_many(&[chunk[0].as_bytes(), chunk[0].as_bytes()]));
+                next_level.push(blake3_hash_many(&[
+                    chunk[0].as_bytes(),
+                    chunk[0].as_bytes(),
+                ]));
             }
         }
 

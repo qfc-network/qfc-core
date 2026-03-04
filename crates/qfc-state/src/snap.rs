@@ -167,11 +167,7 @@ impl SnapSyncManager {
         for (address, account) in &range.accounts {
             // Store account data
             let account_bytes = account.to_bytes();
-            batch.put(
-                cf::STATE,
-                Self::account_key(address),
-                account_bytes,
-            );
+            batch.put(cf::STATE, Self::account_key(address), account_bytes);
 
             progress.accounts_synced += 1;
 
@@ -201,14 +197,18 @@ impl SnapSyncManager {
         // Check if account sync is complete
         if range.end == Address::MAX || range.accounts.is_empty() {
             progress.phase = SnapSyncPhase::StorageSync;
-            info!("Account sync complete, {} accounts synced", progress.accounts_synced);
+            info!(
+                "Account sync complete, {} accounts synced",
+                progress.accounts_synced
+            );
         }
 
         // Update completion estimate
         if let Some(last) = progress.last_address {
             let progress_bytes = last.as_bytes();
             let first_byte = progress_bytes[0] as f32;
-            progress.completion_percentage = (first_byte / 255.0) * 100.0 * 0.5; // Accounts = 50%
+            progress.completion_percentage = (first_byte / 255.0) * 100.0 * 0.5;
+            // Accounts = 50%
         }
 
         Ok(())
@@ -294,7 +294,8 @@ impl SnapSyncManager {
         let mut write_batch = WriteBatch::new();
         let mut progress = self.progress.write();
 
-        let received: std::collections::HashSet<Hash> = batch.nodes.iter().map(|(h, _)| *h).collect();
+        let received: std::collections::HashSet<Hash> =
+            batch.nodes.iter().map(|(h, _)| *h).collect();
 
         for (hash, data) in batch.nodes {
             write_batch.put(cf::STATE, hash.as_bytes().to_vec(), data);
@@ -309,12 +310,17 @@ impl SnapSyncManager {
         // Check if healing is complete
         if self.missing_nodes.read().is_empty() {
             progress.phase = SnapSyncPhase::Verification;
-            info!("Trie healing complete, {} nodes healed", progress.nodes_healed);
+            info!(
+                "Trie healing complete, {} nodes healed",
+                progress.nodes_healed
+            );
         }
 
         // Update completion estimate
-        progress.completion_percentage = 90.0 +
-            (progress.nodes_healed as f32 / (progress.nodes_healed + self.missing_nodes.read().len() as u64) as f32) * 10.0;
+        progress.completion_percentage = 90.0
+            + (progress.nodes_healed as f32
+                / (progress.nodes_healed + self.missing_nodes.read().len() as u64) as f32)
+                * 10.0;
 
         Ok(())
     }
@@ -389,7 +395,10 @@ impl SnapSyncManager {
             let mut progress = self.progress.write();
             progress.phase = SnapSyncPhase::Complete;
             progress.completion_percentage = 100.0;
-            info!("Snap sync verification passed, state root: {}", computed_root);
+            info!(
+                "Snap sync verification passed, state root: {}",
+                computed_root
+            );
         } else {
             warn!(
                 "Snap sync verification failed: expected {}, got {}",
@@ -411,7 +420,10 @@ impl SnapSyncManager {
             return Ok(None);
         }
 
-        Ok(Some(StateDB::with_root(self.db.clone(), config.target_root)))
+        Ok(Some(StateDB::with_root(
+            self.db.clone(),
+            config.target_root,
+        )))
     }
 
     /// Create account key for storage
@@ -480,10 +492,7 @@ pub enum SnapSyncRequest {
         limit: usize,
     },
     /// Request trie nodes
-    GetTrieNodes {
-        root: Hash,
-        paths: Vec<Vec<u8>>,
-    },
+    GetTrieNodes { root: Hash, paths: Vec<Vec<u8>> },
 }
 
 /// Snap sync response types for network protocol
@@ -553,8 +562,10 @@ mod tests {
         let next = increment_address(addr);
         assert_eq!(next.as_bytes()[19], 1);
 
-        let max_minus_one = Address::new([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe]);
+        let max_minus_one = Address::new([
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xfe,
+        ]);
         let should_be_max = increment_address(max_minus_one);
         assert_eq!(should_be_max.as_bytes()[19], 0xff);
     }

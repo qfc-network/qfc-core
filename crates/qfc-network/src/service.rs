@@ -7,8 +7,7 @@ use crate::sync_protocol::{SyncRequest, SyncResponse, SYNC_PROTOCOL};
 use futures::StreamExt;
 use libp2p::{
     gossipsub::{self, IdentTopic, MessageAuthenticity},
-    identify, kad,
-    noise, ping,
+    identify, kad, noise, ping,
     request_response::{self, OutboundRequestId, ProtocolSupport},
     swarm::SwarmEvent,
     tcp, yamux, PeerId, Swarm, Transport,
@@ -54,7 +53,8 @@ pub struct NetworkService {
     command_tx: mpsc::Sender<NetworkCommand>,
     /// Pending sync requests (for future async request handling)
     #[allow(dead_code)]
-    pending_requests: Arc<RwLock<HashMap<OutboundRequestId, oneshot::Sender<Result<SyncResponse>>>>>,
+    pending_requests:
+        Arc<RwLock<HashMap<OutboundRequestId, oneshot::Sender<Result<SyncResponse>>>>>,
     /// Configuration
     #[allow(dead_code)]
     config: NetworkConfig,
@@ -64,7 +64,11 @@ impl NetworkService {
     /// Create and start the network service
     pub async fn start(
         config: NetworkConfig,
-    ) -> Result<(Self, mpsc::Receiver<NetworkMessage>, mpsc::Receiver<SyncEvent>)> {
+    ) -> Result<(
+        Self,
+        mpsc::Receiver<NetworkMessage>,
+        mpsc::Receiver<SyncEvent>,
+    )> {
         // Generate or load keypair
         let local_key = if let Some(secret) = &config.secret_key {
             let mut secret_bytes = secret.clone();
@@ -113,8 +117,7 @@ impl NetworkService {
         // Create sync request-response
         let sync = request_response::Behaviour::new(
             [(SYNC_PROTOCOL, ProtocolSupport::Full)],
-            request_response::Config::default()
-                .with_request_timeout(Duration::from_secs(30)),
+            request_response::Config::default().with_request_timeout(Duration::from_secs(30)),
         );
 
         // Create behaviour
@@ -141,18 +144,31 @@ impl NetworkService {
         let vote_topic = IdentTopic::new(topics::CONSENSUS_VOTES);
         let validator_topic = IdentTopic::new(topics::VALIDATOR_MESSAGES);
 
-        swarm.behaviour_mut().gossipsub.subscribe(&block_topic)
+        swarm
+            .behaviour_mut()
+            .gossipsub
+            .subscribe(&block_topic)
             .map_err(|e| NetworkError::Protocol(e.to_string()))?;
-        swarm.behaviour_mut().gossipsub.subscribe(&tx_topic)
+        swarm
+            .behaviour_mut()
+            .gossipsub
+            .subscribe(&tx_topic)
             .map_err(|e| NetworkError::Protocol(e.to_string()))?;
-        swarm.behaviour_mut().gossipsub.subscribe(&vote_topic)
+        swarm
+            .behaviour_mut()
+            .gossipsub
+            .subscribe(&vote_topic)
             .map_err(|e| NetworkError::Protocol(e.to_string()))?;
-        swarm.behaviour_mut().gossipsub.subscribe(&validator_topic)
+        swarm
+            .behaviour_mut()
+            .gossipsub
+            .subscribe(&validator_topic)
             .map_err(|e| NetworkError::Protocol(e.to_string()))?;
 
         // Listen on addresses
         for addr in &config.listen_addresses {
-            swarm.listen_on(addr.clone())
+            swarm
+                .listen_on(addr.clone())
                 .map_err(|e| NetworkError::Listen(e.to_string()))?;
         }
 
@@ -164,14 +180,17 @@ impl NetworkService {
         }
 
         let peers = Arc::new(RwLock::new(HashSet::new()));
-        let pending_requests: Arc<RwLock<HashMap<OutboundRequestId, oneshot::Sender<Result<SyncResponse>>>>> =
-            Arc::new(RwLock::new(HashMap::new()));
+        let pending_requests: Arc<
+            RwLock<HashMap<OutboundRequestId, oneshot::Sender<Result<SyncResponse>>>>,
+        > = Arc::new(RwLock::new(HashMap::new()));
 
         let (message_tx, message_rx) = mpsc::channel(1000);
         let (sync_event_tx, sync_event_rx) = mpsc::channel(100);
         let (command_tx, mut command_rx) = mpsc::channel::<NetworkCommand>(100);
-        let (swarm_response_tx, mut swarm_response_rx) =
-            mpsc::channel::<(request_response::ResponseChannel<SyncResponse>, SyncResponse)>(100);
+        let (swarm_response_tx, mut swarm_response_rx) = mpsc::channel::<(
+            request_response::ResponseChannel<SyncResponse>,
+            SyncResponse,
+        )>(100);
 
         let peers_clone = Arc::clone(&peers);
         let pending_clone = Arc::clone(&pending_requests);
@@ -332,7 +351,9 @@ impl NetworkService {
     /// Broadcast a new block
     pub async fn broadcast_block(&self, block_data: Vec<u8>) -> Result<()> {
         self.command_tx
-            .send(NetworkCommand::Broadcast(NetworkMessage::NewBlock(block_data)))
+            .send(NetworkCommand::Broadcast(NetworkMessage::NewBlock(
+                block_data,
+            )))
             .await
             .map_err(|e| NetworkError::Protocol(e.to_string()))
     }
@@ -340,7 +361,9 @@ impl NetworkService {
     /// Broadcast a new transaction
     pub async fn broadcast_transaction(&self, tx_data: Vec<u8>) -> Result<()> {
         self.command_tx
-            .send(NetworkCommand::Broadcast(NetworkMessage::NewTransaction(tx_data)))
+            .send(NetworkCommand::Broadcast(NetworkMessage::NewTransaction(
+                tx_data,
+            )))
             .await
             .map_err(|e| NetworkError::Protocol(e.to_string()))
     }
@@ -356,13 +379,19 @@ impl NetworkService {
     /// Broadcast a validator message (heartbeat, epoch announcement, slashing evidence)
     pub async fn broadcast_validator_msg(&self, msg_data: Vec<u8>) -> Result<()> {
         self.command_tx
-            .send(NetworkCommand::Broadcast(NetworkMessage::ValidatorMsg(msg_data)))
+            .send(NetworkCommand::Broadcast(NetworkMessage::ValidatorMsg(
+                msg_data,
+            )))
             .await
             .map_err(|e| NetworkError::Protocol(e.to_string()))
     }
 
     /// Request a block by hash from a peer
-    pub async fn request_block_by_hash(&self, peer_id: PeerId, hash: qfc_types::Hash) -> Result<SyncResponse> {
+    pub async fn request_block_by_hash(
+        &self,
+        peer_id: PeerId,
+        hash: qfc_types::Hash,
+    ) -> Result<SyncResponse> {
         let (tx, rx) = oneshot::channel();
         self.command_tx
             .send(NetworkCommand::SyncRequest {
@@ -373,11 +402,16 @@ impl NetworkService {
             .await
             .map_err(|e| NetworkError::Protocol(e.to_string()))?;
 
-        rx.await.map_err(|_| NetworkError::Protocol("Request cancelled".to_string()))?
+        rx.await
+            .map_err(|_| NetworkError::Protocol("Request cancelled".to_string()))?
     }
 
     /// Request a block by number from a peer
-    pub async fn request_block_by_number(&self, peer_id: PeerId, number: u64) -> Result<SyncResponse> {
+    pub async fn request_block_by_number(
+        &self,
+        peer_id: PeerId,
+        number: u64,
+    ) -> Result<SyncResponse> {
         let (tx, rx) = oneshot::channel();
         self.command_tx
             .send(NetworkCommand::SyncRequest {
@@ -388,11 +422,17 @@ impl NetworkService {
             .await
             .map_err(|e| NetworkError::Protocol(e.to_string()))?;
 
-        rx.await.map_err(|_| NetworkError::Protocol("Request cancelled".to_string()))?
+        rx.await
+            .map_err(|_| NetworkError::Protocol("Request cancelled".to_string()))?
     }
 
     /// Request a range of blocks from a peer
-    pub async fn request_block_range(&self, peer_id: PeerId, start: u64, end: u64) -> Result<SyncResponse> {
+    pub async fn request_block_range(
+        &self,
+        peer_id: PeerId,
+        start: u64,
+        end: u64,
+    ) -> Result<SyncResponse> {
         let (tx, rx) = oneshot::channel();
         self.command_tx
             .send(NetworkCommand::SyncRequest {
@@ -403,7 +443,8 @@ impl NetworkService {
             .await
             .map_err(|e| NetworkError::Protocol(e.to_string()))?;
 
-        rx.await.map_err(|_| NetworkError::Protocol("Request cancelled".to_string()))?
+        rx.await
+            .map_err(|_| NetworkError::Protocol("Request cancelled".to_string()))?
     }
 
     /// Request status from a peer
@@ -418,7 +459,7 @@ impl NetworkService {
             .await
             .map_err(|e| NetworkError::Protocol(e.to_string()))?;
 
-        rx.await.map_err(|_| NetworkError::Protocol("Request cancelled".to_string()))?
+        rx.await
+            .map_err(|_| NetworkError::Protocol("Request cancelled".to_string()))?
     }
-
 }

@@ -34,7 +34,12 @@ impl MerkleProof {
         self.verify_path(root, &nibbles, 0)
     }
 
-    fn verify_path(&self, expected_hash: &Hash, key: &NibbleSlice, node_index: usize) -> Result<bool> {
+    fn verify_path(
+        &self,
+        expected_hash: &Hash,
+        key: &NibbleSlice,
+        node_index: usize,
+    ) -> Result<bool> {
         if node_index >= self.nodes.len() {
             return Ok(false);
         }
@@ -50,7 +55,10 @@ impl MerkleProof {
         match node {
             TrieNode::Empty => Ok(self.value.is_none()),
 
-            TrieNode::Leaf { key: leaf_key, value } => {
+            TrieNode::Leaf {
+                key: leaf_key,
+                value,
+            } => {
                 let leaf_nibbles = NibbleSlice::from_nibbles(&leaf_key);
                 if key.to_nibbles() == leaf_nibbles.to_nibbles() {
                     // Found the key
@@ -61,7 +69,10 @@ impl MerkleProof {
                 }
             }
 
-            TrieNode::Extension { key: ext_key, child } => {
+            TrieNode::Extension {
+                key: ext_key,
+                child,
+            } => {
                 let ext_nibbles = NibbleSlice::from_nibbles(&ext_key);
                 if key.starts_with(&ext_nibbles) {
                     let remaining = key.offset(ext_nibbles.len());
@@ -72,7 +83,10 @@ impl MerkleProof {
                 }
             }
 
-            TrieNode::Branch { children, value: branch_value } => {
+            TrieNode::Branch {
+                children,
+                value: branch_value,
+            } => {
                 if key.is_empty() {
                     // At end of key
                     Ok(self.value == branch_value)
@@ -144,13 +158,11 @@ mod tests {
         let proof = MerkleProof {
             key: b"test_key".to_vec(),
             value: Some(b"test_value".to_vec()),
-            nodes: vec![
-                TrieNode::leaf(
-                    NibbleSlice::from_bytes(b"test_key"),
-                    b"test_value".to_vec(),
-                )
-                .to_bytes(),
-            ],
+            nodes: vec![TrieNode::leaf(
+                NibbleSlice::from_bytes(b"test_key"),
+                b"test_value".to_vec(),
+            )
+            .to_bytes()],
         };
 
         let bytes = proof.to_bytes();

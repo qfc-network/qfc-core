@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use qfc_qsc::{compile, format_with_config, check_only, CompilerOptions, FormatConfig};
+use qfc_qsc::{check_only, compile, format_with_config, CompilerOptions, FormatConfig};
 
 #[derive(Parser)]
 #[command(name = "qsc")]
@@ -90,18 +90,23 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Compile { file, output, optimize, debug, evm_compat } => {
-            cmd_compile(file, output, optimize, debug, evm_compat)
-        }
-        Commands::Fmt { file, check, write, indent, tabs, max_width } => {
-            cmd_fmt(file, check, write, indent, tabs, max_width)
-        }
-        Commands::Check { file } => {
-            cmd_check(file)
-        }
-        Commands::Parse { file } => {
-            cmd_parse(file)
-        }
+        Commands::Compile {
+            file,
+            output,
+            optimize,
+            debug,
+            evm_compat,
+        } => cmd_compile(file, output, optimize, debug, evm_compat),
+        Commands::Fmt {
+            file,
+            check,
+            write,
+            indent,
+            tabs,
+            max_width,
+        } => cmd_fmt(file, check, write, indent, tabs, max_width),
+        Commands::Check { file } => cmd_check(file),
+        Commands::Parse { file } => cmd_parse(file),
     }
 }
 

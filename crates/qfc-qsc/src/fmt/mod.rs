@@ -2,8 +2,8 @@
 //!
 //! Pretty-prints QuantumScript AST with consistent formatting.
 
-mod printer;
 mod config;
+mod printer;
 
 pub use config::FormatConfig;
 pub use printer::Formatter;
@@ -21,10 +21,14 @@ pub fn format(source: &str) -> Result<String, FormatError> {
 pub fn format_with_config(source: &str, config: &FormatConfig) -> Result<String, FormatError> {
     // Parse the source
     let lexer = Lexer::new(source);
-    let tokens = lexer.tokenize().map_err(|e| FormatError::LexError(e.to_string()))?;
+    let tokens = lexer
+        .tokenize()
+        .map_err(|e| FormatError::LexError(e.to_string()))?;
 
     let mut parser = Parser::new(tokens);
-    let ast = parser.parse_file().map_err(|e| FormatError::ParseError(e.to_string()))?;
+    let ast = parser
+        .parse_file()
+        .map_err(|e| FormatError::ParseError(e.to_string()))?;
 
     // Format the AST
     let mut formatter = Formatter::new(config.clone());
@@ -61,7 +65,8 @@ mod tests {
 
     #[test]
     fn test_format_simple_contract() {
-        let source = r#"contract  Token{storage{balance:u256,}pub view fn get()->u256{return balance;}}"#;
+        let source =
+            r#"contract  Token{storage{balance:u256,}pub view fn get()->u256{return balance;}}"#;
         let formatted = format(source).unwrap();
 
         assert!(formatted.contains("contract Token {"));

@@ -31,12 +31,7 @@ pub struct CodeGenerator {
 
 impl CodeGenerator {
     /// Create a new code generator.
-    pub fn new(
-        pointer_type: Type,
-        param_count: u8,
-        local_count: u8,
-        bounds_check: bool,
-    ) -> Self {
+    pub fn new(pointer_type: Type, param_count: u8, local_count: u8, bounds_check: bool) -> Self {
         Self {
             pointer_type,
             param_count,

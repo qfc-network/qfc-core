@@ -56,19 +56,19 @@ pub mod memory;
 pub mod stdlib;
 pub mod value;
 
-pub use executor::{ExecutionContext, ExecutionError, ExecutionOutput, ExecutionResult, Executor, Log};
-pub use gas::{GasCosts, GasError, GasMeter, GasResult};
-pub use interop::{
-    CallType, ContractType, CrossVmCall, CrossVmResult, EvmBackend, InteropManager,
+pub use executor::{
+    ExecutionContext, ExecutionError, ExecutionOutput, ExecutionResult, Executor, Log,
 };
+pub use gas::{GasCosts, GasError, GasMeter, GasResult};
+pub use interop::{CallType, ContractType, CrossVmCall, CrossVmResult, EvmBackend, InteropManager};
 pub use memory::{CallFrame, Heap, Memory, MemoryError, MemoryResult, Stack, Storage};
 pub use stdlib::StdlibRegistry;
 pub use value::{ResourceAbility, Value, ValueRef, ValueType};
 
 // JIT compilation (optional feature)
-pub use jit::{ExecutionMode, JitError, JitResult, JitStats};
 #[cfg(feature = "jit")]
 pub use jit::{CodeGenerator, CompiledFunction, JitCompiler, JitConfig, JitRuntime};
+pub use jit::{ExecutionMode, JitError, JitResult, JitStats};
 
 /// QVM version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -132,7 +132,7 @@ mod tests {
         let code = vec![
             make_push(5),
             make_push(10),
-            Instruction::new(Opcode::Lt),  // 5 < 10 = true
+            Instruction::new(Opcode::Lt), // 5 < 10 = true
             make_push(10),
             make_push(20),
             Instruction::new(Opcode::Lt),  // 10 < 20 = true
@@ -209,11 +209,11 @@ mod tests {
     fn test_storage_operations() {
         let code = vec![
             // Store 999 at slot 5
-            make_push(5),    // slot (key, pushed first)
-            make_push(999),  // value (pushed second, on top)
+            make_push(5),   // slot (key, pushed first)
+            make_push(999), // value (pushed second, on top)
             Instruction::new(Opcode::SStore),
             // Load from slot 5
-            make_push(5),    // slot
+            make_push(5), // slot
             Instruction::new(Opcode::SLoad),
             Instruction::new(Opcode::Return),
         ];

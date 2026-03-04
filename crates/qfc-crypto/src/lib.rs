@@ -6,14 +6,14 @@
 //! - VRF (Verifiable Random Function)
 //! - Address derivation
 
+mod address;
+mod error;
 mod hash;
 mod signature;
 mod vrf;
-mod address;
-mod error;
 
+pub use address::*;
+pub use error::*;
 pub use hash::*;
 pub use signature::*;
 pub use vrf::*;
-pub use address::*;
-pub use error::*;

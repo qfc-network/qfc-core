@@ -7,7 +7,9 @@ use tower_lsp::{Client, LanguageServer};
 
 use qfc_qsc::{lexer::Lexer, parser::Parser, typeck::TypeChecker};
 
-use crate::diagnostics::{lexer_error_to_diagnostic, parse_error_to_diagnostic, type_error_to_diagnostic};
+use crate::diagnostics::{
+    lexer_error_to_diagnostic, parse_error_to_diagnostic, type_error_to_diagnostic,
+};
 use crate::document::Document;
 
 /// The LSP backend state.
@@ -79,7 +81,11 @@ impl Backend {
     fn get_completions(&self, _uri: &Url, _position: Position) -> Vec<CompletionItem> {
         // Keywords
         let keywords = vec![
-            ("contract", "Define a new contract", CompletionItemKind::KEYWORD),
+            (
+                "contract",
+                "Define a new contract",
+                CompletionItemKind::KEYWORD,
+            ),
             ("fn", "Define a function", CompletionItemKind::KEYWORD),
             ("pub", "Public visibility", CompletionItemKind::KEYWORD),
             ("let", "Variable declaration", CompletionItemKind::KEYWORD),
@@ -96,44 +102,148 @@ impl Backend {
             ("storage", "Storage block", CompletionItemKind::KEYWORD),
             ("mapping", "Mapping type", CompletionItemKind::KEYWORD),
             ("require", "Require condition", CompletionItemKind::KEYWORD),
-            ("view", "View function modifier", CompletionItemKind::KEYWORD),
-            ("payable", "Payable function modifier", CompletionItemKind::KEYWORD),
-            ("parallel", "Parallel execution attribute", CompletionItemKind::KEYWORD),
+            (
+                "view",
+                "View function modifier",
+                CompletionItemKind::KEYWORD,
+            ),
+            (
+                "payable",
+                "Payable function modifier",
+                CompletionItemKind::KEYWORD,
+            ),
+            (
+                "parallel",
+                "Parallel execution attribute",
+                CompletionItemKind::KEYWORD,
+            ),
             ("resource", "Resource type", CompletionItemKind::KEYWORD),
             ("spec", "Specification block", CompletionItemKind::KEYWORD),
-            ("invariant", "Contract invariant", CompletionItemKind::KEYWORD),
+            (
+                "invariant",
+                "Contract invariant",
+                CompletionItemKind::KEYWORD,
+            ),
         ];
 
         // Types
         let types = vec![
-            ("u8", "8-bit unsigned integer", CompletionItemKind::TYPE_PARAMETER),
-            ("u16", "16-bit unsigned integer", CompletionItemKind::TYPE_PARAMETER),
-            ("u32", "32-bit unsigned integer", CompletionItemKind::TYPE_PARAMETER),
-            ("u64", "64-bit unsigned integer", CompletionItemKind::TYPE_PARAMETER),
-            ("u128", "128-bit unsigned integer", CompletionItemKind::TYPE_PARAMETER),
-            ("u256", "256-bit unsigned integer", CompletionItemKind::TYPE_PARAMETER),
-            ("i8", "8-bit signed integer", CompletionItemKind::TYPE_PARAMETER),
-            ("i16", "16-bit signed integer", CompletionItemKind::TYPE_PARAMETER),
-            ("i32", "32-bit signed integer", CompletionItemKind::TYPE_PARAMETER),
-            ("i64", "64-bit signed integer", CompletionItemKind::TYPE_PARAMETER),
-            ("i128", "128-bit signed integer", CompletionItemKind::TYPE_PARAMETER),
-            ("i256", "256-bit signed integer", CompletionItemKind::TYPE_PARAMETER),
+            (
+                "u8",
+                "8-bit unsigned integer",
+                CompletionItemKind::TYPE_PARAMETER,
+            ),
+            (
+                "u16",
+                "16-bit unsigned integer",
+                CompletionItemKind::TYPE_PARAMETER,
+            ),
+            (
+                "u32",
+                "32-bit unsigned integer",
+                CompletionItemKind::TYPE_PARAMETER,
+            ),
+            (
+                "u64",
+                "64-bit unsigned integer",
+                CompletionItemKind::TYPE_PARAMETER,
+            ),
+            (
+                "u128",
+                "128-bit unsigned integer",
+                CompletionItemKind::TYPE_PARAMETER,
+            ),
+            (
+                "u256",
+                "256-bit unsigned integer",
+                CompletionItemKind::TYPE_PARAMETER,
+            ),
+            (
+                "i8",
+                "8-bit signed integer",
+                CompletionItemKind::TYPE_PARAMETER,
+            ),
+            (
+                "i16",
+                "16-bit signed integer",
+                CompletionItemKind::TYPE_PARAMETER,
+            ),
+            (
+                "i32",
+                "32-bit signed integer",
+                CompletionItemKind::TYPE_PARAMETER,
+            ),
+            (
+                "i64",
+                "64-bit signed integer",
+                CompletionItemKind::TYPE_PARAMETER,
+            ),
+            (
+                "i128",
+                "128-bit signed integer",
+                CompletionItemKind::TYPE_PARAMETER,
+            ),
+            (
+                "i256",
+                "256-bit signed integer",
+                CompletionItemKind::TYPE_PARAMETER,
+            ),
             ("bool", "Boolean type", CompletionItemKind::TYPE_PARAMETER),
-            ("address", "Blockchain address", CompletionItemKind::TYPE_PARAMETER),
-            ("bytes", "Dynamic byte array", CompletionItemKind::TYPE_PARAMETER),
-            ("bytes32", "32-byte fixed array", CompletionItemKind::TYPE_PARAMETER),
+            (
+                "address",
+                "Blockchain address",
+                CompletionItemKind::TYPE_PARAMETER,
+            ),
+            (
+                "bytes",
+                "Dynamic byte array",
+                CompletionItemKind::TYPE_PARAMETER,
+            ),
+            (
+                "bytes32",
+                "32-byte fixed array",
+                CompletionItemKind::TYPE_PARAMETER,
+            ),
             ("string", "String type", CompletionItemKind::TYPE_PARAMETER),
         ];
 
         // Built-in functions
         let builtins = vec![
-            ("msg.sender", "Transaction sender address", CompletionItemKind::VARIABLE),
-            ("msg.value", "Transaction value", CompletionItemKind::VARIABLE),
-            ("block.number", "Current block number", CompletionItemKind::VARIABLE),
-            ("block.timestamp", "Current block timestamp", CompletionItemKind::VARIABLE),
-            ("keccak256", "Keccak-256 hash function", CompletionItemKind::FUNCTION),
-            ("sha256", "SHA-256 hash function", CompletionItemKind::FUNCTION),
-            ("ecrecover", "Recover signer from signature", CompletionItemKind::FUNCTION),
+            (
+                "msg.sender",
+                "Transaction sender address",
+                CompletionItemKind::VARIABLE,
+            ),
+            (
+                "msg.value",
+                "Transaction value",
+                CompletionItemKind::VARIABLE,
+            ),
+            (
+                "block.number",
+                "Current block number",
+                CompletionItemKind::VARIABLE,
+            ),
+            (
+                "block.timestamp",
+                "Current block timestamp",
+                CompletionItemKind::VARIABLE,
+            ),
+            (
+                "keccak256",
+                "Keccak-256 hash function",
+                CompletionItemKind::FUNCTION,
+            ),
+            (
+                "sha256",
+                "SHA-256 hash function",
+                CompletionItemKind::FUNCTION,
+            ),
+            (
+                "ecrecover",
+                "Recover signer from signature",
+                CompletionItemKind::FUNCTION,
+            ),
         ];
 
         let mut completions = Vec::new();
@@ -317,11 +427,11 @@ fn create_symbol(name: &str, kind: SymbolKind, line: u32, line_text: &str) -> Do
         kind,
         tags: None,
         deprecated: None,
-        range: Range::new(Position::new(line, 0), Position::new(line, line_text.len() as u32)),
-        selection_range: Range::new(
-            Position::new(line, start_col),
-            Position::new(line, end_col),
+        range: Range::new(
+            Position::new(line, 0),
+            Position::new(line, line_text.len() as u32),
         ),
+        selection_range: Range::new(Position::new(line, start_col), Position::new(line, end_col)),
         children: None,
     }
 }
@@ -365,7 +475,8 @@ impl LanguageServer for Backend {
 
         tracing::debug!("Document opened: {}", uri);
 
-        self.documents.insert(uri.clone(), Document::new(&text, version));
+        self.documents
+            .insert(uri.clone(), Document::new(&text, version));
         self.analyze_document(&uri).await;
     }
 

@@ -4,9 +4,9 @@
 
 use primitive_types::U256;
 
+use super::StdlibContext;
 use crate::executor::{ExecutionError, ExecutionResult};
 use crate::value::Value;
-use super::StdlibContext;
 
 // ============================================================================
 // Array operations
@@ -49,7 +49,9 @@ pub fn array_pop(_ctx: &mut StdlibContext, args: Vec<Value>) -> ExecutionResult<
     match &args[0] {
         Value::Array(arr) => {
             if arr.is_empty() {
-                return Err(ExecutionError::Internal("array::pop on empty array".to_string()));
+                return Err(ExecutionError::Internal(
+                    "array::pop on empty array".to_string(),
+                ));
             }
             let mut new_arr = arr.clone();
             let element = new_arr.pop().unwrap();
@@ -69,14 +71,13 @@ pub fn array_get(_ctx: &mut StdlibContext, args: Vec<Value>) -> ExecutionResult<
     let index = get_u256(&args[1], "array::get")?.as_usize();
 
     match &args[0] {
-        Value::Array(arr) => {
-            arr.get(index)
-                .cloned()
-                .ok_or_else(|| ExecutionError::Internal(format!(
-                    "array::get index {} out of bounds (len {})",
-                    index, arr.len()
-                )))
-        }
+        Value::Array(arr) => arr.get(index).cloned().ok_or_else(|| {
+            ExecutionError::Internal(format!(
+                "array::get index {} out of bounds (len {})",
+                index,
+                arr.len()
+            ))
+        }),
         other => Err(ExecutionError::TypeError {
             expected: "array".to_string(),
             found: other.type_name().to_string(),
@@ -95,7 +96,8 @@ pub fn array_set(_ctx: &mut StdlibContext, args: Vec<Value>) -> ExecutionResult<
             if index >= arr.len() {
                 return Err(ExecutionError::Internal(format!(
                     "array::set index {} out of bounds (len {})",
-                    index, arr.len()
+                    index,
+                    arr.len()
                 )));
             }
             let mut new_arr = arr.clone();
@@ -251,18 +253,18 @@ fn check_args(args: &[Value], expected: usize, func: &str) -> ExecutionResult<()
     if args.len() != expected {
         return Err(ExecutionError::Internal(format!(
             "{}() expects {} arguments, got {}",
-            func, expected, args.len()
+            func,
+            expected,
+            args.len()
         )));
     }
     Ok(())
 }
 
 fn get_u256(value: &Value, _func: &str) -> ExecutionResult<U256> {
-    value.as_u256().ok_or_else(|| {
-        ExecutionError::TypeError {
-            expected: "u256".to_string(),
-            found: value.type_name().to_string(),
-        }
+    value.as_u256().ok_or_else(|| ExecutionError::TypeError {
+        expected: "u256".to_string(),
+        found: value.type_name().to_string(),
     })
 }
 
@@ -331,19 +333,16 @@ mod tests {
         let len = bytes_length(&mut c, vec![bytes.clone()]).unwrap();
         assert_eq!(len, Value::from_u64(5));
 
-        let concat = bytes_concat(&mut c, vec![
-            bytes.clone(),
-            Value::Bytes(vec![6, 7]),
-        ]).unwrap();
+        let concat = bytes_concat(&mut c, vec![bytes.clone(), Value::Bytes(vec![6, 7])]).unwrap();
         if let Value::Bytes(b) = concat {
             assert_eq!(b, vec![1, 2, 3, 4, 5, 6, 7]);
         }
 
-        let sliced = bytes_slice(&mut c, vec![
-            bytes.clone(),
-            Value::from_u64(1),
-            Value::from_u64(3),
-        ]).unwrap();
+        let sliced = bytes_slice(
+            &mut c,
+            vec![bytes.clone(), Value::from_u64(1), Value::from_u64(3)],
+        )
+        .unwrap();
         if let Value::Bytes(b) = sliced {
             assert_eq!(b, vec![2, 3, 4]);
         }
@@ -358,10 +357,8 @@ mod tests {
         let len = string_length(&mut c, vec![s.clone()]).unwrap();
         assert_eq!(len, Value::from_u64(5));
 
-        let concat = string_concat(&mut c, vec![
-            s.clone(),
-            Value::String(" world".to_string()),
-        ]).unwrap();
+        let concat =
+            string_concat(&mut c, vec![s.clone(), Value::String(" world".to_string())]).unwrap();
         assert_eq!(concat, Value::String("hello world".to_string()));
     }
 }

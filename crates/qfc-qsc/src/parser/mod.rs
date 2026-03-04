@@ -5,12 +5,14 @@
 use thiserror::Error;
 
 use crate::ast::*;
-use crate::lexer::{Token, TokenKind, Span};
+use crate::lexer::{Span, Token, TokenKind};
 
 /// Parser errors
 #[derive(Debug, Error, Clone)]
 pub enum ParseError {
-    #[error("unexpected token: expected {expected}, found {found} at line {line}, column {column}")]
+    #[error(
+        "unexpected token: expected {expected}, found {found} at line {line}, column {column}"
+    )]
     UnexpectedToken {
         expected: String,
         found: String,
@@ -84,9 +86,9 @@ impl Parser {
     }
 
     fn current(&self) -> &Token {
-        self.tokens.get(self.pos).unwrap_or_else(|| {
-            self.tokens.last().expect("tokens should not be empty")
-        })
+        self.tokens
+            .get(self.pos)
+            .unwrap_or_else(|| self.tokens.last().expect("tokens should not be empty"))
     }
 
     fn current_kind(&self) -> &TokenKind {
@@ -181,9 +183,11 @@ impl Parser {
             TokenKind::Enum => self.parse_enum(visibility).map(Item::Enum),
             TokenKind::Type => self.parse_type_alias(visibility).map(Item::TypeAlias),
             TokenKind::Const => self.parse_const(visibility).map(Item::Const),
-            TokenKind::Fn | TokenKind::Pure | TokenKind::View | TokenKind::Payable | TokenKind::Parallel => {
-                self.parse_function(visibility).map(Item::Function)
-            }
+            TokenKind::Fn
+            | TokenKind::Pure
+            | TokenKind::View
+            | TokenKind::Payable
+            | TokenKind::Parallel => self.parse_function(visibility).map(Item::Function),
             _ => {
                 let span = self.current_span();
                 Err(ParseError::UnexpectedToken {
@@ -283,7 +287,9 @@ impl Parser {
             TokenKind::Event => self.parse_event().map(ContractItem::Event),
             TokenKind::Error => self.parse_error_def().map(ContractItem::Error),
             TokenKind::Modifier => self.parse_modifier().map(ContractItem::Modifier),
-            TokenKind::Constructor => self.parse_constructor(visibility).map(ContractItem::Constructor),
+            TokenKind::Constructor => self
+                .parse_constructor(visibility)
+                .map(ContractItem::Constructor),
             TokenKind::Fallback => self.parse_fallback().map(ContractItem::Fallback),
             TokenKind::Receive => self.parse_receive().map(ContractItem::Receive),
             TokenKind::Const => self.parse_const(visibility).map(ContractItem::Const),
@@ -291,9 +297,11 @@ impl Parser {
                 self.parse_struct(visibility).map(ContractItem::Struct)
             }
             TokenKind::Enum => self.parse_enum(visibility).map(ContractItem::Enum),
-            TokenKind::Fn | TokenKind::Pure | TokenKind::View | TokenKind::Payable | TokenKind::Parallel => {
-                self.parse_function(visibility).map(ContractItem::Function)
-            }
+            TokenKind::Fn
+            | TokenKind::Pure
+            | TokenKind::View
+            | TokenKind::Payable
+            | TokenKind::Parallel => self.parse_function(visibility).map(ContractItem::Function),
             _ => {
                 let span = self.current_span();
                 Err(ParseError::UnexpectedToken {
@@ -553,7 +561,10 @@ impl Parser {
         self.parse_function_sig_with_visibility(visibility)
     }
 
-    fn parse_function_sig_with_visibility(&mut self, visibility: Visibility) -> ParseResult<FunctionSig> {
+    fn parse_function_sig_with_visibility(
+        &mut self,
+        visibility: Visibility,
+    ) -> ParseResult<FunctionSig> {
         let start_span = self.current_span();
 
         // Parse modifiers (pure, view, payable, parallel)

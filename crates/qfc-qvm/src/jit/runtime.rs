@@ -160,11 +160,7 @@ pub extern "C" fn qvm_sload(runtime: *mut JitRuntime, key: u64) -> u64 {
     }
 
     let key = U256::from(key);
-    runtime
-        .storage
-        .get(&key)
-        .map(|v| v.low_u64())
-        .unwrap_or(0)
+    runtime.storage.get(&key).map(|v| v.low_u64()).unwrap_or(0)
 }
 
 /// Store a value to storage.
@@ -235,7 +231,11 @@ pub extern "C" fn qvm_gas(runtime: *mut JitRuntime) -> u64 {
 #[no_mangle]
 pub extern "C" fn qvm_use_gas(runtime: *mut JitRuntime, amount: u64) -> u64 {
     let runtime = unsafe { &mut *runtime };
-    if runtime.use_gas(amount) { 1 } else { 0 }
+    if runtime.use_gas(amount) {
+        1
+    } else {
+        0
+    }
 }
 
 #[cfg(test)]
@@ -280,15 +280,14 @@ mod tests {
 
     #[test]
     fn test_context_getters() {
-        let mut runtime = JitRuntime::new()
-            .with_context(
-                U256::from(0x1234),  // caller
-                U256::from(0x5678),  // address
-                U256::from(1000),    // value
-                100,                 // block number
-                1700000000,          // timestamp
-                1_000_000,           // gas limit
-            );
+        let mut runtime = JitRuntime::new().with_context(
+            U256::from(0x1234), // caller
+            U256::from(0x5678), // address
+            U256::from(1000),   // value
+            100,                // block number
+            1700000000,         // timestamp
+            1_000_000,          // gas limit
+        );
 
         assert_eq!(qvm_caller(&mut runtime as *mut _), 0x1234);
         assert_eq!(qvm_address(&mut runtime as *mut _), 0x5678);
