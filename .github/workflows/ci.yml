@@ -89,3 +89,5 @@ jobs:
           -A clippy::collapsible_if
           -A clippy::manual_div_ceil
           -A clippy::unused_enumerate_index
+          -A clippy::new_without_default
+          -A clippy::deref_addrof
