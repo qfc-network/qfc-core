@@ -1,43 +1,26 @@
 # QFC Node Dockerfile
 # Multi-stage build for smaller image size
-# Supports linux/amd64 and linux/arm64 (Graviton)
 
 # ============================================
 # Stage 1: Build
 # ============================================
-FROM --platform=$BUILDPLATFORM rust:1.75-bookworm AS builder
-
-ARG TARGETARCH
+FROM rust:1.75-bookworm AS builder
 
 WORKDIR /build
 
-# Install build dependencies + cross-compilation toolchain for arm64
+# Install build dependencies
 RUN apt-get update && apt-get install -y \
     pkg-config \
     libssl-dev \
     libclang-dev \
     cmake \
-    && if [ "$TARGETARCH" = "arm64" ] && [ "$(uname -m)" != "aarch64" ]; then \
-        apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-        libssl-dev:arm64 pkg-config; \
-        rustup target add aarch64-unknown-linux-gnu; \
-    fi \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy source
 COPY . .
 
-# Build release binary (cross-compile if needed)
-RUN if [ "$TARGETARCH" = "arm64" ] && [ "$(uname -m)" != "aarch64" ]; then \
-        export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
-        && export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc \
-        && export CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++ \
-        && export PKG_CONFIG_SYSROOT_DIR=/usr/aarch64-linux-gnu \
-        && cargo build --release --bin qfc-node --target aarch64-unknown-linux-gnu \
-        && cp target/aarch64-unknown-linux-gnu/release/qfc-node target/release/qfc-node; \
-    else \
-        cargo build --release --bin qfc-node; \
-    fi
+# Build release binary
+RUN cargo build --release --bin qfc-node
 
 # ============================================
 # Stage 2: Runtime
