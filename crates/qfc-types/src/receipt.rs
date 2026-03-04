@@ -48,7 +48,7 @@ impl Serialize for Bloom {
     where
         S: Serializer,
     {
-        serializer.serialize_str(&format!("0x{}", hex::encode(&self.0)))
+        serializer.serialize_str(&format!("0x{}", hex::encode(self.0)))
     }
 }
 

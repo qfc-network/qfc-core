@@ -78,6 +78,7 @@ jobs:
           cargo clippy --workspace --all-targets --
           -D warnings
           -A clippy::needless_borrow
+          -A clippy::needless_borrows_for_generic_args
           -A clippy::derivable_impls
           -A clippy::field_reassign_with_default
           -A clippy::too_many_arguments

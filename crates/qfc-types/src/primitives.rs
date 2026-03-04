@@ -43,7 +43,7 @@ impl fmt::Debug for Hash {
 
 impl fmt::Display for Hash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "0x{}", hex::encode(&self.0))
+        write!(f, "0x{}", hex::encode(self.0))
     }
 }
 
@@ -52,7 +52,7 @@ impl Serialize for Hash {
     where
         S: Serializer,
     {
-        serializer.serialize_str(&format!("0x{}", hex::encode(&self.0)))
+        serializer.serialize_str(&format!("0x{}", hex::encode(self.0)))
     }
 }
 
@@ -112,13 +112,13 @@ impl Address {
 
 impl fmt::Debug for Address {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Address(0x{})", hex::encode(&self.0))
+        write!(f, "Address(0x{})", hex::encode(self.0))
     }
 }
 
 impl fmt::Display for Address {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "0x{}", hex::encode(&self.0))
+        write!(f, "0x{}", hex::encode(self.0))
     }
 }
 
@@ -127,7 +127,7 @@ impl Serialize for Address {
     where
         S: Serializer,
     {
-        serializer.serialize_str(&format!("0x{}", hex::encode(&self.0)))
+        serializer.serialize_str(&format!("0x{}", hex::encode(self.0)))
     }
 }
 
@@ -386,7 +386,7 @@ impl fmt::Debug for Signature {
 
 impl fmt::Display for Signature {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "0x{}", hex::encode(&self.0))
+        write!(f, "0x{}", hex::encode(self.0))
     }
 }
 
@@ -395,7 +395,7 @@ impl Serialize for Signature {
     where
         S: Serializer,
     {
-        serializer.serialize_str(&format!("0x{}", hex::encode(&self.0)))
+        serializer.serialize_str(&format!("0x{}", hex::encode(self.0)))
     }
 }
 
@@ -467,7 +467,7 @@ impl fmt::Debug for PublicKey {
 
 impl fmt::Display for PublicKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "0x{}", hex::encode(&self.0))
+        write!(f, "0x{}", hex::encode(self.0))
     }
 }
 
@@ -476,7 +476,7 @@ impl Serialize for PublicKey {
     where
         S: Serializer,
     {
-        serializer.serialize_str(&format!("0x{}", hex::encode(&self.0)))
+        serializer.serialize_str(&format!("0x{}", hex::encode(self.0)))
     }
 }
 
