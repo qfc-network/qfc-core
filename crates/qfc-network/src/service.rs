@@ -71,7 +71,7 @@ impl NetworkService {
     )> {
         // Generate or load keypair
         let local_key = if let Some(secret) = &config.secret_key {
-            let mut secret_bytes = secret.clone();
+            let mut secret_bytes = *secret;
             libp2p::identity::Keypair::ed25519_from_bytes(&mut secret_bytes)
                 .map_err(|e| NetworkError::Transport(e.to_string()))?
         } else {
