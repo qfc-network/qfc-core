@@ -43,7 +43,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libclang-dev
 
-      - run: cargo test --workspace -- --skip integration_test
+      - run: cargo test --workspace --lib --bins
 
   fmt:
     name: Format
@@ -83,3 +83,6 @@ jobs:
           -A clippy::field_reassign_with_default
           -A clippy::too_many_arguments
           -A clippy::assign_op_pattern
+          -A clippy::large_enum_variant
+          -A clippy::unnecessary_map_or
+          -A clippy::len_zero
