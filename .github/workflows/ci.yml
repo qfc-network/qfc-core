@@ -73,21 +73,4 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libclang-dev
 
-      - run: >
-          cargo clippy --workspace --all-targets --
-          -D warnings
-          -A clippy::needless_borrow
-          -A clippy::needless_borrows_for_generic_args
-          -A clippy::derivable_impls
-          -A clippy::field_reassign_with_default
-          -A clippy::too_many_arguments
-          -A clippy::assign_op_pattern
-          -A clippy::large_enum_variant
-          -A clippy::unnecessary_map_or
-          -A clippy::len_zero
-          -A clippy::collapsible_if
-          -A clippy::manual_div_ceil
-          -A clippy::unused_enumerate_index
-          -A clippy::new_without_default
-          -A clippy::deref_addrof
-          -A clippy::default_constructed_unit_structs
+      - run: cargo clippy --workspace --all-targets -- -D clippy::correctness -W clippy::all
