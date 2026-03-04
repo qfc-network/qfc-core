@@ -74,7 +74,6 @@ pub fn ecrecover(_ctx: &mut StdlibContext, args: Vec<Value>) -> ExecutionResult<
 
     // Use k256 for secp256k1 ECDSA recovery
     use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
-    use k256::ecdsa::signature::hazmat::PrehashVerifier;
 
     // Construct signature from r and s
     let mut sig_bytes = [0u8; 64];
@@ -181,7 +180,7 @@ fn get_bytes(args: &[Value], index: usize, func: &str) -> ExecutionResult<Vec<u8
     }
 }
 
-fn get_h256(value: &Value, func: &str) -> ExecutionResult<H256> {
+fn get_h256(value: &Value, _func: &str) -> ExecutionResult<H256> {
     match value {
         Value::Bytes32(h) => Ok(*h),
         Value::U256(n) => {
@@ -196,7 +195,7 @@ fn get_h256(value: &Value, func: &str) -> ExecutionResult<H256> {
     }
 }
 
-fn get_u256(value: &Value, func: &str) -> ExecutionResult<U256> {
+fn get_u256(value: &Value, _func: &str) -> ExecutionResult<U256> {
     value.as_u256().ok_or_else(|| {
         ExecutionError::TypeError {
             expected: "u256".to_string(),
@@ -217,7 +216,7 @@ mod tests {
             value: U256::zero(),
             block_number: 0,
             timestamp: 0,
-            memory: unsafe { &mut MEM },
+            memory: unsafe { &mut *&raw mut MEM },
         }
     }
 

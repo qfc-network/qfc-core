@@ -7,7 +7,7 @@ pub mod crypto;
 pub mod collections;
 pub mod abi;
 
-use primitive_types::{H160, H256, U256};
+use primitive_types::{H160, U256};
 use std::collections::HashMap;
 
 use crate::executor::{ExecutionError, ExecutionResult};

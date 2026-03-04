@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use qfc_qsc::{compile, format, format_with_config, check_only, CompilerOptions, FormatConfig};
+use qfc_qsc::{compile, format_with_config, check_only, CompilerOptions, FormatConfig};
 
 #[derive(Parser)]
 #[command(name = "qsc")]

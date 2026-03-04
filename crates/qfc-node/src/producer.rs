@@ -418,6 +418,7 @@ impl BlockProducer {
     }
 
     /// Broadcast double-sign evidence to the network
+    #[allow(dead_code)]
     pub async fn broadcast_double_sign_evidence(&self, evidence: &DoubleSignEvidence) {
         let Some(network) = &self.network else {
             return;

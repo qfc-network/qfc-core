@@ -237,7 +237,7 @@ fn check_args(args: &[Value], expected: usize, func: &str) -> ExecutionResult<()
     Ok(())
 }
 
-fn get_u256(value: &Value, func: &str) -> ExecutionResult<U256> {
+fn get_u256(value: &Value, _func: &str) -> ExecutionResult<U256> {
     value.as_u256().ok_or_else(|| {
         ExecutionError::TypeError {
             expected: "u256".to_string(),
@@ -288,7 +288,7 @@ fn full_div(low: U256, high: U256, denominator: U256) -> ExecutionResult<U256> {
 
     for i in (0..256).rev() {
         // Shift remainder left by 1
-        let carry = remainder_high >> 255;
+        let _carry = remainder_high >> 255;
         remainder_high = (remainder_high << 1) | (remainder_low >> 255);
         remainder_low = remainder_low << 1;
 
@@ -314,7 +314,7 @@ mod tests {
             value: U256::zero(),
             block_number: 0,
             timestamp: 0,
-            memory: unsafe { &mut MEM },
+            memory: unsafe { &mut *&raw mut MEM },
         }
     }
 

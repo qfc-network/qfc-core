@@ -288,6 +288,7 @@ pub struct Executor {
     storage: Storage,
 
     /// Heap allocator
+    #[allow(dead_code)]
     heap: Heap,
 
     /// Call frames

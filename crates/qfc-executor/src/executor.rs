@@ -133,8 +133,6 @@ impl Executor {
             // For now, we re-decode to get the sender
             // In production, we'd pass the sender through a different mechanism
             // Let's compute keccak256 hash of the transaction for the hash
-            use sha3::{Digest, Keccak256};
-
             // The hash was already computed as keccak256 of the RLP-encoded tx
             // We need to reconstruct the sender from r, s, v
             let r = &tx.signature.0[..32];

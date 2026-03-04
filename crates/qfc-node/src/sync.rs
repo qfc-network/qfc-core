@@ -788,7 +788,7 @@ impl SyncManager {
         }
 
         // Get current epoch to construct mining task for hashrate calculation
-        let epoch = consensus.get_epoch();
+        let _epoch = consensus.get_epoch();
 
         // Calculate hashrate from the proof
         // Note: We use a simplified calculation here since we don't have the exact task

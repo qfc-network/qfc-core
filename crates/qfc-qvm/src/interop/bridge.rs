@@ -2,7 +2,7 @@
 //!
 //! Handles the translation of calls between QVM and EVM execution environments.
 
-use primitive_types::{H160, H256, U256};
+use primitive_types::{H160, U256};
 
 use crate::executor::{ExecutionContext, ExecutionError, ExecutionResult};
 use crate::value::Value;
@@ -11,6 +11,7 @@ use super::{CallType, ContractType, CrossVmCall, CrossVmResult, EvmBackend, Inte
 /// Call bridge for QVM -> EVM calls
 pub struct CallBridge<'a, E: EvmBackend> {
     manager: &'a mut InteropManager<E>,
+    #[allow(dead_code)]
     context: &'a ExecutionContext,
 }
 

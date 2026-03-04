@@ -88,6 +88,7 @@ pub struct InteropManager<E: EvmBackend> {
     evm_backend: E,
 
     /// Pending cross-VM calls (for batching)
+    #[allow(dead_code)]
     pending_calls: Vec<CrossVmCall>,
 
     /// Call depth tracking
@@ -262,7 +263,7 @@ impl MockEvmBackend {
 
 #[cfg(test)]
 impl EvmBackend for MockEvmBackend {
-    fn call(&mut self, request: CrossVmCall) -> ExecutionResult<CrossVmResult> {
+    fn call(&mut self, _request: CrossVmCall) -> ExecutionResult<CrossVmResult> {
         // Simple mock: return success with empty data
         Ok(CrossVmResult {
             success: true,

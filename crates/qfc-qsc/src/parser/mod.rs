@@ -109,6 +109,7 @@ impl Parser {
         token
     }
 
+    #[allow(dead_code)]
     fn peek(&self) -> &TokenKind {
         self.tokens
             .get(self.pos + 1)

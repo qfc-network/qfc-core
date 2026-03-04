@@ -2,11 +2,10 @@
 //!
 //! Defines various call patterns for cross-VM communication.
 
-use primitive_types::{H160, H256, U256};
+use primitive_types::{H160, U256};
 
 use crate::executor::{ExecutionError, ExecutionResult};
-use crate::value::Value;
-use super::{CallType, ContractType, CrossVmCall, CrossVmResult, EvmBackend, InteropManager};
+use super::{CallType, CrossVmCall, CrossVmResult, EvmBackend, InteropManager};
 
 /// Callback interface for EVM contracts to call back into QVM
 pub trait QvmCallback {

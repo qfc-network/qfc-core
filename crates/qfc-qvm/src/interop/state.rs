@@ -2,7 +2,7 @@
 //!
 //! Handles state coordination between QVM and EVM execution environments.
 
-use primitive_types::{H160, H256, U256};
+use primitive_types::{H160, H256};
 use std::collections::{HashMap, HashSet};
 
 use crate::executor::{ExecutionError, ExecutionResult};
@@ -263,7 +263,7 @@ pub struct StateVerifier;
 
 impl StateVerifier {
     /// Verify a state proof
-    pub fn verify_proof(proof: &StateProof, root: H256) -> bool {
+    pub fn verify_proof(proof: &StateProof, _root: H256) -> bool {
         // Simplified verification - in production would verify Merkle proof
         !proof.proof.is_empty()
     }

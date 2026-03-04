@@ -208,6 +208,7 @@ pub struct ContractBytecode {
 
 /// Local variable info
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct LocalVar {
     name: String,
     index: u16,
@@ -228,6 +229,7 @@ pub struct Codegen {
     next_storage_slot: u32,
 
     /// Function table
+    #[allow(dead_code)]
     functions: HashMap<String, (u16, u8)>, // (index, param_count)
 
     /// Label counter for jumps
@@ -587,7 +589,7 @@ impl Codegen {
                 Ok(())
             }
 
-            ExprKind::Field(obj, field) => {
+            ExprKind::Field(obj, _field) => {
                 self.generate_expr(obj)?;
                 // Simplified: assume struct offset
                 self.emit_push_u32(0); // Would need proper field offset
@@ -679,7 +681,7 @@ impl Codegen {
                 Ok(())
             }
 
-            ExprKind::Emit(path, fields) => {
+            ExprKind::Emit(_path, fields) => {
                 // Generate event
                 let topic_count = fields.iter().filter(|f| f.value.is_some()).count();
 

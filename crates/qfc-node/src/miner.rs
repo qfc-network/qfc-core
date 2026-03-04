@@ -244,12 +244,14 @@ impl MiningService {
     }
 
     /// Stop the mining service
+    #[allow(dead_code)]
     pub fn stop(&self) {
         self.stop_flag.store(true, Ordering::Relaxed);
     }
 }
 
 /// Get the number of CPUs available
+#[allow(dead_code)]
 fn num_cpus() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())

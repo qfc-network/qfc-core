@@ -97,7 +97,7 @@ pub struct CompilerOptions {
 }
 
 /// Compile QuantumScript source code to bytecode
-pub fn compile(source: &str, options: &CompilerOptions) -> CompilerResult<Vec<ContractBytecode>> {
+pub fn compile(source: &str, _options: &CompilerOptions) -> CompilerResult<Vec<ContractBytecode>> {
     // Lexing
     let tokens = Lexer::new(source).tokenize()?;
 

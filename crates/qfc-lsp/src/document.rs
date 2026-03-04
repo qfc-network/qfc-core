@@ -95,6 +95,7 @@ impl Document {
     }
 
     /// Get a range of text as a string.
+    #[allow(dead_code)]
     pub fn get_range(&self, range: Range) -> Option<String> {
         let start = self.position_to_offset(range.start)?;
         let end = self.position_to_offset(range.end)?;
