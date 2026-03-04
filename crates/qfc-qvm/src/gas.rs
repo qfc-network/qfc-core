@@ -292,7 +292,7 @@ impl GasCosts {
 
     /// Calculate hash cost
     pub fn hash_cost(&self, data_size: usize, cost_per_word: u64) -> u64 {
-        let words = (data_size + 31) / 32;
+        let words = data_size.div_ceil(32);
         self.mid
             .saturating_add(cost_per_word.saturating_mul(words as u64))
     }

@@ -19,7 +19,7 @@ pub fn encode(_ctx: &mut StdlibContext, args: Vec<Value>) -> ExecutionResult<Val
     // Second pass: encode
     let mut dynamic_data = Vec::new();
 
-    for (_i, arg) in args.iter().enumerate() {
+    for arg in args.iter() {
         match arg {
             // Fixed-size types (32 bytes each in head)
             Value::U256(n) => {

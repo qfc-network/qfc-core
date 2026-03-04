@@ -225,12 +225,10 @@ impl ResourceTracker {
 
         // Check for conflicting borrows
         for borrow in self.borrows.values() {
-            if borrow.resource_id == id {
-                if is_mutable || borrow.is_mutable {
-                    return Err(ExecutionError::ResourceError(
-                        "conflicting borrow".to_string(),
-                    ));
-                }
+            if borrow.resource_id == id && (is_mutable || borrow.is_mutable) {
+                return Err(ExecutionError::ResourceError(
+                    "conflicting borrow".to_string(),
+                ));
             }
         }
 

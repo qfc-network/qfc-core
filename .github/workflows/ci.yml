@@ -86,3 +86,6 @@ jobs:
           -A clippy::large_enum_variant
           -A clippy::unnecessary_map_or
           -A clippy::len_zero
+          -A clippy::collapsible_if
+          -A clippy::manual_div_ceil
+          -A clippy::unused_enumerate_index
