@@ -32,5 +32,6 @@ anyhow.workspace = true
 [features]
 default = ["cpu"]
 cpu = ["qfc-inference/cpu"]
+candle = ["qfc-inference/candle"]
 cuda = ["qfc-inference/cuda"]
 metal = ["qfc-inference/metal"]

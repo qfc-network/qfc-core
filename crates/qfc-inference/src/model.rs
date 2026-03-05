@@ -103,30 +103,35 @@ impl ModelRegistry {
     }
 
     /// Create a registry with the default approved models for v2.0
+    ///
+    /// These map to real HuggingFace models:
+    /// - qfc-embed-small → sentence-transformers/all-MiniLM-L6-v2 (~80MB, 384-dim)
+    /// - qfc-embed-medium → sentence-transformers/all-mpnet-base-v2 (~420MB, 768-dim)
+    /// - qfc-classify-small → google-bert/bert-base-uncased (~440MB, 768-dim)
     pub fn default_v2() -> Self {
         let models = vec![
             ModelInfo {
-                id: ModelId::new("qfc-bench-small", "v1.0"),
-                description: "Small benchmark model for Cold tier nodes".to_string(),
+                id: ModelId::new("qfc-embed-small", "v1.0"),
+                description: "Small embedding model (all-MiniLM-L6-v2, 384-dim) for Cold tier".to_string(),
                 min_memory_mb: 512,
                 min_tier: GpuTier::Cold,
-                size_mb: 200,
+                size_mb: 80,
                 approved: true,
             },
             ModelInfo {
-                id: ModelId::new("qfc-bench-medium", "v1.0"),
-                description: "Medium benchmark model for Warm tier nodes".to_string(),
-                min_memory_mb: 4096,
+                id: ModelId::new("qfc-embed-medium", "v1.0"),
+                description: "Medium embedding model (all-mpnet-base-v2, 768-dim) for Warm tier".to_string(),
+                min_memory_mb: 2048,
                 min_tier: GpuTier::Warm,
-                size_mb: 2000,
+                size_mb: 420,
                 approved: true,
             },
             ModelInfo {
-                id: ModelId::new("qfc-bench-large", "v1.0"),
-                description: "Large benchmark model for Hot tier nodes".to_string(),
-                min_memory_mb: 24000,
-                min_tier: GpuTier::Hot,
-                size_mb: 15000,
+                id: ModelId::new("qfc-classify-small", "v1.0"),
+                description: "BERT classification model (bert-base-uncased) for Warm tier".to_string(),
+                min_memory_mb: 2048,
+                min_tier: GpuTier::Warm,
+                size_mb: 440,
                 approved: true,
             },
         ];
@@ -208,16 +213,16 @@ mod tests {
     fn test_model_registry() {
         let registry = ModelRegistry::default_v2();
 
-        let small = ModelId::new("qfc-bench-small", "v1.0");
+        let small = ModelId::new("qfc-embed-small", "v1.0");
         assert!(registry.is_approved(&small));
 
         let unknown = ModelId::new("unknown-model", "v1.0");
         assert!(!registry.is_approved(&unknown));
 
-        // Cold tier can run small model
+        // Cold tier can run small embedding model only
         let cold_models = registry.models_for_tier(GpuTier::Cold);
         assert_eq!(cold_models.len(), 1);
-        assert_eq!(cold_models[0].id.name, "qfc-bench-small");
+        assert_eq!(cold_models[0].id.name, "qfc-embed-small");
 
         // Hot tier can run all models
         let hot_models = registry.models_for_tier(GpuTier::Hot);
