@@ -267,6 +267,7 @@ impl Chain {
             header,
             transactions: body.transactions,
             votes: body.votes,
+            inference_proofs: body.inference_proofs,
             signature: body.signature,
         }))
     }
@@ -423,6 +424,27 @@ impl Chain {
         // Verify gas used
         if gas_used != block.gas_used() {
             return Err(ChainError::InvalidBlock("Gas used mismatch".to_string()));
+        }
+
+        // Verify inference proofs root (v2.0)
+        if block.header.version >= 2 || !block.inference_proofs.is_empty() {
+            let proof_hashes: Vec<Hash> = block
+                .inference_proofs
+                .iter()
+                .map(|p| blake3_hash(&p.to_bytes_without_signature()))
+                .collect();
+            let expected_proofs_root = qfc_crypto::merkle_root(&proof_hashes);
+            if block.header.proofs_root != expected_proofs_root {
+                return Err(ChainError::InvalidBlock(
+                    "Inference proofs root mismatch".to_string(),
+                ));
+            }
+        }
+
+        // Apply inference scores from block proofs (v2.0 on-chain state)
+        for proof in &block.inference_proofs {
+            self.consensus
+                .update_inference_score(&proof.validator, proof.flops_estimated, 1);
         }
 
         // Store block

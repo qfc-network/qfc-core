@@ -312,6 +312,9 @@ pub struct RpcInferenceProofSubmission {
     pub backend: String,
     /// Serialized proof bytes (hex)
     pub proof_bytes: String,
+    /// Optional result data (hex) for public task completion
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_data: Option<String>,
 }
 
 /// Result of submitting an inference proof
@@ -379,6 +382,10 @@ pub struct RpcSubmitPublicTask {
     pub model_id: String,
     pub input_data: String,
     pub max_fee: String,
+    /// Submitter address (hex)
+    pub submitter: String,
+    /// Ed25519 signature over (task_type || model_id || input_data || max_fee) hex
+    pub signature: String,
 }
 
 /// Status of a public inference task

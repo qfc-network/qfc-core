@@ -1,6 +1,7 @@
 //! Block producer - handles block production loop
 
 use parking_lot::RwLock;
+use qfc_ai_coordinator::{ProofPool, TaskPool};
 use qfc_chain::Chain;
 use qfc_consensus::ConsensusEngine;
 use qfc_crypto::blake3_hash;
@@ -9,9 +10,10 @@ use qfc_mempool::Mempool;
 use qfc_network::NetworkService;
 use qfc_storage;
 use qfc_types::{
-    block_reward_for_year, DoubleSignEvidence, Heartbeat, RewardDistribution, Transaction,
-    ValidatorMessage, BLOCK_TIME_MS, FEE_BURN_PERCENT, FEE_PRODUCER_PERCENT, FEE_VOTERS_PERCENT,
-    PRODUCER_REWARD_PERCENT, U256, VOTERS_REWARD_PERCENT,
+    block_reward_for_year, DoubleSignEvidence, Heartbeat, InferenceProof, RewardDistribution,
+    Transaction, ValidatorMessage, BLOCK_TIME_MS, FEE_BURN_PERCENT, FEE_PRODUCER_PERCENT,
+    FEE_VOTERS_PERCENT, INFERENCE_FEE_MINER_PERCENT, INFERENCE_FEE_VALIDATORS_PERCENT,
+    MAX_INFERENCE_PROOFS_PER_BLOCK, PRODUCER_REWARD_PERCENT, U256, VOTERS_REWARD_PERCENT,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -47,6 +49,10 @@ pub struct BlockProducer {
     network: Option<Arc<NetworkService>>,
     executor: Executor,
     config: ProducerConfig,
+    /// v2.0: Pool of verified inference proofs awaiting block inclusion
+    proof_pool: Arc<RwLock<ProofPool>>,
+    /// v2.0: Shared task pool for fee settlement
+    task_pool: Arc<RwLock<TaskPool>>,
 }
 
 impl BlockProducer {
@@ -58,6 +64,8 @@ impl BlockProducer {
         network: Option<Arc<NetworkService>>,
         config: ProducerConfig,
         chain_id: u64,
+        proof_pool: Arc<RwLock<ProofPool>>,
+        task_pool: Arc<RwLock<TaskPool>>,
     ) -> Self {
         Self {
             chain,
@@ -66,6 +74,8 @@ impl BlockProducer {
             network,
             executor: Executor::new(chain_id),
             config,
+            proof_pool,
+            task_pool,
         }
     }
 
@@ -184,6 +194,12 @@ impl BlockProducer {
             return Err(anyhow::anyhow!("No transactions"));
         }
 
+        // Drain inference proofs from pool (v2.0)
+        let inference_proofs = self
+            .proof_pool
+            .write()
+            .drain(MAX_INFERENCE_PROOFS_PER_BLOCK);
+
         // Execute transactions
         let state = self.chain.state();
 
@@ -193,6 +209,9 @@ impl BlockProducer {
         let (receipts, gas_used) =
             self.executor
                 .execute_transactions(&transactions, &state, &our_address);
+
+        // Settle inference fees for proofs matched to public tasks (v2.0)
+        self.settle_inference_fees(&inference_proofs, &our_address);
 
         // Commit state to get new state root
         let state_root = state.commit()?;
@@ -206,6 +225,7 @@ impl BlockProducer {
                 receipts.clone(),
                 state_root,
                 gas_used,
+                inference_proofs,
             )
             .map_err(|e| anyhow::anyhow!("Consensus error: {}", e))?;
 
@@ -274,6 +294,76 @@ impl BlockProducer {
         );
 
         Ok(block_hash)
+    }
+
+    /// Settle inference fees for proofs matched to public tasks (v2.0)
+    /// 70% miner, 10% validators, 20% burn
+    fn settle_inference_fees(&self, proofs: &[InferenceProof], _producer: &qfc_types::Address) {
+        let state = self.chain.state();
+        let voters = self.get_block_voters(&qfc_types::Hash::ZERO);
+        let mut task_pool = self.task_pool.write();
+
+        for proof in proofs {
+            // Check if this proof completes a public task
+            if let Some(public_task) = task_pool.get_public_task(&proof.input_hash) {
+                if matches!(
+                    public_task.status,
+                    qfc_ai_coordinator::task_pool::PublicTaskStatus::Pending
+                        | qfc_ai_coordinator::task_pool::PublicTaskStatus::Assigned
+                ) {
+                    let fee = U256::from_u128(public_task.max_fee);
+
+                    // 70% to miner (proof submitter)
+                    let miner_share =
+                        fee * U256::from_u64(INFERENCE_FEE_MINER_PERCENT) / U256::from_u64(100);
+                    if let Err(e) = state.add_balance(&proof.validator, miner_share) {
+                        warn!("Failed to pay miner inference fee: {}", e);
+                    }
+
+                    // 10% to validators
+                    let validator_share = fee * U256::from_u64(INFERENCE_FEE_VALIDATORS_PERCENT)
+                        / U256::from_u64(100);
+                    if let Err(e) = self.distribute_voter_rewards(&validator_share, &voters) {
+                        warn!("Failed to distribute inference validator fees: {}", e);
+                    }
+
+                    // 20% burned (not distributed)
+
+                    // Mark task completed
+                    task_pool.complete_public_task(
+                        &proof.input_hash,
+                        proof.output_hash.as_bytes().to_vec(),
+                        proof.validator,
+                        proof.execution_time_ms,
+                    );
+
+                    info!(
+                        "Settled inference fee for task {}: {} to miner {}",
+                        hex::encode(&proof.input_hash.as_bytes()[..8]),
+                        miner_share,
+                        proof.validator
+                    );
+                }
+            }
+        }
+
+        // Prune expired tasks and refund submitters
+        let expired = task_pool.prune_expired_public(now_ms());
+        for task in expired {
+            if task.submitter != qfc_types::Address::ZERO {
+                let refund = U256::from_u128(task.max_fee);
+                if let Err(e) = state.add_balance(&task.submitter, refund) {
+                    warn!("Failed to refund expired task: {}", e);
+                } else {
+                    info!(
+                        "Refunded {} for expired task {} to {}",
+                        refund,
+                        hex::encode(&task.task_id.as_bytes()[..8]),
+                        task.submitter
+                    );
+                }
+            }
+        }
     }
 
     /// Select transactions from mempool
@@ -478,4 +568,11 @@ impl BlockProducer {
 
         total
     }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
 }

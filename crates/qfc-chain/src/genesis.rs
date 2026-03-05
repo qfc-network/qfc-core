@@ -141,6 +141,7 @@ impl GenesisConfig {
             state_root: Hash::ZERO, // Will be computed after applying allocations
             transactions_root: Hash::ZERO,
             receipts_root: Hash::ZERO,
+            proofs_root: Hash::ZERO,
             producer: Address::ZERO,
             contribution_score: 0,
             vrf_proof: VrfProof::default(),
@@ -154,6 +155,7 @@ impl GenesisConfig {
             header,
             transactions: Vec::new(),
             votes: Vec::new(),
+            inference_proofs: Vec::new(),
             signature: Signature::ZERO,
         }
     }

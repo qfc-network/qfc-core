@@ -153,6 +153,31 @@ impl TaskPool {
         }
     }
 
+    /// Prune expired public tasks and return them (for refund)
+    /// A task is expired if now > submitted_at + 60_000ms (deadline)
+    pub fn prune_expired_public(&mut self, now: u64) -> Vec<PublicTask> {
+        let mut expired = Vec::new();
+        let expired_ids: Vec<Hash> = self
+            .public_tasks
+            .iter()
+            .filter(|(_, t)| {
+                matches!(
+                    t.status,
+                    PublicTaskStatus::Pending | PublicTaskStatus::Assigned
+                ) && now > t.inner_task.deadline
+            })
+            .map(|(id, _)| *id)
+            .collect();
+
+        for id in expired_ids {
+            if let Some(mut task) = self.public_tasks.remove(&id) {
+                task.status = PublicTaskStatus::Expired;
+                expired.push(task);
+            }
+        }
+        expired
+    }
+
     /// Generate a unique task ID
     fn next_task_id(&mut self, epoch: u64) -> Hash {
         self.task_counter += 1;

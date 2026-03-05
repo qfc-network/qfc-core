@@ -7,9 +7,10 @@ use qfc_crypto::{blake3_hash, vrf_output_to_f64, vrf_verify_with_seed, VrfKeypai
 use qfc_pow::{calculate_hashrate, initial_difficulty, verify_proof};
 use qfc_storage;
 use qfc_types::{
-    Address, Block, BlockHeader, DifficultyConfig, DoubleSignEvidence, Epoch, Hash, MiningTask,
-    Receipt, Signature, Transaction, ValidatorCheckpoint, ValidatorNode, Vote, WorkProof,
-    BLOCK_VERSION, DEFAULT_BLOCK_GAS_LIMIT, FINALITY_THRESHOLD, SLASH_DOUBLE_SIGN_PERCENT,
+    Address, Block, BlockHeader, DifficultyConfig, DoubleSignEvidence, Epoch, Hash, InferenceProof,
+    MiningTask, Receipt, Signature, Transaction, ValidatorCheckpoint, ValidatorNode, Vote,
+    WorkProof, BLOCK_VERSION, DEFAULT_BLOCK_GAS_LIMIT, FINALITY_THRESHOLD,
+    SLASH_DOUBLE_SIGN_PERCENT,
 };
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -257,6 +258,7 @@ impl ConsensusEngine {
         receipts: Vec<Receipt>,
         state_root: Hash,
         gas_used: u64,
+        inference_proofs: Vec<InferenceProof>,
     ) -> Result<Block> {
         let validator_key = self
             .validator_key
@@ -286,6 +288,13 @@ impl ConsensusEngine {
             .collect();
         let receipts_root = qfc_crypto::merkle_root(&receipt_hashes);
 
+        // Compute inference proofs root (v2.0)
+        let proof_hashes: Vec<Hash> = inference_proofs
+            .iter()
+            .map(|p| blake3_hash(&p.to_bytes_without_signature()))
+            .collect();
+        let proofs_root = qfc_crypto::merkle_root(&proof_hashes);
+
         let our_address = self.address.ok_or(ConsensusError::NotValidator)?;
         let validator = self
             .validators
@@ -302,6 +311,7 @@ impl ConsensusEngine {
             state_root,
             transactions_root,
             receipts_root,
+            proofs_root,
             producer: our_address,
             contribution_score: validator.contribution_score,
             vrf_proof,
@@ -312,6 +322,7 @@ impl ConsensusEngine {
         };
 
         let mut block = Block::new(header, transactions);
+        block.inference_proofs = inference_proofs;
 
         // Sign the block
         let block_hash = blake3_hash(&block.header_bytes());
@@ -373,6 +384,23 @@ impl ConsensusEngine {
         // 6. Check block size
         if block.transactions.len() > qfc_types::MAX_TRANSACTIONS_PER_BLOCK {
             return Err(ConsensusError::BlockTooLarge);
+        }
+
+        // 7. Verify inference proofs root (v2.0, skip for version < 2)
+        if block.header.version >= 2 || !block.inference_proofs.is_empty() {
+            let proof_hashes: Vec<Hash> = block
+                .inference_proofs
+                .iter()
+                .map(|p| blake3_hash(&p.to_bytes_without_signature()))
+                .collect();
+            let expected_proofs_root = qfc_crypto::merkle_root(&proof_hashes);
+            if block.header.proofs_root != expected_proofs_root {
+                return Err(ConsensusError::InvalidStateTransition);
+            }
+
+            if block.inference_proofs.len() > qfc_types::MAX_INFERENCE_PROOFS_PER_BLOCK {
+                return Err(ConsensusError::BlockTooLarge);
+            }
         }
 
         Ok(())
