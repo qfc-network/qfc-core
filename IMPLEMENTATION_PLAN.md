@@ -283,3 +283,77 @@ cargo build --release
 - Binary: `target/release/qfc-node`
 - Build time: ~4 minutes
 - Status: Success (with minor warnings in qfc-qsc, qfc-qvm, qfc-lsp)
+
+---
+
+# v2.0: AI Inference Compute
+
+## Overview
+
+Replace PoW mining (20% compute weight) with AI inference as the compute contribution mechanism. Miners run real ML models and submit verifiable inference proofs.
+
+## New Crates
+
+| Crate | Purpose |
+|-------|---------|
+| `qfc-inference` | InferenceEngine trait, CpuEngine, ModelRegistry, proof types |
+| `qfc-ai-coordinator` | Task pool, miner assignment, spot-check verification |
+| `qfc-miner` | InferenceMiner — runs tasks and submits proofs via RPC |
+
+## Phase 5 (v2.0): Inference Runtime ✅ COMPLETE
+
+- `qfc-inference` crate: InferenceEngine trait, CpuEngine (deterministic placeholder)
+- Types: InferenceProof, InferenceTask, ComputeTaskType, ModelId, BackendType
+- ModelRegistry with governance-approved model list
+- Hardware detection (GpuTier: Hot/Warm/Cold)
+- PoC scoring v2: inference_score replaces hashrate in contribution calculation
+
+## Phase 6 (v2.0): Candle ML Integration ✅ COMPLETE
+
+- `candle` feature flag for real BERT embedding inference
+- Model download/cache system (ModelCache)
+- CPU + Metal backend support
+- Deterministic output hashing (blake3) for verifiable proofs
+
+## Phase 7 (v2.0): End-to-End Integration ✅ COMPLETE
+
+- `qfc-miner` crate: InferenceMiner polls tasks, runs inference, submits proofs
+- `qfc-ai-coordinator`: TaskPool, MinerRegistry, assignment by capability
+- RPC endpoint: `qfc_submitInferenceProof`
+- Proof signing + P2P broadcast via ValidatorMessage::InferenceProof
+
+## Phase 8 (v2.0): Spot-Check Verification ✅ COMPLETE
+
+### Goal
+When a validator receives an InferenceProof over P2P, validate it and probabilistically re-execute ~5% of proofs to detect fraud.
+
+### Files Modified
+
+1. **`crates/qfc-types/src/validator.rs`** ✅
+   - Added `InvalidInference` variant to `SlashableOffense`
+
+2. **`crates/qfc-node/src/sync.rs`** ✅
+   - Added `inference_engine` + `model_registry` fields to `SyncManager`
+   - Added `with_inference_engine()` builder method
+   - Implemented `handle_inference_proof()`:
+     - Validator lookup + active check
+     - Ed25519 signature verification
+     - Borsh roundtrip conversion (qfc_types → qfc_inference)
+     - `verify_basic()` — epoch, model, FLOPS checks
+     - `should_spot_check()` — deterministic 5% selection
+     - `verify_spot_check()` — re-execute and compare output hashes
+     - Slash on `OutputHashMismatch` (5% stake, 6h jail)
+     - `update_inference_score()` on success
+   - Added `InvalidInference` handling in `handle_slashing_evidence` (5% slash, 6h jail)
+
+3. **`crates/qfc-node/src/main.rs`** ✅
+   - Wired `CpuEngine` into `SyncManager` via `with_inference_engine()` at startup
+
+4. **`crates/qfc-ai-coordinator/src/verification.rs`** ✅
+   - Added `test_verify_spot_check_pass` — valid proof, re-execution matches
+   - Added `test_verify_spot_check_mismatch` — tampered output_hash, returns `OutputHashMismatch`
+
+### Verification Results (2026-03-05)
+
+- `cargo check --all` — ✅ compiles cleanly
+- `cargo test --all --lib` — ✅ 316 tests passed (including 2 new spot-check tests)
