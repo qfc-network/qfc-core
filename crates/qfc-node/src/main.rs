@@ -188,6 +188,27 @@ async fn main() -> Result<()> {
     let proof_pool = Arc::new(RwLock::new(ProofPool::new()));
     let task_pool = Arc::new(RwLock::new(TaskPool::new()));
 
+    // v2.0 P2: Shared challenge generator, redundant verifier, task router
+    let challenge_generator = Arc::new(RwLock::new(
+        qfc_ai_coordinator::challenge::ChallengeGenerator::new(),
+    ));
+    let redundant_verifier = Arc::new(RwLock::new(
+        qfc_ai_coordinator::redundant::RedundantVerifier::default(),
+    ));
+    let task_router = Arc::new(RwLock::new(qfc_ai_coordinator::router::TaskRouter::new()));
+
+    // Initialize challenge pool with CpuEngine
+    {
+        let cpu_engine = qfc_inference::backend::cpu::CpuEngine::new();
+        let epoch = consensus.get_epoch();
+        let epoch_seed = u64::from_le_bytes(epoch.seed[..8].try_into().unwrap_or([0u8; 8]));
+        let mut gen = challenge_generator.write();
+        // Use a blocking spawn since generate_challenges is async
+        // But since CpuEngine is fast, we can use block_on safely at startup
+        let rt = tokio::runtime::Handle::current();
+        rt.block_on(gen.generate_challenges(&cpu_engine, epoch.number, epoch_seed));
+    }
+
     // Start P2P network first (so we can pass it to RPC server)
     let network_result: Option<(Arc<NetworkService>, Arc<SyncManager>)> = if !args.no_network {
         let mut network_config = if args.dev {
@@ -221,6 +242,8 @@ async fn main() -> Result<()> {
                     let engine = qfc_inference::backend::cpu::CpuEngine::new();
                     sm.with_inference_engine(Box::new(engine))
                         .with_proof_pool(proof_pool.clone())
+                        .with_challenge_generator(challenge_generator.clone())
+                        .with_redundant_verifier(redundant_verifier.clone())
                 };
                 let sync_manager = Arc::new(sync_manager);
                 let sync_manager_for_messages = sync_manager.clone();
@@ -277,7 +300,10 @@ async fn main() -> Result<()> {
         rpc_server = rpc_server
             .with_inference_engine(rpc_engine)
             .with_proof_pool(proof_pool.clone())
-            .with_task_pool(task_pool.clone());
+            .with_task_pool(task_pool.clone())
+            .with_challenge_generator(challenge_generator.clone())
+            .with_redundant_verifier(redundant_verifier.clone())
+            .with_task_router(task_router.clone());
 
         let handle = rpc_server
             .start(rpc_config)

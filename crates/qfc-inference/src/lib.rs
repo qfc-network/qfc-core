@@ -22,10 +22,14 @@ pub mod model;
 pub mod models;
 pub mod proof;
 pub mod runtime;
+pub mod scheduler;
 pub mod task;
 
 pub use proof::{ComputeProof, InferenceProof, InferenceResult};
-pub use runtime::{BackendType, BenchmarkResult, GpuTier, HardwareInfo};
+pub use runtime::{
+    compute_benchmark_score, validate_gpu_claim, BackendType, BenchmarkResult, GpuTier,
+    HardwareInfo,
+};
 pub use task::{ComputeTaskType, InferenceTask, ModelId};
 
 use async_trait::async_trait;

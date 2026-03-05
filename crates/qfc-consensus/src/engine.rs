@@ -924,6 +924,45 @@ impl ConsensusEngine {
     }
 
     /// Update a validator's inference score from AI compute (v2.0)
+    /// Register a miner's GPU profile (P2)
+    pub fn register_miner_profile(
+        &self,
+        address: &Address,
+        gpu_model: String,
+        benchmark_score: u32,
+        gpu_tier: u8,
+        gpu_memory_mb: u64,
+        compute_backend: Option<qfc_types::BackendType>,
+    ) {
+        let mut validators = self.validators.write();
+        if let Some(v) = validators.iter_mut().find(|v| v.address == *address) {
+            v.gpu_model = gpu_model;
+            v.benchmark_score = benchmark_score;
+            v.gpu_tier = gpu_tier;
+            v.gpu_memory_mb = gpu_memory_mb;
+            v.provides_compute = true;
+            if let Some(backend) = compute_backend {
+                v.compute_backend = Some(backend);
+            }
+            info!(
+                "Registered miner profile for {}: T{}, score={}",
+                address, gpu_tier, benchmark_score
+            );
+        }
+    }
+
+    /// Reduce a validator's reputation by `reduction_bps` basis points (P2)
+    pub fn reduce_reputation(&self, address: &Address, reduction_bps: u32) {
+        let mut validators = self.validators.write();
+        if let Some(v) = validators.iter_mut().find(|v| v.address == *address) {
+            v.reputation = v.reputation.saturating_sub(reduction_bps);
+            debug!(
+                "Reduced reputation for {} by {} bps, now {}",
+                address, reduction_bps, v.reputation
+            );
+        }
+    }
+
     pub fn update_inference_score(&self, validator: &Address, flops: u64, tasks_completed: u64) {
         let mut validators = self.validators.write();
         if let Some(v) = validators.iter_mut().find(|v| v.address == *validator) {

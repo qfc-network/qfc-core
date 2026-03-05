@@ -124,6 +124,19 @@ pub trait QfcApi {
     async fn request_faucet(&self, address: String, amount: String)
         -> RpcResult<RpcFaucetResponse>;
 
+    // ---- v2.0: Miner registration ----
+
+    /// Register a miner with GPU profile and benchmark score
+    #[method(name = "registerMiner")]
+    async fn register_miner(
+        &self,
+        req: RpcRegisterMinerRequest,
+    ) -> RpcResult<RpcRegisterMinerResult>;
+
+    /// Report miner status (loaded models, pending tasks)
+    #[method(name = "reportMinerStatus")]
+    async fn report_miner_status(&self, req: RpcMinerStatusReport) -> RpcResult<bool>;
+
     // ---- v2.0: AI Compute endpoints ----
 
     /// Get compute info for this node (backend, models, GPU memory, inference score)
@@ -402,4 +415,59 @@ pub struct RpcPublicTaskStatus {
     pub execution_time_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fee: Option<String>,
+}
+
+// ============ v2.0 P2: Miner Registration & Status Report Types ============
+
+/// Request to register a miner with GPU profile
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcRegisterMinerRequest {
+    /// Miner wallet address (hex)
+    pub miner_address: String,
+    /// GPU model name (e.g. "NVIDIA RTX 4090")
+    pub gpu_model: String,
+    /// VRAM in MB
+    pub vram_mb: u64,
+    /// Benchmark score (0-10000)
+    pub benchmark_score: u32,
+    /// Backend: "CUDA", "Metal", "CPU"
+    pub backend: String,
+    /// Ed25519 signature over (miner_address || gpu_model || benchmark_score)
+    pub signature: String,
+}
+
+/// Result of miner registration
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcRegisterMinerResult {
+    pub registered: bool,
+    pub assigned_tier: u8,
+    pub message: String,
+}
+
+/// Miner status report (loaded models, pending tasks)
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcMinerStatusReport {
+    /// Miner wallet address (hex)
+    pub miner_address: String,
+    /// Currently loaded models with their layer status
+    pub loaded_models: Vec<RpcModelStatus>,
+    /// Number of pending tasks
+    pub pending_tasks: u32,
+    /// Ed25519 signature
+    pub signature: String,
+}
+
+/// Model status on a miner
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcModelStatus {
+    /// Model name
+    pub model_name: String,
+    /// Model version
+    pub model_version: String,
+    /// Layer: "hot", "warm", "cold"
+    pub layer: String,
 }

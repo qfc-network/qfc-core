@@ -138,13 +138,16 @@ impl InferenceEngine for CpuEngine {
         let ops = (size * size) as f64;
         let flops = ops / elapsed.as_secs_f64();
 
-        Ok(BenchmarkResult {
+        let mut result = BenchmarkResult {
             flops,
             tokens_per_second: 0.0,
             memory_bandwidth_gbps: 0.0,
             backend: BackendType::Cpu,
             benchmark_time_ms: elapsed.as_millis() as u64,
-        })
+            score: 0,
+        };
+        result.score = crate::runtime::compute_benchmark_score(&result).0;
+        Ok(result)
     }
 }
 

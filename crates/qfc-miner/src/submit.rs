@@ -211,6 +211,188 @@ pub async fn submit_proof(
         .ok_or_else(|| SubmitError::SerializationError("No result in response".to_string()))
 }
 
+/// Register miner request
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RegisterMinerReq {
+    miner_address: String,
+    gpu_model: String,
+    vram_mb: u64,
+    benchmark_score: u32,
+    backend: String,
+    signature: String,
+}
+
+/// Register miner result
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegisterMinerResult {
+    pub registered: bool,
+    pub assigned_tier: u8,
+    pub message: String,
+}
+
+/// Register the miner with the validator node
+pub async fn register_miner(
+    rpc_url: &str,
+    miner_address: &str,
+    gpu_model: &str,
+    vram_mb: u64,
+    benchmark_score: u32,
+    backend: BackendType,
+    keypair: &qfc_crypto::Keypair,
+) -> Result<RegisterMinerResult, SubmitError> {
+    let sig_payload = format!("{}{}{}", miner_address, gpu_model, benchmark_score);
+    let sig_hash = qfc_crypto::blake3_hash(sig_payload.as_bytes());
+    let signature = keypair.sign_hash(&sig_hash);
+
+    let req = RegisterMinerReq {
+        miner_address: miner_address.to_string(),
+        gpu_model: gpu_model.to_string(),
+        vram_mb,
+        benchmark_score,
+        backend: format!("{}", backend),
+        signature: hex::encode(signature.as_bytes()),
+    };
+
+    let rpc_request = JsonRpcRequest {
+        jsonrpc: "2.0",
+        method: "qfc_registerMiner",
+        params: vec![req],
+        id: 1,
+    };
+
+    let body = serde_json::to_string(&rpc_request)
+        .map_err(|e| SubmitError::SerializationError(e.to_string()))?;
+
+    info!("Registering miner at {}", rpc_url);
+
+    let output = tokio::process::Command::new("curl")
+        .args([
+            "-s",
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            &body,
+            rpc_url,
+        ])
+        .output()
+        .await
+        .map_err(|e| SubmitError::ConnectionFailed(e.to_string()))?;
+
+    if !output.status.success() {
+        return Err(SubmitError::ConnectionFailed(
+            "curl request failed".to_string(),
+        ));
+    }
+
+    let response_str = String::from_utf8(output.stdout)
+        .map_err(|e| SubmitError::SerializationError(e.to_string()))?;
+
+    let response: JsonRpcResponse<RegisterMinerResult> = serde_json::from_str(&response_str)
+        .map_err(|e| SubmitError::SerializationError(format!("Parse response: {}", e)))?;
+
+    if let Some(err) = response.error {
+        return Err(SubmitError::ProofRejected(err.message));
+    }
+
+    response
+        .result
+        .ok_or_else(|| SubmitError::SerializationError("No result in response".to_string()))
+}
+
+/// Miner status report request
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MinerStatusReportReq {
+    miner_address: String,
+    loaded_models: Vec<MinerModelStatusReq>,
+    pending_tasks: u32,
+    signature: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MinerModelStatusReq {
+    model_name: String,
+    model_version: String,
+    layer: String,
+}
+
+/// Report miner status to the validator
+pub async fn report_miner_status(
+    rpc_url: &str,
+    miner_address: &str,
+    loaded_models: Vec<(String, String, String)>, // (name, version, layer)
+    pending_tasks: u32,
+    keypair: &qfc_crypto::Keypair,
+) -> Result<bool, SubmitError> {
+    let sig_payload = format!("{}{}", miner_address, pending_tasks);
+    let sig_hash = qfc_crypto::blake3_hash(sig_payload.as_bytes());
+    let signature = keypair.sign_hash(&sig_hash);
+
+    let req = MinerStatusReportReq {
+        miner_address: miner_address.to_string(),
+        loaded_models: loaded_models
+            .into_iter()
+            .map(|(n, v, l)| MinerModelStatusReq {
+                model_name: n,
+                model_version: v,
+                layer: l,
+            })
+            .collect(),
+        pending_tasks,
+        signature: hex::encode(signature.as_bytes()),
+    };
+
+    let rpc_request = JsonRpcRequest {
+        jsonrpc: "2.0",
+        method: "qfc_reportMinerStatus",
+        params: vec![req],
+        id: 1,
+    };
+
+    let body = serde_json::to_string(&rpc_request)
+        .map_err(|e| SubmitError::SerializationError(e.to_string()))?;
+
+    let output = tokio::process::Command::new("curl")
+        .args([
+            "-s",
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            &body,
+            rpc_url,
+        ])
+        .output()
+        .await
+        .map_err(|e| SubmitError::ConnectionFailed(e.to_string()))?;
+
+    if !output.status.success() {
+        return Err(SubmitError::ConnectionFailed(
+            "curl request failed".to_string(),
+        ));
+    }
+
+    let response_str = String::from_utf8(output.stdout)
+        .map_err(|e| SubmitError::SerializationError(e.to_string()))?;
+
+    let response: JsonRpcResponse<bool> = serde_json::from_str(&response_str)
+        .map_err(|e| SubmitError::SerializationError(format!("Parse response: {}", e)))?;
+
+    if let Some(err) = response.error {
+        return Err(SubmitError::ProofRejected(err.message));
+    }
+
+    response
+        .result
+        .ok_or_else(|| SubmitError::SerializationError("No result in response".to_string()))
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SubmitError {
     #[error("RPC connection failed: {0}")]

@@ -81,21 +81,74 @@ async fn main() -> anyhow::Result<()> {
 
     // Run benchmark
     info!("Running hardware benchmark...");
-    match engine.benchmark() {
+    let bench_score = match engine.benchmark() {
         Ok(bench) => {
+            let (score, tier) = qfc_inference::compute_benchmark_score(&bench);
             info!(
-                "Benchmark: {:.2} MFLOPS ({} ms)",
+                "Benchmark: {:.2} MFLOPS ({} ms), score: {}, tier: T{}",
                 bench.flops / 1e6,
-                bench.benchmark_time_ms
+                bench.benchmark_time_ms,
+                score,
+                tier
             );
+            Some((score, tier))
         }
         Err(e) => {
             tracing::warn!("Benchmark failed: {}", e);
+            None
+        }
+    };
+
+    // Register miner with validator
+    if let Some((score, _tier)) = bench_score {
+        let keypair = qfc_crypto::Keypair::from_secret_bytes(&secret_key).expect("validated above");
+        let miner_addr = hex::encode(wallet_address.as_bytes());
+        match submit::register_miner(
+            &validator_rpc,
+            &miner_addr,
+            &hw.device_name,
+            hw.memory_mb,
+            score,
+            backend,
+            &keypair,
+        )
+        .await
+        {
+            Ok(result) => {
+                if result.registered {
+                    info!(
+                        "Miner registered: T{} — {}",
+                        result.assigned_tier, result.message
+                    );
+                } else {
+                    tracing::warn!("Registration failed: {}", result.message);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to register miner: {}", e);
+            }
+        }
+    }
+
+    // Create model scheduler
+    let vram_budget =
+        qfc_inference::scheduler::VramBudget::new(max_memory as u32, cli.vram_reserved_mb);
+    let mut scheduler = qfc_inference::scheduler::ModelScheduler::new(vram_budget, 20);
+
+    // Register hot models from CLI
+    if !cli.hot_models.is_empty() {
+        for model_spec in cli.hot_models.split(',') {
+            let model_spec = model_spec.trim();
+            if !model_spec.is_empty() {
+                let model_id = qfc_inference::task::ModelId::new(model_spec, "v1");
+                scheduler.add_hot_model(model_id.clone(), 0);
+                info!("Hot model registered: {}", model_spec);
+            }
         }
     }
 
     // Start worker
-    let mut worker = worker::InferenceWorker::new(config, engine);
+    let mut worker = worker::InferenceWorker::new(config, engine, scheduler);
 
     info!("Connecting to validator at {}...", validator_rpc);
     worker.run().await;

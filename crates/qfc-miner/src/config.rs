@@ -33,6 +33,18 @@ pub struct MinerCli {
     #[arg(long)]
     pub private_key: String,
 
+    /// Comma-separated list of models to keep hot in VRAM
+    #[arg(long, default_value = "")]
+    pub hot_models: String,
+
+    /// Maximum VRAM in MB for warm model layer (0 = auto)
+    #[arg(long, default_value = "5000")]
+    pub warm_max_mb: u32,
+
+    /// VRAM reserved for system/overhead in MB
+    #[arg(long, default_value = "800")]
+    pub vram_reserved_mb: u32,
+
     /// Enable verbose logging
     #[arg(short, long)]
     pub verbose: bool,

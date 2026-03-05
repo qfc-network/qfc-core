@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use qfc_inference::proof::InferenceProof;
 use qfc_inference::runtime::{classify_tier, GpuTier};
+use qfc_inference::scheduler::ModelScheduler;
 use qfc_inference::task::{ComputeTaskType, InferenceTask, ModelId};
 use qfc_inference::InferenceEngine;
 use qfc_types::Hash;
@@ -19,14 +20,20 @@ use crate::submit::{self, InferenceTaskResponse};
 pub struct InferenceWorker {
     config: MinerConfig,
     engine: Box<dyn InferenceEngine>,
+    scheduler: ModelScheduler,
     stop_flag: Arc<AtomicBool>,
 }
 
 impl InferenceWorker {
-    pub fn new(config: MinerConfig, engine: Box<dyn InferenceEngine>) -> Self {
+    pub fn new(
+        config: MinerConfig,
+        engine: Box<dyn InferenceEngine>,
+        scheduler: ModelScheduler,
+    ) -> Self {
         Self {
             config,
             engine,
+            scheduler,
             stop_flag: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -42,11 +49,19 @@ impl InferenceWorker {
         );
 
         let mut epoch_timer = interval(Duration::from_secs(10));
+        let mut status_timer = interval(Duration::from_secs(30));
         let mut tasks_completed: u64 = 0;
         let mut tasks_failed: u64 = 0;
 
         loop {
-            epoch_timer.tick().await;
+            tokio::select! {
+                _ = epoch_timer.tick() => {},
+                _ = status_timer.tick() => {
+                    // Periodic status report
+                    self.report_status().await;
+                    continue;
+                },
+            }
 
             if self.stop_flag.load(Ordering::Relaxed) {
                 info!("Inference worker stopped");
@@ -83,12 +98,21 @@ impl InferenceWorker {
                 }
             };
 
-            // 3. Ensure model is loaded
+            // 3. Ensure model is loaded via scheduler
             let model_id = ModelId::new(&task_response.model_name, &task_response.model_version);
-            if let Err(e) = self.engine.load_model(&model_id).await {
-                warn!("Failed to load model {}: {}", model_id, e);
-                tasks_failed += 1;
-                continue;
+            match self
+                .scheduler
+                .ensure_model_loaded(&model_id, &mut *self.engine)
+                .await
+            {
+                Ok(layer) => {
+                    debug!("Model {} loaded as {:?}", model_id, layer);
+                }
+                Err(e) => {
+                    warn!("Failed to load model {}: {}", model_id, e);
+                    tasks_failed += 1;
+                    continue;
+                }
             }
 
             // 4. Run inference
@@ -220,6 +244,32 @@ impl InferenceWorker {
             now,
             resp.deadline,
         ))
+    }
+
+    /// Report miner status to the validator
+    async fn report_status(&self) {
+        let miner_addr = hex::encode(self.config.wallet_address.as_bytes());
+        let loaded_models: Vec<(String, String, String)> = self
+            .scheduler
+            .report_loaded_models()
+            .into_iter()
+            .map(|(id, layer)| (id.name.clone(), id.version.clone(), layer.to_string()))
+            .collect();
+
+        let keypair = qfc_crypto::Keypair::from_secret_bytes(&self.config.secret_key)
+            .expect("validated at startup");
+
+        if let Err(e) = submit::report_miner_status(
+            &self.config.validator_rpc,
+            &miner_addr,
+            loaded_models,
+            0, // pending tasks
+            &keypair,
+        )
+        .await
+        {
+            debug!("Failed to report status: {}", e);
+        }
     }
 
     /// Stop the worker

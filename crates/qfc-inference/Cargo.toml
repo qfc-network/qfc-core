@@ -18,6 +18,7 @@ tracing.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
 blake3.workspace = true
+lru.workspace = true
 
 # candle ML framework (optional, behind feature flags)
 candle-core = { workspace = true, optional = true }
