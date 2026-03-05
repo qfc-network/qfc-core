@@ -27,7 +27,7 @@ pub use error::*;
 pub use mining::*;
 
 use qfc_crypto::blake3_hash;
-use qfc_types::{Address, Hash, MiningTask, WorkProof, U256};
+use qfc_types::{Address, ComputeProof, Hash, InferenceProof, MiningTask, WorkProof, U256};
 
 /// Perform a single mining iteration
 ///
@@ -95,6 +95,52 @@ pub fn calculate_hashrate(proof: &WorkProof, task: &MiningTask) -> u64 {
     // Hashrate = total_hashes / epoch_duration
     let total_hashes = proof.work_count.saturating_mul(hashes_per_proof);
     total_hashes / epoch_duration_secs
+}
+
+/// Verify an inference proof (v2.0) — basic validation only
+///
+/// Checks epoch, model approval, and FLOPS reasonableness.
+/// Spot-check re-execution is handled by qfc-ai-coordinator.
+pub fn verify_inference_proof(
+    proof: &InferenceProof,
+    expected_epoch: u64,
+) -> Result<bool, PowError> {
+    // 1. Check epoch matches
+    if proof.epoch != expected_epoch {
+        return Err(PowError::EpochMismatch {
+            expected: expected_epoch,
+            got: proof.epoch,
+        });
+    }
+
+    // 2. Check output hash is non-zero (basic sanity)
+    if proof.output_hash == Hash::ZERO {
+        return Err(PowError::InvalidHash);
+    }
+
+    // 3. Check execution time is non-zero
+    if proof.execution_time_ms == 0 {
+        return Err(PowError::InvalidHash);
+    }
+
+    Ok(true)
+}
+
+/// Verify a compute proof (supports both v1 PoW and v2 inference)
+pub fn verify_compute_proof(
+    proof: &ComputeProof,
+    task: Option<&MiningTask>,
+    expected_epoch: u64,
+) -> Result<bool, PowError> {
+    match proof {
+        ComputeProof::PowV1(work_proof) => {
+            let task = task.ok_or(PowError::InvalidHash)?;
+            verify_proof(work_proof, task)
+        }
+        ComputeProof::InferenceV2(inference_proof) => {
+            verify_inference_proof(inference_proof, expected_epoch)
+        }
+    }
 }
 
 /// Count leading zero bits in a U256

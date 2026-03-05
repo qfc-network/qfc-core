@@ -25,10 +25,32 @@ impl Default for NetworkState {
 }
 
 /// Calculate contribution score for a validator
+///
+/// Supports both v1 (hashrate) and v2 (inference_score) compute metrics.
+/// When `total_inference_score > 0`, uses v2 scoring for the compute dimension.
 pub fn calculate_contribution_score(
     validator: &ValidatorNode,
     total_stake: u128,
     total_hashrate: u64,
+    total_storage_gb: u64,
+    network_state: NetworkState,
+) -> u64 {
+    calculate_contribution_score_v2(
+        validator,
+        total_stake,
+        total_hashrate,
+        0, // no inference score totals yet → falls back to v1
+        total_storage_gb,
+        network_state,
+    )
+}
+
+/// Calculate contribution score with v2 inference support
+pub fn calculate_contribution_score_v2(
+    validator: &ValidatorNode,
+    total_stake: u128,
+    total_hashrate: u64,
+    total_inference_score: u64,
     total_storage_gb: u64,
     network_state: NetworkState,
 ) -> u64 {
@@ -40,10 +62,19 @@ pub fn calculate_contribution_score(
         score += stake_ratio * WEIGHT_STAKE;
     }
 
-    // 2. Compute contribution (20%) - optional
-    if validator.provides_compute && total_hashrate > 0 {
-        let compute_ratio = validator.hashrate as f64 / total_hashrate as f64;
-        score += compute_ratio * WEIGHT_COMPUTE;
+    // 2. Compute contribution (20%) — v2 inference or v1 hashrate
+    if validator.provides_compute {
+        if total_inference_score > 0 && validator.inference_score > 0 {
+            // v2: Use inference_score
+            // inference_score = f(flops, tasks_completed, verification_pass_rate)
+            let compute_ratio =
+                validator.inference_score as f64 / total_inference_score as f64;
+            score += compute_ratio * WEIGHT_COMPUTE;
+        } else if total_hashrate > 0 {
+            // v1 fallback: Use hashrate
+            let compute_ratio = validator.hashrate as f64 / total_hashrate as f64;
+            score += compute_ratio * WEIGHT_COMPUTE;
+        }
     }
 
     // 3. Uptime (15%)
@@ -124,6 +155,37 @@ pub fn total_contribution_score(validators: &[ValidatorNode]) -> u64 {
     validators.iter().map(|v| v.contribution_score).sum()
 }
 
+/// Calculate inference score for a validator (v2.0)
+///
+/// inference_score = flops_weight * tasks_completed * verification_pass_rate
+pub fn calculate_inference_score(
+    flops_total: u64,
+    tasks_completed: u64,
+    verification_pass_rate: f64,
+) -> u64 {
+    if tasks_completed == 0 {
+        return 0;
+    }
+
+    // Normalize FLOPS to a manageable range (divide by 1 GFLOPS)
+    let flops_normalized = (flops_total as f64 / 1_000_000_000.0).min(1_000_000.0);
+
+    // Score = FLOPS_weight * sqrt(tasks) * pass_rate^2
+    // sqrt(tasks) to diminish returns from sheer volume
+    // pass_rate^2 to heavily penalize failed verifications
+    let score = flops_normalized
+        * (tasks_completed as f64).sqrt()
+        * verification_pass_rate
+        * verification_pass_rate;
+
+    (score * 1000.0) as u64 // Scale for integer precision
+}
+
+/// Calculate total inference score across all validators
+pub fn total_inference_score(validators: &[ValidatorNode]) -> u64 {
+    validators.iter().map(|v| v.inference_score).sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,5 +237,43 @@ mod tests {
             calculate_contribution_score(&validator, 100000, 10000, 0, NetworkState::Congested);
 
         assert!(congested_score > normal_score);
+    }
+
+    #[test]
+    fn test_inference_score_calculation() {
+        // No tasks = 0 score
+        assert_eq!(calculate_inference_score(0, 0, 1.0), 0);
+
+        // Some tasks with perfect pass rate
+        let score1 = calculate_inference_score(10_000_000_000, 100, 1.0);
+        assert!(score1 > 0);
+
+        // Same FLOPS but lower pass rate → lower score
+        let score2 = calculate_inference_score(10_000_000_000, 100, 0.5);
+        assert!(score2 < score1);
+
+        // More tasks → higher score (diminishing returns via sqrt)
+        let score3 = calculate_inference_score(10_000_000_000, 400, 1.0);
+        assert!(score3 > score1);
+        // 4x tasks should give 2x score (sqrt), not 4x
+        assert!(score3 < score1 * 3);
+    }
+
+    #[test]
+    fn test_v2_scoring_with_inference() {
+        let mut v = create_test_validator(10000);
+        v.provides_compute = true;
+        v.inference_score = 5000;
+
+        let score = calculate_contribution_score_v2(
+            &v,
+            100000,
+            0,      // no hashrate
+            10000,  // total inference score
+            0,
+            NetworkState::Normal,
+        );
+
+        assert!(score > 0);
     }
 }

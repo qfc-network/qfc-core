@@ -17,6 +17,10 @@ members = [
     "crates/qfc-qvm",
     "crates/qfc-lsp",
     "crates/qfc-pow",
+    # v2.0: AI compute
+    "crates/qfc-inference",
+    "crates/qfc-ai-coordinator",
+    "crates/qfc-miner",
 ]
 
 
@@ -79,6 +83,13 @@ anyhow = "1.0"
 # Benchmarks
 criterion = "0.5"
 
+# AI / ML inference (candle)
+candle-core = "0.9"
+candle-nn = "0.9"
+candle-transformers = "0.9"
+hf-hub = { version = "0.5", features = ["tokio"] }
+tokenizers = "0.22"
+
 # Utilities
 hex = "0.4"
 bytes = "1.5"
@@ -108,6 +119,9 @@ qfc-qsc = { path = "crates/qfc-qsc" }
 qfc-qvm = { path = "crates/qfc-qvm" }
 qfc-lsp = { path = "crates/qfc-lsp" }
 qfc-pow = { path = "crates/qfc-pow" }
+qfc-inference = { path = "crates/qfc-inference" }
+qfc-ai-coordinator = { path = "crates/qfc-ai-coordinator" }
+qfc-miner = { path = "crates/qfc-miner" }
 
 [profile.release]
 lto = true

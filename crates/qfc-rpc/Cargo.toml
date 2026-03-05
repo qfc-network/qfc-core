@@ -25,4 +25,8 @@ async-trait.workspace = true
 tracing.workspace = true
 hex.workspace = true
 
+qfc-inference.workspace = true
+qfc-ai-coordinator.workspace = true
+borsh.workspace = true
+
 [dev-dependencies]

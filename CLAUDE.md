@@ -126,6 +126,25 @@ Proof of Contribution (PoC) - 多维度贡献评分:
   - [x] 状态剪枝 (StatePruner - 保留最近N个区块状态)
   - [x] 快照同步 (SnapSyncManager - 快速状态下载)
 
+- [x] Phase 4 (v2.0): AI 推理计算基础
+  - [x] qfc-inference crate (InferenceEngine trait, CpuEngine, ModelRegistry)
+  - [x] qfc-ai-coordinator crate (TaskPool, MinerRegistry, 验证逻辑)
+  - [x] 推理类型定义 (InferenceProof, InferenceTask, ComputeTaskType)
+  - [x] PoC 评分 v2 集成 (inference_score 替代 hashrate)
+- [x] Phase 5 (v2.0): Candle ML 集成
+  - [x] candle feature flag (BERT embedding 真实推理)
+  - [x] 模型下载与缓存 (ModelCache)
+  - [x] CPU/Metal 后端支持
+- [x] Phase 6 (v2.0): 端到端推理集成
+  - [x] qfc-miner crate (InferenceMiner + RPC 提交)
+  - [x] RPC 端点 (qfc_submitInferenceProof)
+  - [x] 推理证明签名与广播
+- [x] Phase 7 (v2.0): 抽查验证与惩罚
+  - [x] handle_inference_proof() — 完整 P2P 验证流程
+  - [x] 5% 概率抽查重新执行 (spot-check)
+  - [x] InvalidInference 惩罚 (5% stake, 6h jail)
+  - [x] CpuEngine 接入 SyncManager 用于验证
+
 ## 设计文档
 
 参考 `../qfc-design/` 目录:

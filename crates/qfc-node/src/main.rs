@@ -77,6 +77,18 @@ struct Args {
     /// Number of mining threads (default: number of CPUs)
     #[arg(long)]
     threads: Option<usize>,
+
+    /// Compute mode: pow (v1 Blake3 PoW) or inference (v2 AI inference)
+    #[arg(long, default_value = "pow")]
+    compute_mode: String,
+
+    /// Inference backend: auto, cuda, metal, cpu (for inference mode)
+    #[arg(long, default_value = "auto")]
+    inference_backend: String,
+
+    /// Model cache directory (for inference mode)
+    #[arg(long)]
+    model_dir: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -197,12 +209,18 @@ async fn main() -> Result<()> {
                 info!("P2P network started, peer ID: {}", service.local_peer_id());
                 let service = Arc::new(service);
 
-                // Start sync manager
-                let sync_manager = Arc::new(SyncManager::new(
-                    chain.clone(),
-                    mempool.clone(),
-                    service.clone(),
-                ));
+                // Start sync manager (with inference engine for spot-check verification)
+                let sync_manager = {
+                    let sm = SyncManager::new(
+                        chain.clone(),
+                        mempool.clone(),
+                        service.clone(),
+                    );
+                    // Attach a CPU inference engine for spot-check re-execution
+                    let engine = qfc_inference::backend::cpu::CpuEngine::new();
+                    sm.with_inference_engine(Box::new(engine))
+                };
+                let sync_manager = Arc::new(sync_manager);
                 let sync_manager_for_messages = sync_manager.clone();
                 let sync_manager_for_events = sync_manager.clone();
 
@@ -300,7 +318,18 @@ async fn main() -> Result<()> {
                 .unwrap_or(1)
         });
 
-        let mining_config = MiningConfig::default().with_threads(threads);
+        let compute_mode = match args.compute_mode.as_str() {
+            "inference" => miner::ComputeMode::InferenceV2,
+            _ => miner::ComputeMode::PowV1,
+        };
+
+        let mut mining_config = MiningConfig::default().with_threads(threads);
+        mining_config.compute_mode = compute_mode.clone();
+        mining_config.inference_backend = Some(args.inference_backend.clone());
+        mining_config.model_dir = args.model_dir.as_ref().map(|p| p.to_string_lossy().into_owned());
+
+        info!("Compute mode: {:?}", compute_mode);
+
         let mining_service = Arc::new(MiningService::new(
             chain.clone(),
             consensus.clone(),
@@ -336,7 +365,7 @@ async fn main() -> Result<()> {
         info!("Block producer: ACTIVE");
     }
     if mining_active {
-        info!("Mining: ACTIVE (20% compute contribution)");
+        info!("Mining: ACTIVE (20% compute contribution, mode: {})", args.compute_mode);
     }
     info!("===========================================");
 

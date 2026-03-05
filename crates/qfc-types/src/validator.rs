@@ -46,8 +46,28 @@ pub struct ValidatorNode {
     /// Whether this node provides compute (mining)
     pub provides_compute: bool,
 
-    /// Hashrate if provides compute
+    /// Hashrate if provides compute (v1 PoW)
     pub hashrate: u64,
+
+    // ---- v2.0: AI Inference fields ----
+
+    /// Compute backend type (None if not providing compute)
+    pub compute_backend: Option<crate::BackendType>,
+
+    /// Models this validator supports
+    pub supported_models: Vec<crate::ModelId>,
+
+    /// GPU/unified memory in MB
+    pub gpu_memory_mb: u64,
+
+    /// Inference score (replaces hashrate in v2 scoring)
+    pub inference_score: u64,
+
+    /// Total inference tasks completed
+    pub tasks_completed: u64,
+
+    /// Verification pass rate (0-10000 representing 0.00-100.00%)
+    pub verification_pass_rate: u32,
 
     /// Reputation score (0-100 scaled to 0-10000)
     pub reputation: u32,
@@ -94,6 +114,12 @@ impl Default for ValidatorNode {
             storage_provided_gb: 0,
             provides_compute: false,
             hashrate: 0,
+            compute_backend: None,
+            supported_models: Vec::new(),
+            gpu_memory_mb: 0,
+            inference_score: 0,
+            tasks_completed: 0,
+            verification_pass_rate: 10000, // 100% (no failures yet)
             reputation: 5000, // 50% (neutral starting point)
             registered_at: 0,
             last_active: 0,
@@ -160,6 +186,11 @@ impl ValidatorNode {
     /// Get reputation as float (0.0 - 1.0)
     pub fn reputation_ratio(&self) -> f64 {
         self.reputation as f64 / 10000.0
+    }
+
+    /// Get verification pass rate as float (0.0 - 1.0)
+    pub fn verification_pass_ratio(&self) -> f64 {
+        self.verification_pass_rate as f64 / 10000.0
     }
 
     /// Serialize validator
@@ -354,6 +385,8 @@ pub enum SlashableOffense {
     Offline,
     /// Voting for invalid block
     FalseVote,
+    /// Fraudulent inference proof (output hash mismatch on spot-check)
+    InvalidInference,
 }
 
 /// Slash result
@@ -435,8 +468,10 @@ pub enum ValidatorMessage {
     EpochAnnouncement(EpochAnnouncement),
     /// Slashing evidence
     SlashingEvidence(SlashingEvidence),
-    /// Work proof for compute contribution
+    /// Work proof for compute contribution (v1 PoW)
     WorkProof(crate::WorkProof),
+    /// Inference proof for AI compute contribution (v2.0)
+    InferenceProof(crate::InferenceProof),
 }
 
 impl ValidatorMessage {

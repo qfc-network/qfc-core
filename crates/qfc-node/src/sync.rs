@@ -9,6 +9,7 @@ use qfc_network::{NetworkMessage, NetworkService, SyncEvent, SyncRequest, SyncRe
 use qfc_rpc::SyncStatusProvider;
 use qfc_types::{
     Block, Hash, Heartbeat, SlashingEvidence, ValidatorMessage, Vote, VoteDecision, WorkProof,
+    InferenceProof,
 };
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
@@ -42,6 +43,10 @@ pub struct SyncManager {
     requested_hashes: Arc<RwLock<HashSet<Hash>>>,
     /// Highest known block from peers
     highest_peer_block: Arc<RwLock<u64>>,
+    /// Inference engine for spot-check re-execution (v2.0)
+    inference_engine: Option<Arc<tokio::sync::RwLock<Box<dyn qfc_inference::InferenceEngine>>>>,
+    /// Approved model registry for proof validation (v2.0)
+    model_registry: Arc<qfc_inference::model::ModelRegistry>,
 }
 
 impl SyncManager {
@@ -58,7 +63,15 @@ impl SyncManager {
             pending_blocks: Arc::new(RwLock::new(VecDeque::new())),
             requested_hashes: Arc::new(RwLock::new(HashSet::new())),
             highest_peer_block: Arc::new(RwLock::new(0)),
+            inference_engine: None,
+            model_registry: Arc::new(qfc_inference::model::ModelRegistry::default_v2()),
         }
+    }
+
+    /// Attach an inference engine for spot-check verification (v2.0)
+    pub fn with_inference_engine(mut self, engine: Box<dyn qfc_inference::InferenceEngine>) -> Self {
+        self.inference_engine = Some(Arc::new(tokio::sync::RwLock::new(engine)));
+        self
     }
 
     /// Get the current sync state
@@ -621,6 +634,9 @@ impl SyncManager {
             ValidatorMessage::WorkProof(proof) => {
                 self.handle_work_proof(proof).await;
             }
+            ValidatorMessage::InferenceProof(proof) => {
+                self.handle_inference_proof(proof).await;
+            }
         }
     }
 
@@ -775,6 +791,7 @@ impl SyncManager {
             qfc_types::SlashableOffense::Censorship => (3, 6 * 60 * 60 * 1000),   // 3%, 6 hours
             qfc_types::SlashableOffense::Offline => (1, 1 * 60 * 60 * 1000),      // 1%, 1 hour
             qfc_types::SlashableOffense::FalseVote => (2, 2 * 60 * 60 * 1000),    // 2%, 2 hours
+            qfc_types::SlashableOffense::InvalidInference => (5, 6 * 60 * 60 * 1000), // 5%, 6 hours
         };
 
         // Apply the slash
@@ -837,6 +854,151 @@ impl SyncManager {
         info!(
             "Received work proof from {} for epoch {}: {} valid hashes, ~{} H/s",
             proof.validator, proof.epoch, proof.work_count, estimated_hashrate
+        );
+    }
+
+    /// Handle an inference proof from an AI compute miner (v2.0)
+    async fn handle_inference_proof(&self, proof: InferenceProof) {
+        let consensus = self.chain.consensus();
+        let validators = consensus.get_validators();
+
+        // 1. Find the validator who submitted the proof
+        let validator = match validators.iter().find(|v| v.address == proof.validator) {
+            Some(v) => v,
+            None => {
+                debug!("Inference proof from unknown validator: {}", proof.validator);
+                return;
+            }
+        };
+
+        // 2. Check if validator is active
+        if !validator.is_active() {
+            debug!(
+                "Inference proof from inactive/jailed validator: {}",
+                proof.validator
+            );
+            return;
+        }
+
+        // 3. Verify the proof signature
+        let proof_hash = blake3_hash(&proof.to_bytes_without_signature());
+        if verify_hash_signature(&validator.public_key, &proof_hash, &proof.signature).is_err() {
+            warn!("Invalid inference proof signature from {}", proof.validator);
+            return;
+        }
+
+        // 4. Convert qfc_types::InferenceProof → qfc_inference::InferenceProof via borsh roundtrip
+        let proof_bytes = borsh::to_vec(&proof).unwrap();
+        let inference_proof: qfc_inference::InferenceProof = match borsh::from_slice(&proof_bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("Failed to convert inference proof: {}", e);
+                return;
+            }
+        };
+
+        // 5. Run basic verification (epoch, model, FLOPS)
+        let current_epoch = consensus.get_epoch();
+        if let Err(e) = qfc_ai_coordinator::verify_basic(
+            &inference_proof,
+            current_epoch.number,
+            &self.model_registry,
+        ) {
+            warn!(
+                "Inference proof from {} failed basic verification: {}",
+                proof.validator, e
+            );
+            return;
+        }
+
+        // 6. Probabilistic spot-check (~5%)
+        if qfc_ai_coordinator::should_spot_check(&inference_proof) {
+            if let Some(ref engine_lock) = self.inference_engine {
+                // Regenerate synthetic tasks to find the original task with correct
+                // input_data. This ensures the spot-check uses identical task_id +
+                // input_data as the miner, preventing false-positive fraud detection.
+                let epoch = consensus.get_epoch();
+                let epoch_seed = u64::from_le_bytes(
+                    epoch.seed[..8].try_into().unwrap_or([0u8; 8]),
+                );
+                let mut task_pool = qfc_ai_coordinator::TaskPool::new();
+                task_pool.generate_synthetic_tasks(proof.epoch, epoch_seed, u64::MAX);
+
+                // Find the task matching proof.input_hash (= original task_id)
+                let matching_task = {
+                    let mut found = None;
+                    while let Some(t) = task_pool.fetch_task(
+                        qfc_inference::GpuTier::Hot,
+                        u64::MAX,
+                    ) {
+                        if t.task_id == proof.input_hash {
+                            found = Some(t);
+                            break;
+                        }
+                    }
+                    found
+                };
+
+                if let Some(task) = matching_task {
+                    let engine = engine_lock.read().await;
+                    match qfc_ai_coordinator::verify_spot_check(
+                        &inference_proof,
+                        &task,
+                        &**engine,
+                    ).await {
+                        Ok(result) => {
+                            info!(
+                                "Spot-check PASSED for inference proof from {}: {}",
+                                proof.validator, result.details
+                            );
+                        }
+                        Err(qfc_ai_coordinator::VerificationError::OutputHashMismatch { expected, got }) => {
+                            warn!(
+                                "Spot-check FAILED for {}: output hash mismatch (expected {}, got {})",
+                                proof.validator,
+                                hex::encode(&expected.as_bytes()[..8]),
+                                hex::encode(&got.as_bytes()[..8]),
+                            );
+                            // Slash the miner for fraud: 5% stake, 6 hours jail
+                            consensus.slash_validator(
+                                &proof.validator,
+                                5,
+                                6 * 60 * 60 * 1000,
+                            );
+                            return;
+                        }
+                        Err(e) => {
+                            // Re-execution failure is not necessarily fraud; log and skip
+                            warn!(
+                                "Spot-check re-execution error for {}: {}",
+                                proof.validator, e
+                            );
+                        }
+                    }
+                } else {
+                    debug!(
+                        "Spot-check: no matching synthetic task for {}, skipping",
+                        proof.validator
+                    );
+                }
+            } else {
+                debug!(
+                    "Spot-check selected for {} but no inference engine available",
+                    proof.validator
+                );
+            }
+        }
+
+        // 7. Proof passed — update inference score
+        consensus.update_inference_score(
+            &proof.validator,
+            proof.flops_estimated,
+            1, // single task completed
+        );
+
+        info!(
+            "Accepted inference proof from {} for epoch {}: {} FLOPS, {}ms",
+            proof.validator, proof.epoch, proof.flops_estimated, proof.execution_time_ms
         );
     }
 

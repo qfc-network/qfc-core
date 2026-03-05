@@ -1,0 +1,83 @@
+# QFC Inference Miner Dockerfile
+# Standalone miner image for AI inference tasks
+
+# ============================================
+# Stage 1: Build
+# ============================================
+FROM rust:1.75-bookworm AS builder
+
+WORKDIR /build
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    libclang-dev \
+    cmake \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy source
+COPY . .
+
+# Build only the miner binary
+RUN cargo build --release --features candle --bin qfc-miner
+
+# ============================================
+# Stage 2: Runtime
+# ============================================
+FROM debian:bookworm-slim
+
+WORKDIR /app
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy binary from builder
+COPY --from=builder /build/target/release/qfc-miner /usr/local/bin/qfc-miner
+
+# Create model cache directory
+RUN mkdir -p /models
+
+# Environment variables
+ENV QFC_MINER_RPC_URL=http://127.0.0.1:8545
+ENV QFC_MINER_WALLET=""
+ENV QFC_MINER_BACKEND=auto
+ENV QFC_MINER_MODEL_DIR=/models
+ENV QFC_MINER_MAX_MEMORY=0
+
+# Model cache volume
+VOLUME ["/models"]
+
+# No exposed ports — miner is an RPC client
+
+# Entrypoint script
+COPY <<'EOF' /entrypoint.sh
+#!/bin/bash
+set -e
+
+if [ -z "$QFC_MINER_WALLET" ]; then
+    echo "ERROR: QFC_MINER_WALLET must be set"
+    exit 1
+fi
+
+ARGS="--validator-rpc ${QFC_MINER_RPC_URL:-http://127.0.0.1:8545}"
+ARGS="$ARGS --wallet ${QFC_MINER_WALLET}"
+ARGS="$ARGS --backend ${QFC_MINER_BACKEND:-auto}"
+ARGS="$ARGS --model-dir ${QFC_MINER_MODEL_DIR:-/models}"
+ARGS="$ARGS --max-memory ${QFC_MINER_MAX_MEMORY:-0}"
+
+if [ "$QFC_MINER_VERBOSE" = "true" ] || [ "$QFC_MINER_VERBOSE" = "1" ]; then
+    ARGS="$ARGS --verbose"
+fi
+
+echo "Starting QFC miner with: qfc-miner $ARGS"
+exec qfc-miner $ARGS
+EOF
+
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
