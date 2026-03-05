@@ -131,6 +131,20 @@ pub trait QfcApi {
     /// Get inference statistics (tasks completed, avg time, FLOPS, pass rate)
     #[method(name = "getInferenceStats")]
     async fn get_inference_stats(&self) -> RpcResult<RpcInferenceStats>;
+
+    /// Fetch an inference task for a miner (miner provides its capabilities)
+    #[method(name = "getInferenceTask")]
+    async fn get_inference_task(
+        &self,
+        request: RpcTaskRequest,
+    ) -> RpcResult<Option<RpcInferenceTask>>;
+
+    /// Submit an inference proof from a miner
+    #[method(name = "submitInferenceProof")]
+    async fn submit_inference_proof(
+        &self,
+        proof: RpcInferenceProofSubmission,
+    ) -> RpcResult<RpcProofResult>;
 }
 
 /// Faucet response
@@ -210,4 +224,74 @@ pub struct RpcInferenceStats {
     pub flops_total: String,
     /// Verification pass rate (0-100%)
     pub pass_rate: String,
+}
+
+// ============ v2.0: Task Assignment & Proof Submission Types ============
+
+/// Miner's request for an inference task
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcTaskRequest {
+    /// Miner wallet address
+    pub miner_address: String,
+    /// GPU tier: "Hot", "Warm", "Cold"
+    pub gpu_tier: String,
+    /// Available memory in MB
+    pub available_memory_mb: u64,
+    /// Backend type: "CUDA", "Metal", "CPU"
+    pub backend: String,
+}
+
+/// An inference task assigned to a miner
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcInferenceTask {
+    /// Task ID (hex)
+    pub task_id: String,
+    /// Epoch number
+    pub epoch: u64,
+    /// Task type: "embedding", "text_generation", "image_classification"
+    pub task_type: String,
+    /// Model name
+    pub model_name: String,
+    /// Model version
+    pub model_version: String,
+    /// Input data (hex-encoded)
+    pub input_data: String,
+    /// Deadline timestamp (ms)
+    pub deadline: u64,
+}
+
+/// Inference proof submitted by a miner
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcInferenceProofSubmission {
+    /// Miner wallet address
+    pub miner_address: String,
+    /// Task ID (hex)
+    pub task_id: String,
+    /// Epoch
+    pub epoch: u64,
+    /// Output hash (hex)
+    pub output_hash: String,
+    /// Execution time in ms
+    pub execution_time_ms: u64,
+    /// Estimated FLOPS
+    pub flops_estimated: u64,
+    /// Backend used: "CUDA", "Metal", "CPU"
+    pub backend: String,
+    /// Serialized proof bytes (hex)
+    pub proof_bytes: String,
+}
+
+/// Result of submitting an inference proof
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcProofResult {
+    /// Whether the proof was accepted
+    pub accepted: bool,
+    /// Whether the proof was spot-checked
+    pub spot_checked: bool,
+    /// Detail message
+    pub message: String,
 }
