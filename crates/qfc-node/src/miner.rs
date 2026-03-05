@@ -182,17 +182,37 @@ impl MiningService {
 
     /// Start v2 AI inference mining loop
     async fn start_inference_v2(self: Arc<Self>) {
+        let backend = match self.config.inference_backend.as_deref() {
+            Some("cuda") => qfc_inference::BackendType::Cuda,
+            Some("metal") => qfc_inference::BackendType::Metal,
+            Some("cpu") => qfc_inference::BackendType::Cpu,
+            _ => qfc_inference::runtime::detect_backend(),
+        };
+
         info!(
-            "Starting AI inference mining service (v2) for validator {}",
-            self.validator_address
+            "Starting AI inference mining service (v2) for validator {} (backend: {})",
+            self.validator_address, backend
         );
+
+        let mut engine = match qfc_inference::create_engine_for_backend(backend) {
+            Ok(e) => e,
+            Err(e) => {
+                error!("Failed to create inference engine: {}", e);
+                return;
+            }
+        };
 
         // Mark validator as providing compute
         self.consensus
             .set_provides_compute(&self.validator_address, true);
 
+        let tier = qfc_inference::runtime::classify_tier(backend, engine.available_memory_mb());
+        let model_registry = qfc_inference::model::ModelRegistry::default_v2();
+        let mut task_pool = qfc_ai_coordinator::TaskPool::new();
+
         let mut epoch_timer = interval(Duration::from_millis(self.config.epoch_duration_ms));
         let mut current_epoch = 0u64;
+        let mut tasks_completed = 0u64;
 
         loop {
             epoch_timer.tick().await;
@@ -203,17 +223,104 @@ impl MiningService {
             }
 
             current_epoch += 1;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
 
-            // TODO: Fetch inference task from coordinator
-            // TODO: Run inference via qfc-inference engine
-            // TODO: Submit InferenceProof
-            // TODO: Update inference_score in consensus
+            // Generate synthetic tasks if pool is empty
+            if task_pool.pending_count() == 0 {
+                let head_hash = self.chain.head().map(|h| h.hash).unwrap_or_default();
+                let seed = head_hash.as_bytes()[0] as u64 ^ current_epoch;
+                task_pool.generate_synthetic_tasks(current_epoch, seed, now + 30_000);
+            }
+
+            // Fetch a task matching our capabilities
+            let task = match task_pool.fetch_task(tier, engine.available_memory_mb()) {
+                Some(t) => t,
+                None => {
+                    debug!("Epoch {}: no matching tasks for tier {}", current_epoch, tier);
+                    continue;
+                }
+            };
+
+            // Load model if needed
+            if let Some(model_id) = task.task_type.model_id() {
+                if let Err(e) = engine.load_model(model_id).await {
+                    warn!("Failed to load model {}: {}", model_id, e);
+                    continue;
+                }
+            }
+
+            // Run inference
+            let result = match engine.run_inference(&task).await {
+                Ok(r) => r,
+                Err(e) => {
+                    error!("Inference failed for epoch {}: {}", current_epoch, e);
+                    continue;
+                }
+            };
 
             info!(
-                "Inference epoch {}: waiting for task coordinator (backend: {})",
-                current_epoch,
-                self.config.inference_backend.as_deref().unwrap_or("auto")
+                "Epoch {}: inference complete ({} ms, {} FLOPS)",
+                current_epoch, result.execution_time_ms, result.flops_estimated
             );
+
+            // Build inference proof (using qfc_inference types for local verification)
+            let mut inf_proof = qfc_inference::InferenceProof::new(
+                self.validator_address,
+                current_epoch,
+                task.task_type.clone(),
+                task.task_id,
+                result.output_hash,
+                result.execution_time_ms,
+                result.flops_estimated,
+                backend,
+                now / 1000,
+            );
+
+            // Sign the proof
+            let proof_hash = blake3_hash(&inf_proof.to_bytes_without_signature());
+            match self.consensus.sign_hash(&proof_hash) {
+                Ok(sig) => inf_proof.set_signature(sig),
+                Err(e) => {
+                    error!("Failed to sign inference proof: {}", e);
+                    continue;
+                }
+            }
+
+            // Verify locally before broadcasting
+            match qfc_ai_coordinator::verify_basic(&inf_proof, current_epoch, &model_registry) {
+                Ok(_) => {
+                    tasks_completed += 1;
+
+                    // Update inference score in consensus
+                    self.consensus.update_inference_score(
+                        &self.validator_address,
+                        result.flops_estimated,
+                        tasks_completed,
+                    );
+
+                    info!(
+                        "Epoch {}: proof verified (tasks_completed: {})",
+                        current_epoch, tasks_completed
+                    );
+
+                    // Convert to qfc_types::InferenceProof for network broadcast
+                    let types_proof = convert_inference_proof(&inf_proof);
+
+                    // Broadcast proof to network
+                    if let Some(network) = &self.network {
+                        let msg = ValidatorMessage::InferenceProof(types_proof);
+                        if let Err(e) = network.broadcast_validator_msg(msg.to_bytes()).await {
+                            warn!("Failed to broadcast inference proof: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("Local proof verification failed: {}", e);
+                }
+            }
         }
     }
 
@@ -328,6 +435,15 @@ impl MiningService {
     pub fn stop(&self) {
         self.stop_flag.store(true, Ordering::Relaxed);
     }
+}
+
+/// Convert qfc_inference::InferenceProof → qfc_types::InferenceProof
+/// Both types have identical Borsh layout, so we serialize/deserialize.
+fn convert_inference_proof(
+    proof: &qfc_inference::InferenceProof,
+) -> qfc_types::InferenceProof {
+    let bytes = borsh::to_vec(proof).expect("InferenceProof serialization should not fail");
+    borsh::from_slice(&bytes).expect("InferenceProof deserialization should not fail")
 }
 
 /// Get the number of CPUs available

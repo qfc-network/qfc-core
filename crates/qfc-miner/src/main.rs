@@ -73,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Start worker
-    let worker = worker::InferenceWorker::new(config, engine);
+    let mut worker = worker::InferenceWorker::new(config, engine);
 
     info!("Connecting to validator at {}...", validator_rpc);
     worker.run().await;

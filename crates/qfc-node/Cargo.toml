@@ -33,5 +33,7 @@ tracing-subscriber.workspace = true
 anyhow.workspace = true
 parking_lot.workspace = true
 hex.workspace = true
+qfc-inference.workspace = true
+qfc-ai-coordinator.workspace = true
 
 [dev-dependencies]

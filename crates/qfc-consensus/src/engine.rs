@@ -895,6 +895,24 @@ impl ConsensusEngine {
         }
     }
 
+    /// Update a validator's inference score from AI compute (v2.0)
+    pub fn update_inference_score(
+        &self,
+        validator: &Address,
+        flops: u64,
+        tasks_completed: u64,
+    ) {
+        let mut validators = self.validators.write();
+        if let Some(v) = validators.iter_mut().find(|v| v.address == *validator) {
+            v.inference_score = v.inference_score.saturating_add(flops);
+            v.tasks_completed = tasks_completed;
+            debug!(
+                "Updated inference score for {}: score={}, tasks={}",
+                validator, v.inference_score, v.tasks_completed
+            );
+        }
+    }
+
     /// Get a validator's current hashrate
     pub fn get_hashrate(&self, validator: &Address) -> u64 {
         let validators = self.validators.read();

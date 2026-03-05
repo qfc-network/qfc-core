@@ -3,8 +3,9 @@
 use crate::error::RpcError;
 use crate::eth::EthApiServer;
 use crate::qfc::{
-    QfcApiServer, RpcComputeInfo, RpcEpoch, RpcFaucetResponse, RpcInferenceStats, RpcModel,
-    RpcNodeInfo, RpcValidator, RpcValidatorMetrics, RpcValidatorScoreBreakdown,
+    QfcApiServer, RpcComputeInfo, RpcEpoch, RpcFaucetResponse, RpcInferenceStats,
+    RpcInferenceProofSubmission, RpcInferenceTask, RpcModel, RpcNodeInfo, RpcProofResult,
+    RpcTaskRequest, RpcValidator, RpcValidatorMetrics, RpcValidatorScoreBreakdown,
 };
 use crate::types::{BlockNumber, BlockTag, CallRequest, RpcBlock, RpcReceipt, RpcTransaction};
 use jsonrpsee::core::RpcResult;
@@ -60,6 +61,10 @@ pub struct RpcServer {
     sync_status: Option<Arc<dyn SyncStatusProvider>>,
     /// Chain ID
     chain_id: u64,
+    /// v2.0: AI inference task pool
+    task_pool: Arc<RwLock<qfc_ai_coordinator::TaskPool>>,
+    /// v2.0: Model registry for verification
+    model_registry: Arc<qfc_inference::model::ModelRegistry>,
 }
 
 impl Clone for RpcServer {
@@ -70,6 +75,8 @@ impl Clone for RpcServer {
             network: self.network.clone(),
             sync_status: self.sync_status.clone(),
             chain_id: self.chain_id,
+            task_pool: self.task_pool.clone(),
+            model_registry: self.model_registry.clone(),
         }
     }
 }
@@ -77,12 +84,22 @@ impl Clone for RpcServer {
 impl RpcServer {
     /// Create a new RPC server
     pub fn new(chain: Arc<Chain>, mempool: Arc<RwLock<Mempool>>, chain_id: u64) -> Self {
+        let mut task_pool = qfc_ai_coordinator::TaskPool::new();
+        // Generate initial synthetic tasks for epoch 1
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        task_pool.generate_synthetic_tasks(1, 42, now + 30_000);
+
         Self {
             chain,
             mempool,
             network: None,
             sync_status: None,
             chain_id,
+            task_pool: Arc::new(RwLock::new(task_pool)),
+            model_registry: Arc::new(qfc_inference::model::ModelRegistry::default_v2()),
         }
     }
 
@@ -975,5 +992,98 @@ impl QfcApiServer for RpcServer {
             flops_total: "0".to_string(),  // TODO: accumulate
             pass_rate: format!("{:.2}", avg_pass_rate * 100.0),
         })
+    }
+
+    async fn get_inference_task(
+        &self,
+        request: RpcTaskRequest,
+    ) -> RpcResult<Option<RpcInferenceTask>> {
+        let tier = match request.gpu_tier.as_str() {
+            "Hot" => qfc_inference::GpuTier::Hot,
+            "Warm" => qfc_inference::GpuTier::Warm,
+            _ => qfc_inference::GpuTier::Cold,
+        };
+
+        let mut pool = self.task_pool.write();
+
+        // If pool is empty, generate new synthetic tasks
+        if pool.pending_count() == 0 {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            let epoch_seed = qfc_crypto::blake3_hash(now.to_le_bytes().as_ref())
+                .as_bytes()[0] as u64;
+            pool.generate_synthetic_tasks(now / 10_000, epoch_seed, now + 30_000);
+        }
+
+        match pool.fetch_task(tier, request.available_memory_mb) {
+            Some(task) => {
+                let (model_name, model_version) = match task.task_type.model_id() {
+                    Some(id) => (id.name.clone(), id.version.clone()),
+                    None => ("unknown".to_string(), "v0".to_string()),
+                };
+
+                Ok(Some(RpcInferenceTask {
+                    task_id: hex::encode(task.task_id.as_bytes()),
+                    epoch: task.epoch,
+                    task_type: task.task_type.task_type_name().to_string(),
+                    model_name,
+                    model_version,
+                    input_data: hex::encode(&task.input_data),
+                    deadline: task.deadline,
+                }))
+            }
+            None => Ok(None),
+        }
+    }
+
+    async fn submit_inference_proof(
+        &self,
+        submission: RpcInferenceProofSubmission,
+    ) -> RpcResult<RpcProofResult> {
+        // Decode proof bytes
+        let proof_bytes = hex::decode(&submission.proof_bytes).map_err(|e| {
+            RpcError::Execution(format!("Invalid proof hex: {}", e))
+        })?;
+
+        let proof = qfc_inference::InferenceProof::from_bytes(&proof_bytes).map_err(|e| {
+            RpcError::Execution(format!("Failed to deserialize proof: {}", e))
+        })?;
+
+        // Basic verification
+        match qfc_ai_coordinator::verify_basic(&proof, proof.epoch, &self.model_registry) {
+            Ok(result) => {
+                info!(
+                    "Proof accepted from {} for epoch {} (spot_check={})",
+                    submission.miner_address, proof.epoch, result.spot_checked
+                );
+
+                // Check if this proof should be spot-checked
+                let should_spot = qfc_ai_coordinator::should_spot_check(&proof);
+
+                Ok(RpcProofResult {
+                    accepted: true,
+                    spot_checked: should_spot,
+                    message: if should_spot {
+                        "Proof accepted, queued for spot-check verification".to_string()
+                    } else {
+                        "Proof accepted".to_string()
+                    },
+                })
+            }
+            Err(e) => {
+                warn!(
+                    "Proof rejected from {}: {}",
+                    submission.miner_address, e
+                );
+
+                Ok(RpcProofResult {
+                    accepted: false,
+                    spot_checked: false,
+                    message: format!("Proof rejected: {}", e),
+                })
+            }
+        }
     }
 }
