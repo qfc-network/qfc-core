@@ -17,6 +17,12 @@ pub struct RpcValidator {
     pub provides_compute: bool,
     /// Current hashrate in H/s (0 if not mining)
     pub hashrate: String,
+    /// v2.0: Inference score (replaces hashrate for inference validators)
+    pub inference_score: String,
+    /// v2.0: Compute mode — "pow", "inference", or "none"
+    pub compute_mode: String,
+    /// v2.0: Total inference tasks completed
+    pub tasks_completed: String,
 }
 
 /// Detailed validator score breakdown

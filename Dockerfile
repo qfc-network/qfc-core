@@ -19,8 +19,8 @@ RUN apt-get update && apt-get install -y \
 # Copy source
 COPY . .
 
-# Build release binary
-RUN cargo build --release --bin qfc-node
+# Build release binaries (node + miner)
+RUN cargo build --release --bin qfc-node --bin qfc-miner
 
 # ============================================
 # Stage 2: Runtime
@@ -36,11 +36,12 @@ RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy binary from builder
+# Copy binaries from builder
 COPY --from=builder /build/target/release/qfc-node /usr/local/bin/qfc-node
+COPY --from=builder /build/target/release/qfc-miner /usr/local/bin/qfc-miner
 
 # Create data directory
-RUN mkdir -p /data /config
+RUN mkdir -p /data /config /models
 
 # Environment variables
 ENV QFC_DATA_DIR=/data
@@ -48,6 +49,10 @@ ENV QFC_RPC_ADDR=0.0.0.0:8545
 ENV QFC_P2P_ADDR=0.0.0.0:30303
 ENV QFC_LOG_LEVEL=info
 ENV RUST_LOG=info
+# v2.0: Compute mode (pow | inference, default: pow)
+ENV QFC_COMPUTE_MODE=pow
+ENV QFC_INFERENCE_BACKEND=auto
+ENV QFC_MODEL_DIR=/models
 
 # Expose ports
 EXPOSE 8545 8546 30303 6060
@@ -80,6 +85,16 @@ if [ "$QFC_MINING_ENABLED" = "true" ] || [ "$QFC_MINING_ENABLED" = "1" ]; then
     ARGS="$ARGS --mine"
     if [ -n "$QFC_MINING_THREADS" ]; then
         ARGS="$ARGS --threads $QFC_MINING_THREADS"
+    fi
+    # v2.0: Compute mode and inference settings
+    if [ -n "$QFC_COMPUTE_MODE" ]; then
+        ARGS="$ARGS --compute-mode $QFC_COMPUTE_MODE"
+    fi
+    if [ -n "$QFC_INFERENCE_BACKEND" ]; then
+        ARGS="$ARGS --inference-backend $QFC_INFERENCE_BACKEND"
+    fi
+    if [ -n "$QFC_MODEL_DIR" ]; then
+        ARGS="$ARGS --model-dir $QFC_MODEL_DIR"
     fi
 fi
 

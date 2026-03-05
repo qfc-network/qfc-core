@@ -649,6 +649,15 @@ impl QfcApiServer for RpcServer {
                 let stake = state.get_stake(&v.address).unwrap_or_default();
                 let score = state.get_contribution_score(&v.address).unwrap_or(0);
 
+                // Determine compute mode from validator fields
+                let compute_mode = if v.inference_score > 0 || v.tasks_completed > 0 {
+                    "inference"
+                } else if v.provides_compute {
+                    "pow"
+                } else {
+                    "none"
+                };
+
                 RpcValidator {
                     address: v.address.to_string(),
                     stake: format!("0x{:x}", stake.0),
@@ -657,6 +666,9 @@ impl QfcApiServer for RpcServer {
                     is_active: v.is_active(),
                     provides_compute: v.provides_compute,
                     hashrate: v.hashrate.to_string(),
+                    inference_score: v.inference_score.to_string(),
+                    compute_mode: compute_mode.to_string(),
+                    tasks_completed: v.tasks_completed.to_string(),
                 }
             })
             .collect();
