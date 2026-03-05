@@ -59,6 +59,15 @@ pub struct ValidatorNode {
     /// GPU/unified memory in MB
     pub gpu_memory_mb: u64,
 
+    /// GPU model name (e.g. "NVIDIA RTX 4090")
+    pub gpu_model: String,
+
+    /// Standardized benchmark score (0-10000)
+    pub benchmark_score: u32,
+
+    /// GPU tier: 1=T1(0-2999), 2=T2(3000-6999), 3=T3(7000+)
+    pub gpu_tier: u8,
+
     /// Inference score (replaces hashrate in v2 scoring)
     pub inference_score: u64,
 
@@ -116,6 +125,9 @@ impl Default for ValidatorNode {
             compute_backend: None,
             supported_models: Vec::new(),
             gpu_memory_mb: 0,
+            gpu_model: String::new(),
+            benchmark_score: 0,
+            gpu_tier: 0,
             inference_score: 0,
             tasks_completed: 0,
             verification_pass_rate: 10000, // 100% (no failures yet)

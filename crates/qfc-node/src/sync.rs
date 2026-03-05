@@ -49,6 +49,10 @@ pub struct SyncManager {
     model_registry: Arc<qfc_inference::model::ModelRegistry>,
     /// v2.0: Pool of verified inference proofs awaiting block inclusion
     proof_pool: Option<Arc<RwLock<qfc_ai_coordinator::ProofPool>>>,
+    /// v2.0 P2: Challenge generator
+    challenge_generator: Option<Arc<RwLock<qfc_ai_coordinator::challenge::ChallengeGenerator>>>,
+    /// v2.0 P2: Redundant verifier
+    redundant_verifier: Option<Arc<RwLock<qfc_ai_coordinator::redundant::RedundantVerifier>>>,
 }
 
 impl SyncManager {
@@ -68,6 +72,8 @@ impl SyncManager {
             inference_engine: None,
             model_registry: Arc::new(qfc_inference::model::ModelRegistry::default_v2()),
             proof_pool: None,
+            challenge_generator: None,
+            redundant_verifier: None,
         }
     }
 
@@ -83,6 +89,24 @@ impl SyncManager {
     /// Set the shared proof pool (v2.0)
     pub fn with_proof_pool(mut self, pool: Arc<RwLock<qfc_ai_coordinator::ProofPool>>) -> Self {
         self.proof_pool = Some(pool);
+        self
+    }
+
+    /// Set the challenge generator (P2)
+    pub fn with_challenge_generator(
+        mut self,
+        gen: Arc<RwLock<qfc_ai_coordinator::challenge::ChallengeGenerator>>,
+    ) -> Self {
+        self.challenge_generator = Some(gen);
+        self
+    }
+
+    /// Set the redundant verifier (P2)
+    pub fn with_redundant_verifier(
+        mut self,
+        rv: Arc<RwLock<qfc_ai_coordinator::redundant::RedundantVerifier>>,
+    ) -> Self {
+        self.redundant_verifier = Some(rv);
         self
     }
 
@@ -997,14 +1021,73 @@ impl SyncManager {
             }
         }
 
-        // 7. Proof passed — update inference score
+        // 7. Challenge check (P2): if this is a challenge task, verify and return early
+        if let Some(ref cg) = self.challenge_generator {
+            let mut gen = cg.write();
+            if gen.is_challenge(&proof.input_hash) {
+                if let Some(verdict) = gen.verify_challenge(&proof.input_hash, &proof.output_hash) {
+                    if let Some(penalty) = gen.record_result(&proof.validator, &verdict) {
+                        consensus.reduce_reputation(&proof.validator, penalty.reputation_reduction);
+                        if penalty.slash_percent > 0 {
+                            consensus.slash_validator(
+                                &proof.validator,
+                                penalty.slash_percent,
+                                penalty.jail_duration_ms,
+                            );
+                        }
+                        if !matches!(
+                            verdict,
+                            qfc_ai_coordinator::challenge::ChallengeVerdict::Passed
+                        ) {
+                            warn!("Challenge failed for {}: {:?}", proof.validator, verdict);
+                        }
+                    }
+                    if matches!(
+                        verdict,
+                        qfc_ai_coordinator::challenge::ChallengeVerdict::Passed
+                    ) {
+                        debug!("Challenge passed for {}", proof.validator);
+                    }
+                }
+                // Challenges don't go to proof pool — return early
+                return;
+            }
+        }
+
+        // 7b. Redundant verification check (P2)
+        if let Some(ref rv) = self.redundant_verifier {
+            let mut verifier = rv.write();
+            if verifier.is_pending(&proof.input_hash) {
+                if let Some(result) =
+                    verifier.record_submission(proof.input_hash, proof.validator, proof.output_hash)
+                {
+                    // Penalize inconsistent miners
+                    for &bad_miner in &result.inconsistent_miners {
+                        consensus.reduce_reputation(&bad_miner, 1000);
+                        info!(
+                            "Redundant verification: inconsistent miner {} penalized",
+                            bad_miner
+                        );
+                    }
+                    // Only consistent proofs proceed
+                    if !result.consistent_miners.contains(&proof.validator) {
+                        return;
+                    }
+                } else {
+                    // Still waiting for more submissions
+                    return;
+                }
+            }
+        }
+
+        // 8. Proof passed — update inference score
         consensus.update_inference_score(
             &proof.validator,
             proof.flops_estimated,
             1, // single task completed
         );
 
-        // 8. Push to proof pool for block inclusion (v2.0)
+        // 9. Push to proof pool for block inclusion (v2.0)
         if let Some(ref pool) = self.proof_pool {
             pool.write().add(proof.clone());
         }

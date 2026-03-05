@@ -11,9 +11,12 @@
 //! - **Registry**: Governance-approved model list
 
 pub mod assignment;
+pub mod challenge;
 pub mod governance;
 pub mod proof_pool;
+pub mod redundant;
 pub mod registry;
+pub mod router;
 pub mod task_pool;
 pub mod task_types;
 pub mod verification;

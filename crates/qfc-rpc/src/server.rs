@@ -4,9 +4,10 @@ use crate::error::RpcError;
 use crate::eth::EthApiServer;
 use crate::qfc::{
     QfcApiServer, RpcComputeInfo, RpcEpoch, RpcFaucetResponse, RpcInferenceProofSubmission,
-    RpcInferenceStats, RpcInferenceTask, RpcModel, RpcModelProposal, RpcNodeInfo, RpcProofResult,
-    RpcProposeModelRequest, RpcPublicTaskStatus, RpcSubmitPublicTask, RpcTaskRequest, RpcValidator,
-    RpcValidatorMetrics, RpcValidatorScoreBreakdown, RpcVoteModelRequest,
+    RpcInferenceStats, RpcInferenceTask, RpcMinerStatusReport, RpcModel, RpcModelProposal,
+    RpcNodeInfo, RpcProofResult, RpcProposeModelRequest, RpcPublicTaskStatus,
+    RpcRegisterMinerRequest, RpcRegisterMinerResult, RpcSubmitPublicTask, RpcTaskRequest,
+    RpcValidator, RpcValidatorMetrics, RpcValidatorScoreBreakdown, RpcVoteModelRequest,
 };
 use crate::types::{BlockNumber, BlockTag, CallRequest, RpcBlock, RpcReceipt, RpcTransaction};
 use jsonrpsee::core::RpcResult;
@@ -72,6 +73,12 @@ pub struct RpcServer {
     inference_engine: Option<Arc<tokio::sync::RwLock<Box<dyn qfc_inference::InferenceEngine>>>>,
     /// v2.0: Pool of verified inference proofs awaiting block inclusion
     proof_pool: Option<Arc<RwLock<qfc_ai_coordinator::ProofPool>>>,
+    /// v2.0 P2: Challenge task generator
+    challenge_generator: Option<Arc<RwLock<qfc_ai_coordinator::challenge::ChallengeGenerator>>>,
+    /// v2.0 P2: Redundant verification for high-value tasks
+    redundant_verifier: Option<Arc<RwLock<qfc_ai_coordinator::redundant::RedundantVerifier>>>,
+    /// v2.0 P2: Task router for model-aware miner selection
+    task_router: Option<Arc<RwLock<qfc_ai_coordinator::router::TaskRouter>>>,
 }
 
 impl Clone for RpcServer {
@@ -87,6 +94,9 @@ impl Clone for RpcServer {
             governance: self.governance.clone(),
             inference_engine: self.inference_engine.clone(),
             proof_pool: self.proof_pool.clone(),
+            challenge_generator: self.challenge_generator.clone(),
+            redundant_verifier: self.redundant_verifier.clone(),
+            task_router: self.task_router.clone(),
         }
     }
 }
@@ -113,7 +123,37 @@ impl RpcServer {
             governance: Arc::new(RwLock::new(qfc_ai_coordinator::ModelGovernance::new())),
             inference_engine: None,
             proof_pool: None,
+            challenge_generator: None,
+            redundant_verifier: None,
+            task_router: None,
         }
+    }
+
+    /// Set the challenge generator (P2)
+    pub fn with_challenge_generator(
+        mut self,
+        gen: Arc<RwLock<qfc_ai_coordinator::challenge::ChallengeGenerator>>,
+    ) -> Self {
+        self.challenge_generator = Some(gen);
+        self
+    }
+
+    /// Set the redundant verifier (P2)
+    pub fn with_redundant_verifier(
+        mut self,
+        rv: Arc<RwLock<qfc_ai_coordinator::redundant::RedundantVerifier>>,
+    ) -> Self {
+        self.redundant_verifier = Some(rv);
+        self
+    }
+
+    /// Set the task router (P2)
+    pub fn with_task_router(
+        mut self,
+        router: Arc<RwLock<qfc_ai_coordinator::router::TaskRouter>>,
+    ) -> Self {
+        self.task_router = Some(router);
+        self
     }
 
     /// Set the network service for transaction broadcasting
@@ -952,6 +992,143 @@ impl QfcApiServer for RpcServer {
         })
     }
 
+    // ---- v2.0 P2: Miner registration & status ----
+
+    async fn register_miner(
+        &self,
+        req: RpcRegisterMinerRequest,
+    ) -> RpcResult<RpcRegisterMinerResult> {
+        let miner_address = Self::parse_address(&req.miner_address)?;
+
+        // Verify signature
+        let consensus = self.chain.consensus();
+        let validators = consensus.get_validators();
+        let validator = match validators.iter().find(|v| v.address == miner_address) {
+            Some(v) => v,
+            None => {
+                return Ok(RpcRegisterMinerResult {
+                    registered: false,
+                    assigned_tier: 0,
+                    message: "Unknown validator address".to_string(),
+                });
+            }
+        };
+
+        let sig_payload = format!(
+            "{}{}{}",
+            req.miner_address, req.gpu_model, req.benchmark_score
+        );
+        let sig_hash = blake3_hash(sig_payload.as_bytes());
+        let sig_bytes = hex::decode(req.signature.strip_prefix("0x").unwrap_or(&req.signature))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid signature hex: {}", e)))?;
+        let signature = qfc_types::Signature::from_slice(&sig_bytes)
+            .ok_or_else(|| RpcError::InvalidParams("Invalid signature length".into()))?;
+
+        if verify_hash_signature(&validator.public_key, &sig_hash, &signature).is_err() {
+            return Ok(RpcRegisterMinerResult {
+                registered: false,
+                assigned_tier: 0,
+                message: "Invalid signature".to_string(),
+            });
+        }
+
+        // Validate GPU claim
+        if !qfc_inference::validate_gpu_claim(&req.gpu_model, req.benchmark_score) {
+            return Ok(RpcRegisterMinerResult {
+                registered: false,
+                assigned_tier: 0,
+                message: "Benchmark score does not match GPU model".to_string(),
+            });
+        }
+
+        // Compute tier
+        let tier = match req.benchmark_score {
+            0..=2999 => 1u8,
+            3000..=6999 => 2,
+            _ => 3,
+        };
+
+        // Parse backend
+        let backend = match req.backend.to_uppercase().as_str() {
+            "CUDA" => Some(qfc_types::BackendType::Cuda),
+            "METAL" => Some(qfc_types::BackendType::Metal),
+            "CPU" => Some(qfc_types::BackendType::Cpu),
+            _ => None,
+        };
+
+        // Update validator state
+        consensus.register_miner_profile(
+            &miner_address,
+            req.gpu_model.clone(),
+            req.benchmark_score,
+            tier,
+            req.vram_mb,
+            backend,
+        );
+
+        info!(
+            "Miner registered: {} (GPU: {}, score: {}, tier: {})",
+            req.miner_address, req.gpu_model, req.benchmark_score, tier
+        );
+
+        Ok(RpcRegisterMinerResult {
+            registered: true,
+            assigned_tier: tier,
+            message: format!("Registered as T{}", tier),
+        })
+    }
+
+    async fn report_miner_status(&self, req: RpcMinerStatusReport) -> RpcResult<bool> {
+        let miner_address = Self::parse_address(&req.miner_address)?;
+
+        // Verify signature
+        let consensus = self.chain.consensus();
+        let validators = consensus.get_validators();
+        let validator = match validators.iter().find(|v| v.address == miner_address) {
+            Some(v) => v,
+            None => return Ok(false),
+        };
+
+        let sig_payload = format!("{}{}", req.miner_address, req.pending_tasks);
+        let sig_hash = blake3_hash(sig_payload.as_bytes());
+        let sig_bytes = hex::decode(req.signature.strip_prefix("0x").unwrap_or(&req.signature))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid signature hex: {}", e)))?;
+        let signature = qfc_types::Signature::from_slice(&sig_bytes)
+            .ok_or_else(|| RpcError::InvalidParams("Invalid signature length".into()))?;
+
+        if verify_hash_signature(&validator.public_key, &sig_hash, &signature).is_err() {
+            return Ok(false);
+        }
+
+        // Update task router if available
+        if let Some(ref router) = self.task_router {
+            let models: Vec<(
+                qfc_inference::ModelId,
+                qfc_ai_coordinator::router::ModelLayer,
+            )> = req
+                .loaded_models
+                .iter()
+                .map(|m| {
+                    let model_id = qfc_inference::ModelId::new(&m.model_name, &m.model_version);
+                    let layer = match m.layer.as_str() {
+                        "hot" => qfc_ai_coordinator::router::ModelLayer::Hot,
+                        "warm" => qfc_ai_coordinator::router::ModelLayer::Warm,
+                        _ => qfc_ai_coordinator::router::ModelLayer::Cold,
+                    };
+                    (model_id, layer)
+                })
+                .collect();
+
+            let tier = validator.gpu_tier;
+            router
+                .write()
+                .update_miner_models(miner_address, models, tier);
+        }
+
+        debug!("Miner status update from {}", req.miner_address);
+        Ok(true)
+    }
+
     // ---- v2.0: AI Compute endpoints ----
 
     async fn get_compute_info(&self) -> RpcResult<RpcComputeInfo> {
@@ -1211,10 +1388,65 @@ impl QfcApiServer for RpcServer {
             }
         }
 
-        // 7. Proof passed — update inference score
+        // 7. Challenge check (P2)
+        if let Some(ref cg) = self.challenge_generator {
+            let mut gen = cg.write();
+            if gen.is_challenge(&proof.input_hash) {
+                if let Some(verdict) = gen.verify_challenge(&proof.input_hash, &proof.output_hash) {
+                    if let Some(penalty) = gen.record_result(&proof.validator, &verdict) {
+                        consensus.reduce_reputation(&proof.validator, penalty.reputation_reduction);
+                        if penalty.slash_percent > 0 {
+                            consensus.slash_validator(
+                                &proof.validator,
+                                penalty.slash_percent,
+                                penalty.jail_duration_ms,
+                            );
+                        }
+                    }
+                    let passed = matches!(
+                        verdict,
+                        qfc_ai_coordinator::challenge::ChallengeVerdict::Passed
+                    );
+                    return Ok(RpcProofResult {
+                        accepted: passed,
+                        spot_checked: true,
+                        message: format!("Challenge result: {:?}", verdict),
+                    });
+                }
+            }
+        }
+
+        // 7b. Redundant verification check (P2)
+        if let Some(ref rv) = self.redundant_verifier {
+            let mut verifier = rv.write();
+            if verifier.is_pending(&proof.input_hash) {
+                if let Some(result) =
+                    verifier.record_submission(proof.input_hash, proof.validator, proof.output_hash)
+                {
+                    for &bad_miner in &result.inconsistent_miners {
+                        consensus.reduce_reputation(&bad_miner, 1000);
+                    }
+                    if !result.consistent_miners.contains(&proof.validator) {
+                        return Ok(RpcProofResult {
+                            accepted: false,
+                            spot_checked: false,
+                            message: "Redundant verification: inconsistent output".to_string(),
+                        });
+                    }
+                } else {
+                    return Ok(RpcProofResult {
+                        accepted: true,
+                        spot_checked: false,
+                        message: "Redundant verification: waiting for more submissions".to_string(),
+                    });
+                }
+            }
+        }
+
+        // 8. Proof passed — update inference score
         consensus.update_inference_score(&proof.validator, proof.flops_estimated, 1);
 
-        // 8. Push to proof pool for block inclusion (v2.0)
+        // 9. Push to proof pool for block inclusion (v2.0)
         // Convert qfc_inference::InferenceProof → qfc_types::InferenceProof via borsh roundtrip
         let types_proof: qfc_types::InferenceProof =
             borsh::from_slice(&borsh::to_vec(&proof).unwrap()).unwrap();
@@ -1222,7 +1454,7 @@ impl QfcApiServer for RpcServer {
             pool.write().add(types_proof);
         }
 
-        // 9. Check if this proof completes a public task (v2.0)
+        // 10. Check if this proof completes a public task (v2.0)
         {
             let mut task_pool = self.task_pool.write();
             if task_pool.get_public_task(&proof.input_hash).is_some() {

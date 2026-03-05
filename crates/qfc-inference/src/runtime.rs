@@ -88,6 +88,44 @@ pub struct BenchmarkResult {
     pub backend: BackendType,
     /// Time taken for benchmark in ms
     pub benchmark_time_ms: u64,
+    /// Standardized benchmark score (0-10000), computed via compute_benchmark_score
+    pub score: u32,
+}
+
+/// Compute a standardized benchmark score (0-10000) and GPU tier from a BenchmarkResult
+pub fn compute_benchmark_score(bench: &BenchmarkResult) -> (u32, u8) {
+    let score = ((bench.flops / 1e12) * 1000.0).min(10000.0) as u32;
+    let tier = match score {
+        0..=2999 => 1,
+        3000..=6999 => 2,
+        _ => 3,
+    };
+    (score, tier)
+}
+
+/// Layer 1 validation: GPU model → expected score range.
+/// Returns true if the claimed score is plausible for the GPU model.
+/// Unknown models always pass.
+pub fn validate_gpu_claim(gpu_model: &str, claimed_score: u32) -> bool {
+    let model_lower = gpu_model.to_lowercase();
+    let range = if model_lower.contains("4060") {
+        Some((2000, 3500))
+    } else if model_lower.contains("3090") {
+        Some((4000, 5500))
+    } else if model_lower.contains("4090") {
+        Some((6000, 7500))
+    } else if model_lower.contains("a100") {
+        Some((7500, 9000))
+    } else if model_lower.contains("h100") {
+        Some((9000, 10000))
+    } else {
+        None // unknown model — always pass
+    };
+
+    match range {
+        Some((min, max)) => claimed_score >= min && claimed_score <= max,
+        None => true,
+    }
 }
 
 /// Detect the best available backend for the current system

@@ -42,6 +42,10 @@ pub struct TaskPool {
     task_counter: u64,
     /// Public tasks (paid inference requests)
     public_tasks: HashMap<Hash, PublicTask>,
+    /// Redundant assignment tracking: task_id -> assigned miners
+    redundant_assignments: HashMap<Hash, Vec<Address>>,
+    /// How many miners to assign for redundant tasks
+    redundancy_count: usize,
 }
 
 impl TaskPool {
@@ -51,6 +55,8 @@ impl TaskPool {
             current_epoch: 0,
             task_counter: 0,
             public_tasks: HashMap::new(),
+            redundant_assignments: HashMap::new(),
+            redundancy_count: 3,
         }
     }
 
@@ -84,14 +90,63 @@ impl TaskPool {
         }
     }
 
-    /// Fetch a task suitable for a miner with the given tier and memory
+    /// Fetch a task suitable for a miner with the given tier and memory.
+    /// For redundant tasks, the task stays in the queue until `redundancy_count` fetches.
     pub fn fetch_task(&mut self, tier: GpuTier, available_memory_mb: u64) -> Option<InferenceTask> {
+        self.fetch_task_for(tier, available_memory_mb, None)
+    }
+
+    /// Fetch a task, optionally recording the miner for redundant assignment
+    pub fn fetch_task_for(
+        &mut self,
+        tier: GpuTier,
+        available_memory_mb: u64,
+        miner: Option<Address>,
+    ) -> Option<InferenceTask> {
         let idx = self.pending.iter().position(|task| {
             let reqs = task_requirements(&task.task_type);
-            tier_can_run(tier, reqs.min_tier) && available_memory_mb >= reqs.min_memory_mb
+            if !tier_can_run(tier, reqs.min_tier) || available_memory_mb < reqs.min_memory_mb {
+                return false;
+            }
+            // For redundant tasks, check miner hasn't already been assigned
+            if let Some(ref m) = miner {
+                if let Some(assigned) = self.redundant_assignments.get(&task.task_id) {
+                    if assigned.contains(m) {
+                        return false;
+                    }
+                }
+            }
+            true
         })?;
 
-        self.pending.remove(idx)
+        let task = self.pending[idx].clone();
+        let task_id = task.task_id;
+
+        // Check if this is a redundant task
+        if let Some(assigned) = self.redundant_assignments.get_mut(&task_id) {
+            if let Some(m) = miner {
+                assigned.push(m);
+            }
+            if assigned.len() >= self.redundancy_count {
+                // All slots filled — remove from queue
+                self.pending.remove(idx);
+            }
+        } else {
+            // Not a redundant task — remove immediately
+            self.pending.remove(idx);
+        }
+
+        Some(task)
+    }
+
+    /// Mark a task as requiring redundant assignment
+    pub fn mark_redundant(&mut self, task_id: Hash) {
+        self.redundant_assignments.entry(task_id).or_default();
+    }
+
+    /// Set the redundancy count
+    pub fn set_redundancy_count(&mut self, count: usize) {
+        self.redundancy_count = count;
     }
 
     /// Number of pending tasks
