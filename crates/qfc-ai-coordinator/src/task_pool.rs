@@ -56,7 +56,7 @@ impl TaskPool {
             task_counter: 0,
             public_tasks: HashMap::new(),
             redundant_assignments: HashMap::new(),
-            redundancy_count: 3,
+            redundancy_count: 2,
         }
     }
 
