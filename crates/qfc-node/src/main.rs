@@ -266,6 +266,10 @@ async fn main() -> Result<()> {
         if let Some(ref sync) = sync_manager {
             rpc_server = rpc_server.with_sync_status(sync.clone());
         }
+        // Attach CPU inference engine for spot-check verification
+        let rpc_engine = qfc_inference::create_engine_for_backend(qfc_inference::BackendType::Cpu)?;
+        rpc_server = rpc_server.with_inference_engine(rpc_engine);
+
         let handle = rpc_server
             .start(rpc_config)
             .await

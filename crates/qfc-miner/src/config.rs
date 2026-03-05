@@ -29,6 +29,10 @@ pub struct MinerCli {
     #[arg(long, default_value = "0")]
     pub max_memory: u64,
 
+    /// Miner private key (hex, must match --wallet address)
+    #[arg(long)]
+    pub private_key: String,
+
     /// Enable verbose logging
     #[arg(short, long)]
     pub verbose: bool,
@@ -60,4 +64,6 @@ pub struct MinerConfig {
     pub model_dir: PathBuf,
     /// Maximum memory in MB
     pub max_memory_mb: u64,
+    /// Miner secret key (validated at startup to match wallet_address)
+    pub secret_key: [u8; 32],
 }

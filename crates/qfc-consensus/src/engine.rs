@@ -900,7 +900,7 @@ impl ConsensusEngine {
         let mut validators = self.validators.write();
         if let Some(v) = validators.iter_mut().find(|v| v.address == *validator) {
             v.inference_score = v.inference_score.saturating_add(flops);
-            v.tasks_completed = tasks_completed;
+            v.tasks_completed = v.tasks_completed.saturating_add(tasks_completed);
             debug!(
                 "Updated inference score for {}: score={}, tasks={}",
                 validator, v.inference_score, v.tasks_completed

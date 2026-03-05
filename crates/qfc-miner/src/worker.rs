@@ -114,7 +114,7 @@ impl InferenceWorker {
                 .unwrap_or_default()
                 .as_secs();
 
-            let proof = InferenceProof::new(
+            let mut proof = InferenceProof::new(
                 self.config.wallet_address,
                 task_response.epoch,
                 task.task_type.clone(),
@@ -125,6 +125,13 @@ impl InferenceWorker {
                 self.engine.backend_type(),
                 now,
             );
+
+            // 5b. Sign the proof
+            let keypair = qfc_crypto::Keypair::from_secret_bytes(&self.config.secret_key)
+                .expect("validated at startup");
+            let proof_hash = qfc_crypto::blake3_hash(&proof.to_bytes_without_signature());
+            let signature = keypair.sign_hash(&proof_hash);
+            proof.set_signature(signature);
 
             // 6. Submit proof to validator
             let rpc_url = &self.config.validator_rpc;

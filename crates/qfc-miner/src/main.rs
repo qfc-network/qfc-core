@@ -36,6 +36,25 @@ async fn main() -> anyhow::Result<()> {
     let wallet_address = Address::from_slice(&wallet_bytes)
         .ok_or_else(|| anyhow::anyhow!("Wallet address must be 20 bytes"))?;
 
+    // Parse and validate private key
+    let pk_hex = cli
+        .private_key
+        .strip_prefix("0x")
+        .unwrap_or(&cli.private_key);
+    let pk_bytes =
+        hex::decode(pk_hex).map_err(|e| anyhow::anyhow!("Invalid private key hex: {}", e))?;
+    let mut secret_key = [0u8; 32];
+    if pk_bytes.len() != 32 {
+        anyhow::bail!("Private key must be 32 bytes");
+    }
+    secret_key.copy_from_slice(&pk_bytes);
+    let keypair = qfc_crypto::Keypair::from_secret_bytes(&secret_key)?;
+    let derived = qfc_crypto::address_from_keypair(&keypair);
+    if derived != wallet_address {
+        anyhow::bail!("Private key does not match wallet address");
+    }
+    info!("Private key validated for wallet {}", wallet_hex);
+
     // Determine backend
     let backend = cli.backend_type();
     let max_memory = if cli.max_memory > 0 {
@@ -54,6 +73,7 @@ async fn main() -> anyhow::Result<()> {
         backend,
         model_dir: cli.model_dir,
         max_memory_mb: max_memory,
+        secret_key,
     };
 
     // Create inference engine

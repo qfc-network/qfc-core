@@ -14,7 +14,7 @@ use jsonrpsee::server::{ServerBuilder, ServerHandle};
 use parking_lot::RwLock;
 use qfc_chain::Chain;
 use qfc_consensus::NetworkState;
-use qfc_crypto::blake3_hash;
+use qfc_crypto::{blake3_hash, verify_hash_signature};
 use qfc_mempool::Mempool;
 use qfc_network::NetworkService;
 use qfc_types::{Address, EthTransaction, Hash, Transaction, U256};
@@ -68,6 +68,8 @@ pub struct RpcServer {
     model_registry: Arc<qfc_inference::model::ModelRegistry>,
     /// v2.0: Model governance
     governance: Arc<RwLock<qfc_ai_coordinator::ModelGovernance>>,
+    /// v2.0: Inference engine for spot-check re-execution
+    inference_engine: Option<Arc<tokio::sync::RwLock<Box<dyn qfc_inference::InferenceEngine>>>>,
 }
 
 impl Clone for RpcServer {
@@ -81,6 +83,7 @@ impl Clone for RpcServer {
             task_pool: self.task_pool.clone(),
             model_registry: self.model_registry.clone(),
             governance: self.governance.clone(),
+            inference_engine: self.inference_engine.clone(),
         }
     }
 }
@@ -105,6 +108,7 @@ impl RpcServer {
             task_pool: Arc::new(RwLock::new(task_pool)),
             model_registry: Arc::new(qfc_inference::model::ModelRegistry::default_v2()),
             governance: Arc::new(RwLock::new(qfc_ai_coordinator::ModelGovernance::new())),
+            inference_engine: None,
         }
     }
 
@@ -117,6 +121,15 @@ impl RpcServer {
     /// Set the sync status provider
     pub fn with_sync_status(mut self, sync_status: Arc<dyn SyncStatusProvider>) -> Self {
         self.sync_status = Some(sync_status);
+        self
+    }
+
+    /// Set the inference engine for spot-check verification
+    pub fn with_inference_engine(
+        mut self,
+        engine: Box<dyn qfc_inference::InferenceEngine>,
+    ) -> Self {
+        self.inference_engine = Some(Arc::new(tokio::sync::RwLock::new(engine)));
         self
     }
 
@@ -1056,44 +1069,153 @@ impl QfcApiServer for RpcServer {
         &self,
         submission: RpcInferenceProofSubmission,
     ) -> RpcResult<RpcProofResult> {
-        // Decode proof bytes
+        // 1. Decode proof bytes
         let proof_bytes = hex::decode(&submission.proof_bytes)
             .map_err(|e| RpcError::Execution(format!("Invalid proof hex: {}", e)))?;
 
         let proof = qfc_inference::InferenceProof::from_bytes(&proof_bytes)
             .map_err(|e| RpcError::Execution(format!("Failed to deserialize proof: {}", e)))?;
 
-        // Basic verification
-        match qfc_ai_coordinator::verify_basic(&proof, proof.epoch, &self.model_registry) {
-            Ok(result) => {
-                info!(
-                    "Proof accepted from {} for epoch {} (spot_check={})",
-                    submission.miner_address, proof.epoch, result.spot_checked
-                );
+        let consensus = self.chain.consensus();
 
-                // Check if this proof should be spot-checked
-                let should_spot = qfc_ai_coordinator::should_spot_check(&proof);
-
-                Ok(RpcProofResult {
-                    accepted: true,
-                    spot_checked: should_spot,
-                    message: if should_spot {
-                        "Proof accepted, queued for spot-check verification".to_string()
-                    } else {
-                        "Proof accepted".to_string()
-                    },
-                })
-            }
-            Err(e) => {
-                warn!("Proof rejected from {}: {}", submission.miner_address, e);
-
-                Ok(RpcProofResult {
+        // 2. Find the validator
+        let validators = consensus.get_validators();
+        let validator = match validators.iter().find(|v| v.address == proof.validator) {
+            Some(v) => v,
+            None => {
+                return Ok(RpcProofResult {
                     accepted: false,
                     spot_checked: false,
-                    message: format!("Proof rejected: {}", e),
-                })
+                    message: "Unknown validator".to_string(),
+                });
+            }
+        };
+
+        // 3. Check if validator is active
+        if !validator.is_active() {
+            return Ok(RpcProofResult {
+                accepted: false,
+                spot_checked: false,
+                message: "Validator is inactive or jailed".to_string(),
+            });
+        }
+
+        // 4. Verify the proof signature
+        let proof_hash = blake3_hash(&proof.to_bytes_without_signature());
+        if verify_hash_signature(&validator.public_key, &proof_hash, &proof.signature).is_err() {
+            warn!("Invalid inference proof signature from {}", proof.validator);
+            return Ok(RpcProofResult {
+                accepted: false,
+                spot_checked: false,
+                message: "Invalid proof signature".to_string(),
+            });
+        }
+
+        // 5. Basic verification (epoch, model, FLOPS)
+        let current_epoch = consensus.get_epoch();
+        if let Err(e) =
+            qfc_ai_coordinator::verify_basic(&proof, current_epoch.number, &self.model_registry)
+        {
+            warn!("Proof rejected from {}: {}", submission.miner_address, e);
+            return Ok(RpcProofResult {
+                accepted: false,
+                spot_checked: false,
+                message: format!("Proof rejected: {}", e),
+            });
+        }
+
+        // 6. Probabilistic spot-check (~5%)
+        let mut spot_checked = false;
+        if qfc_ai_coordinator::should_spot_check(&proof) {
+            spot_checked = true;
+            if let Some(ref engine_lock) = self.inference_engine {
+                let epoch = consensus.get_epoch();
+                let epoch_seed = u64::from_le_bytes(epoch.seed[..8].try_into().unwrap_or([0u8; 8]));
+                let mut task_pool = qfc_ai_coordinator::TaskPool::new();
+                task_pool.generate_synthetic_tasks(proof.epoch, epoch_seed, u64::MAX);
+
+                // Find the task matching proof.input_hash (= original task_id)
+                let matching_task = {
+                    let mut found = None;
+                    while let Some(t) = task_pool.fetch_task(qfc_inference::GpuTier::Hot, u64::MAX)
+                    {
+                        if t.task_id == proof.input_hash {
+                            found = Some(t);
+                            break;
+                        }
+                    }
+                    found
+                };
+
+                if let Some(task) = matching_task {
+                    let engine = engine_lock.read().await;
+                    match qfc_ai_coordinator::verify_spot_check(&proof, &task, &**engine).await {
+                        Ok(result) => {
+                            info!(
+                                "Spot-check PASSED for inference proof from {}: {}",
+                                proof.validator, result.details
+                            );
+                        }
+                        Err(qfc_ai_coordinator::VerificationError::OutputHashMismatch {
+                            expected,
+                            got,
+                        }) => {
+                            warn!(
+                                "Spot-check FAILED for {}: output hash mismatch (expected {}, got {})",
+                                proof.validator,
+                                hex::encode(&expected.as_bytes()[..8]),
+                                hex::encode(&got.as_bytes()[..8]),
+                            );
+                            consensus.slash_validator(&proof.validator, 5, 6 * 60 * 60 * 1000);
+                            return Ok(RpcProofResult {
+                                accepted: false,
+                                spot_checked: true,
+                                message: "Proof rejected: spot-check failed (output hash mismatch)"
+                                    .to_string(),
+                            });
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Spot-check re-execution error for {}: {}",
+                                proof.validator, e
+                            );
+                        }
+                    }
+                } else {
+                    debug!(
+                        "Spot-check: no matching synthetic task for {}, skipping",
+                        proof.validator
+                    );
+                }
+            } else {
+                debug!(
+                    "Spot-check selected for {} but no inference engine available",
+                    proof.validator
+                );
             }
         }
+
+        // 7. Proof passed — update inference score
+        consensus.update_inference_score(&proof.validator, proof.flops_estimated, 1);
+
+        info!(
+            "Updated inference score for {} epoch {}: {} FLOPS, {}ms (spot_checked={})",
+            proof.validator,
+            proof.epoch,
+            proof.flops_estimated,
+            proof.execution_time_ms,
+            spot_checked
+        );
+
+        Ok(RpcProofResult {
+            accepted: true,
+            spot_checked,
+            message: if spot_checked {
+                "Proof accepted, spot-check passed".to_string()
+            } else {
+                "Proof accepted".to_string()
+            },
+        })
     }
 
     // ---- v2.0: Model Governance endpoints ----
