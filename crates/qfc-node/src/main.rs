@@ -197,12 +197,18 @@ async fn main() -> Result<()> {
                 info!("P2P network started, peer ID: {}", service.local_peer_id());
                 let service = Arc::new(service);
 
-                // Start sync manager
-                let sync_manager = Arc::new(SyncManager::new(
-                    chain.clone(),
-                    mempool.clone(),
-                    service.clone(),
-                ));
+                // Start sync manager (with inference engine for spot-check verification)
+                let sync_manager = {
+                    let sm = SyncManager::new(
+                        chain.clone(),
+                        mempool.clone(),
+                        service.clone(),
+                    );
+                    // Attach a CPU inference engine for spot-check re-execution
+                    let engine = qfc_inference::backend::cpu::CpuEngine::new();
+                    sm.with_inference_engine(Box::new(engine))
+                };
+                let sync_manager = Arc::new(sync_manager);
                 let sync_manager_for_messages = sync_manager.clone();
                 let sync_manager_for_events = sync_manager.clone();
 

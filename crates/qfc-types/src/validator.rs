@@ -385,6 +385,8 @@ pub enum SlashableOffense {
     Offline,
     /// Voting for invalid block
     FalseVote,
+    /// Fraudulent inference proof (output hash mismatch on spot-check)
+    InvalidInference,
 }
 
 /// Slash result

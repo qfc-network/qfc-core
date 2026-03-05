@@ -117,7 +117,7 @@ pub async fn verify_spot_check(
 mod tests {
     use super::*;
     use qfc_inference::model::ModelRegistry;
-    use qfc_inference::{BackendType, ComputeTaskType, ModelId};
+    use qfc_inference::{BackendType, ComputeTaskType, InferenceTask, ModelId};
     use qfc_types::Address;
 
     #[test]
@@ -214,5 +214,92 @@ mod tests {
         let decision1 = should_spot_check(&proof);
         let decision2 = should_spot_check(&proof);
         assert_eq!(decision1, decision2);
+    }
+
+    #[tokio::test]
+    async fn test_verify_spot_check_pass() {
+        use qfc_inference::backend::cpu::CpuEngine;
+
+        let engine = CpuEngine::new();
+
+        // Build a task
+        let task = InferenceTask::new(
+            Hash::new([0x42; 32]),
+            1,
+            ComputeTaskType::Embedding {
+                model_id: ModelId::new("qfc-embed-small", "v1.0"),
+                input_hash: Hash::ZERO,
+            },
+            vec![],
+            1234567890,
+            1234597890,
+        );
+
+        // Run inference to get the correct output hash
+        let result = engine.run_inference(&task).await.unwrap();
+
+        // Build a proof with the correct output hash
+        let proof = InferenceProof::new(
+            Address::default(),
+            1,
+            ComputeTaskType::Embedding {
+                model_id: ModelId::new("qfc-embed-small", "v1.0"),
+                input_hash: Hash::ZERO,
+            },
+            Hash::new([0x42; 32]),
+            result.output_hash,
+            150,
+            1_000_000_000,
+            BackendType::Cpu,
+            1234567890,
+        );
+
+        // Spot-check should pass
+        let verification = verify_spot_check(&proof, &task, &engine).await.unwrap();
+        assert!(verification.passed);
+        assert!(verification.spot_checked);
+    }
+
+    #[tokio::test]
+    async fn test_verify_spot_check_mismatch() {
+        use qfc_inference::backend::cpu::CpuEngine;
+
+        let engine = CpuEngine::new();
+
+        // Build a task
+        let task = InferenceTask::new(
+            Hash::new([0x42; 32]),
+            1,
+            ComputeTaskType::Embedding {
+                model_id: ModelId::new("qfc-embed-small", "v1.0"),
+                input_hash: Hash::ZERO,
+            },
+            vec![],
+            1234567890,
+            1234597890,
+        );
+
+        // Build a proof with a TAMPERED output hash
+        let proof = InferenceProof::new(
+            Address::default(),
+            1,
+            ComputeTaskType::Embedding {
+                model_id: ModelId::new("qfc-embed-small", "v1.0"),
+                input_hash: Hash::ZERO,
+            },
+            Hash::new([0x42; 32]),
+            Hash::new([0xff; 32]), // fraudulent output hash
+            150,
+            1_000_000_000,
+            BackendType::Cpu,
+            1234567890,
+        );
+
+        // Spot-check should detect mismatch
+        let result = verify_spot_check(&proof, &task, &engine).await;
+        assert!(matches!(
+            result,
+            Err(VerificationError::OutputHashMismatch { .. })
+        ));
     }
 }
