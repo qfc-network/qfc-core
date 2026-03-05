@@ -621,6 +621,15 @@ impl SyncManager {
             ValidatorMessage::WorkProof(proof) => {
                 self.handle_work_proof(proof).await;
             }
+            ValidatorMessage::InferenceProof(proof) => {
+                // v2.0: Handle inference proof from AI compute miners
+                tracing::debug!(
+                    "Received inference proof from {} for epoch {}",
+                    proof.validator,
+                    proof.epoch
+                );
+                // TODO: Validate and process inference proof via qfc-ai-coordinator
+            }
         }
     }
 

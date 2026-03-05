@@ -16,6 +16,22 @@ use std::time::Duration;
 use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
+/// Compute mode selection (v1 PoW or v2 inference)
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ComputeMode {
+    /// v1: Blake3 Proof of Work (legacy)
+    PowV1,
+    /// v2: AI Inference tasks
+    InferenceV2,
+}
+
+impl Default for ComputeMode {
+    fn default() -> Self {
+        // Default to PoW during transition period
+        Self::PowV1
+    }
+}
+
 /// Mining service configuration
 #[derive(Clone, Debug)]
 pub struct MiningConfig {
@@ -25,6 +41,12 @@ pub struct MiningConfig {
     pub epoch_duration_ms: u64,
     /// Difficulty adjustment config
     pub difficulty_config: DifficultyConfig,
+    /// Compute mode: pow (v1) or inference (v2)
+    pub compute_mode: ComputeMode,
+    /// Inference backend preference (for v2 mode)
+    pub inference_backend: Option<String>,
+    /// Model cache directory (for v2 mode)
+    pub model_dir: Option<String>,
 }
 
 impl Default for MiningConfig {
@@ -35,6 +57,9 @@ impl Default for MiningConfig {
                 .unwrap_or(1),
             epoch_duration_ms: 10_000, // 10 seconds
             difficulty_config: DifficultyConfig::default(),
+            compute_mode: ComputeMode::default(),
+            inference_backend: None,
+            model_dir: None,
         }
     }
 }
@@ -87,8 +112,16 @@ impl MiningService {
 
     /// Start the mining service
     pub async fn start(self: Arc<Self>) {
+        match self.config.compute_mode {
+            ComputeMode::PowV1 => self.start_pow_v1().await,
+            ComputeMode::InferenceV2 => self.start_inference_v2().await,
+        }
+    }
+
+    /// Start v1 PoW mining loop (legacy)
+    async fn start_pow_v1(self: Arc<Self>) {
         info!(
-            "Starting mining service with {} threads for validator {}",
+            "Starting PoW mining service (v1) with {} threads for validator {}",
             self.config.threads, self.validator_address
         );
 
@@ -144,6 +177,43 @@ impl MiningService {
                     error!("Mining task failed: {}", e);
                 }
             }
+        }
+    }
+
+    /// Start v2 AI inference mining loop
+    async fn start_inference_v2(self: Arc<Self>) {
+        info!(
+            "Starting AI inference mining service (v2) for validator {}",
+            self.validator_address
+        );
+
+        // Mark validator as providing compute
+        self.consensus
+            .set_provides_compute(&self.validator_address, true);
+
+        let mut epoch_timer = interval(Duration::from_millis(self.config.epoch_duration_ms));
+        let mut current_epoch = 0u64;
+
+        loop {
+            epoch_timer.tick().await;
+
+            if self.stop_flag.load(Ordering::Relaxed) {
+                info!("Inference mining service stopped");
+                break;
+            }
+
+            current_epoch += 1;
+
+            // TODO: Fetch inference task from coordinator
+            // TODO: Run inference via qfc-inference engine
+            // TODO: Submit InferenceProof
+            // TODO: Update inference_score in consensus
+
+            info!(
+                "Inference epoch {}: waiting for task coordinator (backend: {})",
+                current_epoch,
+                self.config.inference_backend.as_deref().unwrap_or("auto")
+            );
         }
     }
 

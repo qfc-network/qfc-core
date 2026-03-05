@@ -117,6 +117,20 @@ pub trait QfcApi {
     #[method(name = "requestFaucet")]
     async fn request_faucet(&self, address: String, amount: String)
         -> RpcResult<RpcFaucetResponse>;
+
+    // ---- v2.0: AI Compute endpoints ----
+
+    /// Get compute info for this node (backend, models, GPU memory, inference score)
+    #[method(name = "getComputeInfo")]
+    async fn get_compute_info(&self) -> RpcResult<RpcComputeInfo>;
+
+    /// Get list of supported/approved models for AI inference
+    #[method(name = "getSupportedModels")]
+    async fn get_supported_models(&self) -> RpcResult<Vec<RpcModel>>;
+
+    /// Get inference statistics (tasks completed, avg time, FLOPS, pass rate)
+    #[method(name = "getInferenceStats")]
+    async fn get_inference_stats(&self) -> RpcResult<RpcInferenceStats>;
 }
 
 /// Faucet response
@@ -146,4 +160,54 @@ pub struct RpcNodeInfo {
     pub peer_count: u64,
     pub is_validator: bool,
     pub syncing: bool,
+}
+
+// ============ v2.0: AI Compute RPC Types ============
+
+/// Compute information for a node
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcComputeInfo {
+    /// Compute backend: "CUDA", "Metal", "CPU", or "none"
+    pub backend: String,
+    /// Supported model IDs
+    pub supported_models: Vec<String>,
+    /// GPU/system memory in MB
+    pub gpu_memory_mb: u64,
+    /// Current inference score
+    pub inference_score: String,
+    /// GPU tier: "Hot", "Warm", "Cold", or "none"
+    pub gpu_tier: String,
+    /// Whether this node provides AI compute
+    pub provides_compute: bool,
+}
+
+/// Model information
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcModel {
+    /// Model name
+    pub name: String,
+    /// Model version
+    pub version: String,
+    /// Required minimum memory in MB
+    pub min_memory_mb: u64,
+    /// Minimum GPU tier
+    pub min_tier: String,
+    /// Whether the model is approved by governance
+    pub approved: bool,
+}
+
+/// Inference statistics
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcInferenceStats {
+    /// Total tasks completed
+    pub tasks_completed: String,
+    /// Average execution time in ms
+    pub avg_time_ms: String,
+    /// Total FLOPS accumulated
+    pub flops_total: String,
+    /// Verification pass rate (0-100%)
+    pub pass_rate: String,
 }
