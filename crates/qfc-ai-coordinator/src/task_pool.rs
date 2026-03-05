@@ -1,11 +1,36 @@
 //! Pending task queue and assignment
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use qfc_inference::{GpuTier, InferenceTask};
-use qfc_types::Hash;
+use qfc_types::{Address, Hash};
 
 use crate::task_types::{synthetic_task_for_tier, task_requirements};
+
+/// Status of a publicly submitted inference task
+#[derive(Clone, Debug)]
+pub enum PublicTaskStatus {
+    Pending,
+    Assigned,
+    Completed {
+        result_data: Vec<u8>,
+        miner: Address,
+        execution_time_ms: u64,
+    },
+    Failed,
+    Expired,
+}
+
+/// A publicly submitted inference task (paid)
+#[derive(Clone, Debug)]
+pub struct PublicTask {
+    pub task_id: Hash,
+    pub submitter: Address,
+    pub inner_task: InferenceTask,
+    pub max_fee: u128,
+    pub status: PublicTaskStatus,
+    pub submitted_at: u64,
+}
 
 /// Pool of pending inference tasks to be assigned to miners
 pub struct TaskPool {
@@ -15,6 +40,8 @@ pub struct TaskPool {
     current_epoch: u64,
     /// Counter for generating task IDs
     task_counter: u64,
+    /// Public tasks (paid inference requests)
+    public_tasks: HashMap<Hash, PublicTask>,
 }
 
 impl TaskPool {
@@ -23,6 +50,7 @@ impl TaskPool {
             pending: VecDeque::new(),
             current_epoch: 0,
             task_counter: 0,
+            public_tasks: HashMap::new(),
         }
     }
 
@@ -75,6 +103,54 @@ impl TaskPool {
     pub fn prune_expired(&mut self) {
         let now = now_ms();
         self.pending.retain(|t| t.deadline > now);
+    }
+
+    /// Submit a public inference task
+    pub fn submit_public_task(
+        &mut self,
+        submitter: Address,
+        task: InferenceTask,
+        max_fee: u128,
+    ) -> Hash {
+        let task_id = task.task_id;
+        let now = now_ms();
+        let public = PublicTask {
+            task_id,
+            submitter,
+            inner_task: task.clone(),
+            max_fee,
+            status: PublicTaskStatus::Pending,
+            submitted_at: now,
+        };
+        self.public_tasks.insert(task_id, public);
+        // Also add to the pending queue so miners can pick it up
+        self.pending.push_back(task);
+        task_id
+    }
+
+    /// Get a public task by ID
+    pub fn get_public_task(&self, task_id: &Hash) -> Option<&PublicTask> {
+        self.public_tasks.get(task_id)
+    }
+
+    /// Mark a public task as completed
+    pub fn complete_public_task(
+        &mut self,
+        task_id: &Hash,
+        result_data: Vec<u8>,
+        miner: Address,
+        execution_time_ms: u64,
+    ) -> bool {
+        if let Some(task) = self.public_tasks.get_mut(task_id) {
+            task.status = PublicTaskStatus::Completed {
+                result_data,
+                miner,
+                execution_time_ms,
+            };
+            true
+        } else {
+            false
+        }
     }
 
     /// Generate a unique task ID

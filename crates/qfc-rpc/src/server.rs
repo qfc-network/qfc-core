@@ -4,8 +4,10 @@ use crate::error::RpcError;
 use crate::eth::EthApiServer;
 use crate::qfc::{
     QfcApiServer, RpcComputeInfo, RpcEpoch, RpcFaucetResponse, RpcInferenceStats,
-    RpcInferenceProofSubmission, RpcInferenceTask, RpcModel, RpcNodeInfo, RpcProofResult,
+    RpcInferenceProofSubmission, RpcInferenceTask, RpcModel, RpcModelProposal, RpcNodeInfo,
+    RpcProofResult, RpcProposeModelRequest, RpcPublicTaskStatus, RpcSubmitPublicTask,
     RpcTaskRequest, RpcValidator, RpcValidatorMetrics, RpcValidatorScoreBreakdown,
+    RpcVoteModelRequest,
 };
 use crate::types::{BlockNumber, BlockTag, CallRequest, RpcBlock, RpcReceipt, RpcTransaction};
 use jsonrpsee::core::RpcResult;
@@ -65,6 +67,8 @@ pub struct RpcServer {
     task_pool: Arc<RwLock<qfc_ai_coordinator::TaskPool>>,
     /// v2.0: Model registry for verification
     model_registry: Arc<qfc_inference::model::ModelRegistry>,
+    /// v2.0: Model governance
+    governance: Arc<RwLock<qfc_ai_coordinator::ModelGovernance>>,
 }
 
 impl Clone for RpcServer {
@@ -77,6 +81,7 @@ impl Clone for RpcServer {
             chain_id: self.chain_id,
             task_pool: self.task_pool.clone(),
             model_registry: self.model_registry.clone(),
+            governance: self.governance.clone(),
         }
     }
 }
@@ -100,6 +105,7 @@ impl RpcServer {
             chain_id,
             task_pool: Arc::new(RwLock::new(task_pool)),
             model_registry: Arc::new(qfc_inference::model::ModelRegistry::default_v2()),
+            governance: Arc::new(RwLock::new(qfc_ai_coordinator::ModelGovernance::new())),
         }
     }
 
@@ -1096,6 +1102,213 @@ impl QfcApiServer for RpcServer {
                     message: format!("Proof rejected: {}", e),
                 })
             }
+        }
+    }
+
+    // ---- v2.0: Model Governance endpoints ----
+
+    async fn propose_model(
+        &self,
+        request: RpcProposeModelRequest,
+    ) -> RpcResult<String> {
+        let proposer = Self::parse_address(&request.proposer)?;
+        let min_tier = match request.min_tier.as_str() {
+            "Hot" => qfc_inference::GpuTier::Hot,
+            "Warm" => qfc_inference::GpuTier::Warm,
+            _ => qfc_inference::GpuTier::Cold,
+        };
+
+        let model_info = qfc_inference::model::ModelInfo {
+            id: qfc_inference::task::ModelId::new(&request.model_name, &request.model_version),
+            description: request.description,
+            min_memory_mb: request.min_memory_mb,
+            min_tier,
+            size_mb: request.size_mb,
+            approved: false,
+        };
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        let proposal_id = self.governance.write().propose_model(proposer, model_info, now);
+        Ok(hex::encode(proposal_id.as_bytes()))
+    }
+
+    async fn vote_model(
+        &self,
+        request: RpcVoteModelRequest,
+    ) -> RpcResult<bool> {
+        let proposal_id = Self::parse_hash(&request.proposal_id)?;
+        let voter = Self::parse_address(&request.voter)?;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        self.governance
+            .write()
+            .vote(proposal_id, voter, request.approve, now)
+            .map_err(|e| RpcError::Execution(e.to_string()))?;
+
+        Ok(true)
+    }
+
+    async fn get_model_proposals(&self) -> RpcResult<Vec<RpcModelProposal>> {
+        let gov = self.governance.read();
+        let proposals = gov.all_proposals();
+
+        Ok(proposals
+            .into_iter()
+            .map(|p| {
+                let status = match p.status {
+                    qfc_ai_coordinator::ProposalStatus::Active => "Active",
+                    qfc_ai_coordinator::ProposalStatus::Passed => "Passed",
+                    qfc_ai_coordinator::ProposalStatus::Rejected => "Rejected",
+                    qfc_ai_coordinator::ProposalStatus::Expired => "Expired",
+                };
+
+                RpcModelProposal {
+                    proposal_id: hex::encode(p.proposal_id.as_bytes()),
+                    proposer: p.proposer.to_string(),
+                    model_name: p.model_info.id.name.clone(),
+                    model_version: p.model_info.id.version.clone(),
+                    description: p.model_info.description.clone(),
+                    min_memory_mb: p.model_info.min_memory_mb,
+                    min_tier: format!("{:?}", p.model_info.min_tier),
+                    size_mb: p.model_info.size_mb,
+                    votes_for: p.votes_for.len() as u64,
+                    votes_against: p.votes_against.len() as u64,
+                    status: status.to_string(),
+                    created_at: p.created_at,
+                    voting_deadline: p.voting_deadline,
+                }
+            })
+            .collect())
+    }
+
+    // ---- v2.0: Public Inference API endpoints ----
+
+    async fn submit_public_task(
+        &self,
+        request: RpcSubmitPublicTask,
+    ) -> RpcResult<String> {
+        // Parse model ID from "name" or "name:version" format
+        let (model_name, model_version) = if request.model_id.contains(':') {
+            let parts: Vec<&str> = request.model_id.splitn(2, ':').collect();
+            (parts[0].to_string(), parts[1].to_string())
+        } else {
+            (request.model_id.clone(), "v1.0".to_string())
+        };
+
+        let model_id = qfc_inference::task::ModelId::new(&model_name, &model_version);
+
+        // Verify model exists
+        if !self.model_registry.is_approved(&model_id) {
+            return Err(RpcError::InvalidParams(format!(
+                "Model {} is not approved",
+                request.model_id
+            ))
+            .into());
+        }
+
+        let input_data = hex::decode(
+            request.input_data.strip_prefix("0x").unwrap_or(&request.input_data),
+        )
+        .unwrap_or_default();
+
+        let max_fee = request
+            .max_fee
+            .strip_prefix("0x")
+            .map(|s| u128::from_str_radix(s, 16).unwrap_or(0))
+            .unwrap_or_else(|| request.max_fee.parse::<u128>().unwrap_or(0));
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        let task_type = match request.task_type.as_str() {
+            "embedding" => qfc_inference::task::ComputeTaskType::Embedding {
+                model_id,
+                input_hash: qfc_crypto::blake3_hash(&input_data),
+            },
+            _ => qfc_inference::task::ComputeTaskType::Embedding {
+                model_id,
+                input_hash: qfc_crypto::blake3_hash(&input_data),
+            },
+        };
+
+        let mut pool = self.task_pool.write();
+        let task_id = {
+            // Generate a task ID
+            let mut data = Vec::with_capacity(16);
+            data.extend_from_slice(&now.to_le_bytes());
+            data.extend_from_slice(&(pool.pending_count() as u64).to_le_bytes());
+            qfc_crypto::blake3_hash(&data)
+        };
+
+        let task = qfc_inference::InferenceTask::new(
+            task_id,
+            now / 10_000,
+            task_type,
+            input_data,
+            now,
+            now + 60_000, // 60s deadline
+        );
+
+        let public_task_id = pool.submit_public_task(Address::ZERO, task, max_fee);
+        Ok(hex::encode(public_task_id.as_bytes()))
+    }
+
+    async fn get_public_task_status(
+        &self,
+        task_id: String,
+    ) -> RpcResult<RpcPublicTaskStatus> {
+        let task_hash = Self::parse_hash(&task_id)?;
+        let pool = self.task_pool.read();
+
+        match pool.get_public_task(&task_hash) {
+            Some(task) => {
+                let (status, result_data, miner_address, execution_time_ms, fee) =
+                    match &task.status {
+                        qfc_ai_coordinator::task_pool::PublicTaskStatus::Pending => {
+                            ("Pending".to_string(), None, None, None, None)
+                        }
+                        qfc_ai_coordinator::task_pool::PublicTaskStatus::Assigned => {
+                            ("Assigned".to_string(), None, None, None, None)
+                        }
+                        qfc_ai_coordinator::task_pool::PublicTaskStatus::Completed {
+                            result_data,
+                            miner,
+                            execution_time_ms,
+                        } => (
+                            "Completed".to_string(),
+                            Some(hex::encode(result_data)),
+                            Some(miner.to_string()),
+                            Some(*execution_time_ms),
+                            Some(format!("0x{:x}", task.max_fee)),
+                        ),
+                        qfc_ai_coordinator::task_pool::PublicTaskStatus::Failed => {
+                            ("Failed".to_string(), None, None, None, None)
+                        }
+                        qfc_ai_coordinator::task_pool::PublicTaskStatus::Expired => {
+                            ("Expired".to_string(), None, None, None, None)
+                        }
+                    };
+
+                Ok(RpcPublicTaskStatus {
+                    task_id: hex::encode(task.task_id.as_bytes()),
+                    status,
+                    result_data,
+                    miner_address,
+                    execution_time_ms,
+                    fee,
+                })
+            }
+            None => Err(RpcError::InvalidParams("Task not found".to_string()).into()),
         }
     }
 }

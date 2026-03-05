@@ -151,6 +151,42 @@ pub trait QfcApi {
         &self,
         proof: RpcInferenceProofSubmission,
     ) -> RpcResult<RpcProofResult>;
+
+    // ---- v2.0: Model Governance endpoints ----
+
+    /// Submit a model proposal
+    #[method(name = "proposeModel")]
+    async fn propose_model(
+        &self,
+        request: RpcProposeModelRequest,
+    ) -> RpcResult<String>;
+
+    /// Vote on a model proposal
+    #[method(name = "voteModel")]
+    async fn vote_model(
+        &self,
+        request: RpcVoteModelRequest,
+    ) -> RpcResult<bool>;
+
+    /// Get all model proposals
+    #[method(name = "getModelProposals")]
+    async fn get_model_proposals(&self) -> RpcResult<Vec<RpcModelProposal>>;
+
+    // ---- v2.0: Public Inference API endpoints ----
+
+    /// Submit a public inference task (paid)
+    #[method(name = "submitPublicTask")]
+    async fn submit_public_task(
+        &self,
+        request: RpcSubmitPublicTask,
+    ) -> RpcResult<String>;
+
+    /// Get public task status
+    #[method(name = "getPublicTaskStatus")]
+    async fn get_public_task_status(
+        &self,
+        task_id: String,
+    ) -> RpcResult<RpcPublicTaskStatus>;
 }
 
 /// Faucet response
@@ -300,4 +336,75 @@ pub struct RpcProofResult {
     pub spot_checked: bool,
     /// Detail message
     pub message: String,
+}
+
+// ============ v2.0: Model Governance RPC Types ============
+
+/// Model proposal information
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcModelProposal {
+    pub proposal_id: String,
+    pub proposer: String,
+    pub model_name: String,
+    pub model_version: String,
+    pub description: String,
+    pub min_memory_mb: u64,
+    pub min_tier: String,
+    pub size_mb: u64,
+    pub votes_for: u64,
+    pub votes_against: u64,
+    pub status: String,
+    pub created_at: u64,
+    pub voting_deadline: u64,
+}
+
+/// Request to propose a new model
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcProposeModelRequest {
+    pub proposer: String,
+    pub model_name: String,
+    pub model_version: String,
+    pub description: String,
+    pub min_memory_mb: u64,
+    pub min_tier: String,
+    pub size_mb: u64,
+}
+
+/// Request to vote on a model proposal
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcVoteModelRequest {
+    pub proposal_id: String,
+    pub voter: String,
+    pub approve: bool,
+}
+
+// ============ v2.0: Public Inference API Types ============
+
+/// Request to submit a public inference task
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcSubmitPublicTask {
+    pub task_type: String,
+    pub model_id: String,
+    pub input_data: String,
+    pub max_fee: String,
+}
+
+/// Status of a public inference task
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcPublicTaskStatus {
+    pub task_id: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_data: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub miner_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_time_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fee: Option<String>,
 }
