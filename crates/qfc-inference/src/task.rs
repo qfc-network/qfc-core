@@ -46,15 +46,9 @@ pub enum ComputeTaskType {
         seed: u64,
     },
     /// Image classification
-    ImageClassification {
-        model_id: ModelId,
-        input_hash: Hash,
-    },
+    ImageClassification { model_id: ModelId, input_hash: Hash },
     /// Embedding generation
-    Embedding {
-        model_id: ModelId,
-        input_hash: Hash,
-    },
+    Embedding { model_id: ModelId, input_hash: Hash },
     /// Generic ONNX model execution
     OnnxInference {
         /// Hash of ONNX model file

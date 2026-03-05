@@ -187,10 +187,7 @@ mod tests {
         );
 
         let result = verify_basic(&proof, 1, &registry);
-        assert!(matches!(
-            result,
-            Err(VerificationError::UnapprovedModel(_))
-        ));
+        assert!(matches!(result, Err(VerificationError::UnapprovedModel(_))));
     }
 
     #[test]

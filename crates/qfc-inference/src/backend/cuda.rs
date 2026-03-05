@@ -23,9 +23,8 @@ pub struct CudaEngine {
 
 impl CudaEngine {
     pub fn new() -> Result<Self, InferenceError> {
-        let device = candle_core::Device::new_cuda(0).map_err(|e| {
-            InferenceError::BackendUnavailable(format!("CUDA device 0: {}", e))
-        })?;
+        let device = candle_core::Device::new_cuda(0)
+            .map_err(|e| InferenceError::BackendUnavailable(format!("CUDA device 0: {}", e)))?;
 
         let (memory, name) = detect_cuda_device().unwrap_or((0, "CUDA GPU".to_string()));
 
@@ -140,7 +139,10 @@ fn estimate_flops_cuda(task_type: &ComputeTaskType) -> u64 {
 
 fn detect_cuda_device() -> Result<(u64, String), InferenceError> {
     let output = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=memory.total,name", "--format=csv,noheader,nounits"])
+        .args([
+            "--query-gpu=memory.total,name",
+            "--format=csv,noheader,nounits",
+        ])
         .output()
         .map_err(|_| InferenceError::BackendUnavailable("CUDA".to_string()))?;
 

@@ -239,7 +239,10 @@ impl MiningService {
             let task = match task_pool.fetch_task(tier, engine.available_memory_mb()) {
                 Some(t) => t,
                 None => {
-                    debug!("Epoch {}: no matching tasks for tier {}", current_epoch, tier);
+                    debug!(
+                        "Epoch {}: no matching tasks for tier {}",
+                        current_epoch, tier
+                    );
                     continue;
                 }
             };
@@ -439,9 +442,7 @@ impl MiningService {
 
 /// Convert qfc_inference::InferenceProof → qfc_types::InferenceProof
 /// Both types have identical Borsh layout, so we serialize/deserialize.
-fn convert_inference_proof(
-    proof: &qfc_inference::InferenceProof,
-) -> qfc_types::InferenceProof {
+fn convert_inference_proof(proof: &qfc_inference::InferenceProof) -> qfc_types::InferenceProof {
     let bytes = borsh::to_vec(proof).expect("InferenceProof serialization should not fail");
     borsh::from_slice(&bytes).expect("InferenceProof deserialization should not fail")
 }

@@ -70,12 +70,7 @@ impl ModelGovernance {
     }
 
     /// Submit a new model proposal. Returns the proposal ID.
-    pub fn propose_model(
-        &mut self,
-        proposer: Address,
-        model_info: ModelInfo,
-        now: u64,
-    ) -> Hash {
+    pub fn propose_model(&mut self, proposer: Address, model_info: ModelInfo, now: u64) -> Hash {
         self.proposal_counter += 1;
         let mut data = Vec::with_capacity(28);
         data.extend_from_slice(proposer.as_bytes());
@@ -247,7 +242,10 @@ mod tests {
         let approved = gov.tally(3, 5000);
         assert_eq!(approved.len(), 1);
         assert_eq!(approved[0].id.name, "test-model");
-        assert_eq!(gov.get_proposal(&id).unwrap().status, ProposalStatus::Passed);
+        assert_eq!(
+            gov.get_proposal(&id).unwrap().status,
+            ProposalStatus::Passed
+        );
     }
 
     #[test]
@@ -263,7 +261,10 @@ mod tests {
 
         let approved = gov.tally(3, 5000);
         assert!(approved.is_empty());
-        assert_eq!(gov.get_proposal(&id).unwrap().status, ProposalStatus::Rejected);
+        assert_eq!(
+            gov.get_proposal(&id).unwrap().status,
+            ProposalStatus::Rejected
+        );
     }
 
     #[test]
@@ -278,7 +279,10 @@ mod tests {
         // Tally after deadline (1000 + 5000 = 6000)
         let approved = gov.tally(3, 7000);
         assert!(approved.is_empty());
-        assert_eq!(gov.get_proposal(&id).unwrap().status, ProposalStatus::Expired);
+        assert_eq!(
+            gov.get_proposal(&id).unwrap().status,
+            ProposalStatus::Expired
+        );
     }
 
     #[test]

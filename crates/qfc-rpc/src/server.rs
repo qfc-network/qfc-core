@@ -3,11 +3,10 @@
 use crate::error::RpcError;
 use crate::eth::EthApiServer;
 use crate::qfc::{
-    QfcApiServer, RpcComputeInfo, RpcEpoch, RpcFaucetResponse, RpcInferenceStats,
-    RpcInferenceProofSubmission, RpcInferenceTask, RpcModel, RpcModelProposal, RpcNodeInfo,
-    RpcProofResult, RpcProposeModelRequest, RpcPublicTaskStatus, RpcSubmitPublicTask,
-    RpcTaskRequest, RpcValidator, RpcValidatorMetrics, RpcValidatorScoreBreakdown,
-    RpcVoteModelRequest,
+    QfcApiServer, RpcComputeInfo, RpcEpoch, RpcFaucetResponse, RpcInferenceProofSubmission,
+    RpcInferenceStats, RpcInferenceTask, RpcModel, RpcModelProposal, RpcNodeInfo, RpcProofResult,
+    RpcProposeModelRequest, RpcPublicTaskStatus, RpcSubmitPublicTask, RpcTaskRequest, RpcValidator,
+    RpcValidatorMetrics, RpcValidatorScoreBreakdown, RpcVoteModelRequest,
 };
 use crate::types::{BlockNumber, BlockTag, CallRequest, RpcBlock, RpcReceipt, RpcTransaction};
 use jsonrpsee::core::RpcResult;
@@ -995,10 +994,7 @@ impl QfcApiServer for RpcServer {
         let validators = self.chain.get_validators();
         let total_tasks: u64 = validators.iter().map(|v| v.tasks_completed).sum();
         let avg_pass_rate = if !validators.is_empty() {
-            let sum: f64 = validators
-                .iter()
-                .map(|v| v.verification_pass_ratio())
-                .sum();
+            let sum: f64 = validators.iter().map(|v| v.verification_pass_ratio()).sum();
             sum / validators.len() as f64
         } else {
             0.0
@@ -1007,7 +1003,7 @@ impl QfcApiServer for RpcServer {
         Ok(RpcInferenceStats {
             tasks_completed: total_tasks.to_string(),
             avg_time_ms: "0".to_string(), // TODO: track average
-            flops_total: "0".to_string(),  // TODO: accumulate
+            flops_total: "0".to_string(), // TODO: accumulate
             pass_rate: format!("{:.2}", avg_pass_rate * 100.0),
         })
     }
@@ -1030,8 +1026,8 @@ impl QfcApiServer for RpcServer {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_millis() as u64;
-            let epoch_seed = qfc_crypto::blake3_hash(now.to_le_bytes().as_ref())
-                .as_bytes()[0] as u64;
+            let epoch_seed =
+                qfc_crypto::blake3_hash(now.to_le_bytes().as_ref()).as_bytes()[0] as u64;
             pool.generate_synthetic_tasks(now / 10_000, epoch_seed, now + 30_000);
         }
 
@@ -1061,13 +1057,11 @@ impl QfcApiServer for RpcServer {
         submission: RpcInferenceProofSubmission,
     ) -> RpcResult<RpcProofResult> {
         // Decode proof bytes
-        let proof_bytes = hex::decode(&submission.proof_bytes).map_err(|e| {
-            RpcError::Execution(format!("Invalid proof hex: {}", e))
-        })?;
+        let proof_bytes = hex::decode(&submission.proof_bytes)
+            .map_err(|e| RpcError::Execution(format!("Invalid proof hex: {}", e)))?;
 
-        let proof = qfc_inference::InferenceProof::from_bytes(&proof_bytes).map_err(|e| {
-            RpcError::Execution(format!("Failed to deserialize proof: {}", e))
-        })?;
+        let proof = qfc_inference::InferenceProof::from_bytes(&proof_bytes)
+            .map_err(|e| RpcError::Execution(format!("Failed to deserialize proof: {}", e)))?;
 
         // Basic verification
         match qfc_ai_coordinator::verify_basic(&proof, proof.epoch, &self.model_registry) {
@@ -1091,10 +1085,7 @@ impl QfcApiServer for RpcServer {
                 })
             }
             Err(e) => {
-                warn!(
-                    "Proof rejected from {}: {}",
-                    submission.miner_address, e
-                );
+                warn!("Proof rejected from {}: {}", submission.miner_address, e);
 
                 Ok(RpcProofResult {
                     accepted: false,
@@ -1107,10 +1098,7 @@ impl QfcApiServer for RpcServer {
 
     // ---- v2.0: Model Governance endpoints ----
 
-    async fn propose_model(
-        &self,
-        request: RpcProposeModelRequest,
-    ) -> RpcResult<String> {
+    async fn propose_model(&self, request: RpcProposeModelRequest) -> RpcResult<String> {
         let proposer = Self::parse_address(&request.proposer)?;
         let min_tier = match request.min_tier.as_str() {
             "Hot" => qfc_inference::GpuTier::Hot,
@@ -1132,14 +1120,14 @@ impl QfcApiServer for RpcServer {
             .unwrap()
             .as_millis() as u64;
 
-        let proposal_id = self.governance.write().propose_model(proposer, model_info, now);
+        let proposal_id = self
+            .governance
+            .write()
+            .propose_model(proposer, model_info, now);
         Ok(hex::encode(proposal_id.as_bytes()))
     }
 
-    async fn vote_model(
-        &self,
-        request: RpcVoteModelRequest,
-    ) -> RpcResult<bool> {
+    async fn vote_model(&self, request: RpcVoteModelRequest) -> RpcResult<bool> {
         let proposal_id = Self::parse_hash(&request.proposal_id)?;
         let voter = Self::parse_address(&request.voter)?;
 
@@ -1191,10 +1179,7 @@ impl QfcApiServer for RpcServer {
 
     // ---- v2.0: Public Inference API endpoints ----
 
-    async fn submit_public_task(
-        &self,
-        request: RpcSubmitPublicTask,
-    ) -> RpcResult<String> {
+    async fn submit_public_task(&self, request: RpcSubmitPublicTask) -> RpcResult<String> {
         // Parse model ID from "name" or "name:version" format
         let (model_name, model_version) = if request.model_id.contains(':') {
             let parts: Vec<&str> = request.model_id.splitn(2, ':').collect();
@@ -1215,7 +1200,10 @@ impl QfcApiServer for RpcServer {
         }
 
         let input_data = hex::decode(
-            request.input_data.strip_prefix("0x").unwrap_or(&request.input_data),
+            request
+                .input_data
+                .strip_prefix("0x")
+                .unwrap_or(&request.input_data),
         )
         .unwrap_or_default();
 
@@ -1263,10 +1251,7 @@ impl QfcApiServer for RpcServer {
         Ok(hex::encode(public_task_id.as_bytes()))
     }
 
-    async fn get_public_task_status(
-        &self,
-        task_id: String,
-    ) -> RpcResult<RpcPublicTaskStatus> {
+    async fn get_public_task_status(&self, task_id: String) -> RpcResult<RpcPublicTaskStatus> {
         let task_hash = Self::parse_hash(&task_id)?;
         let pool = self.task_pool.read();
 

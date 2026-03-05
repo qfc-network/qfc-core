@@ -50,7 +50,6 @@ pub struct ValidatorNode {
     pub hashrate: u64,
 
     // ---- v2.0: AI Inference fields ----
-
     /// Compute backend type (None if not providing compute)
     pub compute_backend: Option<crate::BackendType>,
 
@@ -120,7 +119,7 @@ impl Default for ValidatorNode {
             inference_score: 0,
             tasks_completed: 0,
             verification_pass_rate: 10000, // 100% (no failures yet)
-            reputation: 5000, // 50% (neutral starting point)
+            reputation: 5000,              // 50% (neutral starting point)
             registered_at: 0,
             last_active: 0,
             is_jailed: false,

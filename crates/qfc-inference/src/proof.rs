@@ -210,14 +210,8 @@ mod tests {
 
     #[test]
     fn test_compute_proof_enum() {
-        let pow_proof = qfc_types::WorkProof::new(
-            Address::default(),
-            1,
-            42,
-            Hash::ZERO,
-            100,
-            1234567890,
-        );
+        let pow_proof =
+            qfc_types::WorkProof::new(Address::default(), 1, 42, Hash::ZERO, 100, 1234567890);
         let compute = ComputeProof::PowV1(pow_proof);
         assert!(matches!(compute, ComputeProof::PowV1(_)));
 
