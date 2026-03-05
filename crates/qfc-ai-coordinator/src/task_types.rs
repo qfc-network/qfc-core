@@ -80,22 +80,16 @@ fn model_tier_and_memory(model_name: &str) -> (GpuTier, u64) {
 /// Generate a synthetic benchmark task for a given tier
 pub fn synthetic_task_for_tier(tier: GpuTier, _epoch: u64, seed: u64) -> ComputeTaskType {
     match tier {
-        GpuTier::Hot => ComputeTaskType::TextGeneration {
-            model_id: ModelId::new("qfc-bench-large", "v1.0"),
-            prompt_hash: Hash::new(synthetic_hash(seed, 0)),
-            max_tokens: 256,
-            temperature_fp: 0,
-            seed,
+        GpuTier::Hot => ComputeTaskType::Embedding {
+            model_id: ModelId::new("qfc-embed-medium", "v1.0"),
+            input_hash: Hash::new(synthetic_hash(seed, 0)),
         },
-        GpuTier::Warm => ComputeTaskType::TextGeneration {
-            model_id: ModelId::new("qfc-bench-medium", "v1.0"),
-            prompt_hash: Hash::new(synthetic_hash(seed, 1)),
-            max_tokens: 128,
-            temperature_fp: 0,
-            seed,
+        GpuTier::Warm => ComputeTaskType::Embedding {
+            model_id: ModelId::new("qfc-embed-medium", "v1.0"),
+            input_hash: Hash::new(synthetic_hash(seed, 1)),
         },
         GpuTier::Cold => ComputeTaskType::Embedding {
-            model_id: ModelId::new("qfc-bench-small", "v1.0"),
+            model_id: ModelId::new("qfc-embed-small", "v1.0"),
             input_hash: Hash::new(synthetic_hash(seed, 2)),
         },
     }
@@ -131,7 +125,7 @@ mod tests {
     #[test]
     fn test_synthetic_tasks() {
         let hot_task = synthetic_task_for_tier(GpuTier::Hot, 1, 42);
-        assert!(matches!(hot_task, ComputeTaskType::TextGeneration { .. }));
+        assert!(matches!(hot_task, ComputeTaskType::Embedding { .. }));
 
         let cold_task = synthetic_task_for_tier(GpuTier::Cold, 1, 42);
         assert!(matches!(cold_task, ComputeTaskType::Embedding { .. }));

@@ -127,7 +127,7 @@ mod tests {
             Address::default(),
             1,
             ComputeTaskType::Embedding {
-                model_id: ModelId::new("qfc-bench-small", "v1.0"),
+                model_id: ModelId::new("qfc-embed-small", "v1.0"),
                 input_hash: Hash::ZERO,
             },
             Hash::ZERO,
@@ -150,7 +150,7 @@ mod tests {
             Address::default(),
             2, // wrong epoch
             ComputeTaskType::Embedding {
-                model_id: ModelId::new("qfc-bench-small", "v1.0"),
+                model_id: ModelId::new("qfc-embed-small", "v1.0"),
                 input_hash: Hash::ZERO,
             },
             Hash::ZERO,
@@ -200,7 +200,7 @@ mod tests {
             Address::default(),
             1,
             ComputeTaskType::Embedding {
-                model_id: ModelId::new("qfc-bench-small", "v1.0"),
+                model_id: ModelId::new("qfc-embed-small", "v1.0"),
                 input_hash: Hash::ZERO,
             },
             Hash::ZERO,

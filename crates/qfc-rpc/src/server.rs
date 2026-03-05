@@ -932,24 +932,24 @@ impl QfcApiServer for RpcServer {
         // In production, this comes from on-chain governance
         Ok(vec![
             RpcModel {
-                name: "qfc-bench-small".to_string(),
+                name: "qfc-embed-small".to_string(),
                 version: "v1.0".to_string(),
                 min_memory_mb: 512,
                 min_tier: "Cold".to_string(),
                 approved: true,
             },
             RpcModel {
-                name: "qfc-bench-medium".to_string(),
+                name: "qfc-embed-medium".to_string(),
                 version: "v1.0".to_string(),
-                min_memory_mb: 4096,
+                min_memory_mb: 2048,
                 min_tier: "Warm".to_string(),
                 approved: true,
             },
             RpcModel {
-                name: "qfc-bench-large".to_string(),
+                name: "qfc-classify-small".to_string(),
                 version: "v1.0".to_string(),
-                min_memory_mb: 24000,
-                min_tier: "Hot".to_string(),
+                min_memory_mb: 2048,
+                min_tier: "Warm".to_string(),
                 approved: true,
             },
         ])

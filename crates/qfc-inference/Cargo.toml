@@ -19,11 +19,22 @@ tokio.workspace = true
 async-trait.workspace = true
 blake3.workspace = true
 
+# candle ML framework (optional, behind feature flags)
+candle-core = { workspace = true, optional = true }
+candle-nn = { workspace = true, optional = true }
+candle-transformers = { workspace = true, optional = true }
+hf-hub = { workspace = true, optional = true }
+tokenizers = { workspace = true, optional = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [features]
 default = ["cpu"]
 cpu = []
-cuda = []
-metal = []
+# Enable real AI inference via candle framework
+candle = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:hf-hub", "dep:tokenizers"]
+# CUDA GPU support (implies candle)
+cuda = ["candle", "candle-core/cuda"]
+# Metal GPU support for Apple Silicon (implies candle)
+metal = ["candle", "candle-core/metal"]
