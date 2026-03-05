@@ -11,6 +11,7 @@ use clap::Parser;
 use miner::{MiningConfig, MiningService};
 use parking_lot::RwLock;
 use producer::{BlockProducer, ProducerConfig};
+use qfc_ai_coordinator::{ProofPool, TaskPool};
 use qfc_chain::{Chain, ChainConfig, GenesisConfig};
 use qfc_consensus::{ConsensusConfig, ConsensusEngine};
 use qfc_crypto::VrfKeypair;
@@ -183,6 +184,10 @@ async fn main() -> Result<()> {
     // Create mempool
     let mempool = Arc::new(RwLock::new(Mempool::new(MempoolConfig::default())));
 
+    // v2.0: Shared proof pool and task pool for RPC, sync, and block producer
+    let proof_pool = Arc::new(RwLock::new(ProofPool::new()));
+    let task_pool = Arc::new(RwLock::new(TaskPool::new()));
+
     // Start P2P network first (so we can pass it to RPC server)
     let network_result: Option<(Arc<NetworkService>, Arc<SyncManager>)> = if !args.no_network {
         let mut network_config = if args.dev {
@@ -215,6 +220,7 @@ async fn main() -> Result<()> {
                     // Attach a CPU inference engine for spot-check re-execution
                     let engine = qfc_inference::backend::cpu::CpuEngine::new();
                     sm.with_inference_engine(Box::new(engine))
+                        .with_proof_pool(proof_pool.clone())
                 };
                 let sync_manager = Arc::new(sync_manager);
                 let sync_manager_for_messages = sync_manager.clone();
@@ -268,7 +274,10 @@ async fn main() -> Result<()> {
         }
         // Attach CPU inference engine for spot-check verification
         let rpc_engine = qfc_inference::create_engine_for_backend(qfc_inference::BackendType::Cpu)?;
-        rpc_server = rpc_server.with_inference_engine(rpc_engine);
+        rpc_server = rpc_server
+            .with_inference_engine(rpc_engine)
+            .with_proof_pool(proof_pool.clone())
+            .with_task_pool(task_pool.clone());
 
         let handle = rpc_server
             .start(rpc_config)
@@ -302,6 +311,8 @@ async fn main() -> Result<()> {
             network_for_producer,
             producer_config,
             args.chain_id,
+            proof_pool.clone(),
+            task_pool.clone(),
         );
 
         tokio::spawn(async move {

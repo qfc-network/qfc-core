@@ -38,6 +38,18 @@ pub const DEFAULT_BLOCK_GAS_LIMIT: u64 = 30_000_000;
 /// Maximum transactions per block
 pub const MAX_TRANSACTIONS_PER_BLOCK: usize = 10000;
 
+/// Maximum inference proofs per block (v2.0)
+pub const MAX_INFERENCE_PROOFS_PER_BLOCK: usize = 500;
+
+/// Inference fee distribution: miner (70%)
+pub const INFERENCE_FEE_MINER_PERCENT: u64 = 70;
+
+/// Inference fee distribution: validators (10%)
+pub const INFERENCE_FEE_VALIDATORS_PERCENT: u64 = 10;
+
+/// Inference fee distribution: burn (20%)
+pub const INFERENCE_FEE_BURN_PERCENT: u64 = 20;
+
 /// Epoch duration in seconds
 pub const EPOCH_DURATION_SECS: u64 = 10;
 

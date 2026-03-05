@@ -47,6 +47,8 @@ pub struct SyncManager {
     inference_engine: Option<Arc<tokio::sync::RwLock<Box<dyn qfc_inference::InferenceEngine>>>>,
     /// Approved model registry for proof validation (v2.0)
     model_registry: Arc<qfc_inference::model::ModelRegistry>,
+    /// v2.0: Pool of verified inference proofs awaiting block inclusion
+    proof_pool: Option<Arc<RwLock<qfc_ai_coordinator::ProofPool>>>,
 }
 
 impl SyncManager {
@@ -65,6 +67,7 @@ impl SyncManager {
             highest_peer_block: Arc::new(RwLock::new(0)),
             inference_engine: None,
             model_registry: Arc::new(qfc_inference::model::ModelRegistry::default_v2()),
+            proof_pool: None,
         }
     }
 
@@ -74,6 +77,12 @@ impl SyncManager {
         engine: Box<dyn qfc_inference::InferenceEngine>,
     ) -> Self {
         self.inference_engine = Some(Arc::new(tokio::sync::RwLock::new(engine)));
+        self
+    }
+
+    /// Set the shared proof pool (v2.0)
+    pub fn with_proof_pool(mut self, pool: Arc<RwLock<qfc_ai_coordinator::ProofPool>>) -> Self {
+        self.proof_pool = Some(pool);
         self
     }
 
@@ -994,6 +1003,11 @@ impl SyncManager {
             proof.flops_estimated,
             1, // single task completed
         );
+
+        // 8. Push to proof pool for block inclusion (v2.0)
+        if let Some(ref pool) = self.proof_pool {
+            pool.write().add(proof.clone());
+        }
 
         info!(
             "Accepted inference proof from {} for epoch {}: {} FLOPS, {}ms",

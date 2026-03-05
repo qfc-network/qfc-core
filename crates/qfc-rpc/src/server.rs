@@ -62,7 +62,7 @@ pub struct RpcServer {
     sync_status: Option<Arc<dyn SyncStatusProvider>>,
     /// Chain ID
     chain_id: u64,
-    /// v2.0: AI inference task pool
+    /// v2.0: AI inference task pool (shared with BlockProducer)
     task_pool: Arc<RwLock<qfc_ai_coordinator::TaskPool>>,
     /// v2.0: Model registry for verification
     model_registry: Arc<qfc_inference::model::ModelRegistry>,
@@ -70,6 +70,8 @@ pub struct RpcServer {
     governance: Arc<RwLock<qfc_ai_coordinator::ModelGovernance>>,
     /// v2.0: Inference engine for spot-check re-execution
     inference_engine: Option<Arc<tokio::sync::RwLock<Box<dyn qfc_inference::InferenceEngine>>>>,
+    /// v2.0: Pool of verified inference proofs awaiting block inclusion
+    proof_pool: Option<Arc<RwLock<qfc_ai_coordinator::ProofPool>>>,
 }
 
 impl Clone for RpcServer {
@@ -84,6 +86,7 @@ impl Clone for RpcServer {
             model_registry: self.model_registry.clone(),
             governance: self.governance.clone(),
             inference_engine: self.inference_engine.clone(),
+            proof_pool: self.proof_pool.clone(),
         }
     }
 }
@@ -109,6 +112,7 @@ impl RpcServer {
             model_registry: Arc::new(qfc_inference::model::ModelRegistry::default_v2()),
             governance: Arc::new(RwLock::new(qfc_ai_coordinator::ModelGovernance::new())),
             inference_engine: None,
+            proof_pool: None,
         }
     }
 
@@ -130,6 +134,18 @@ impl RpcServer {
         engine: Box<dyn qfc_inference::InferenceEngine>,
     ) -> Self {
         self.inference_engine = Some(Arc::new(tokio::sync::RwLock::new(engine)));
+        self
+    }
+
+    /// Set the shared proof pool (v2.0)
+    pub fn with_proof_pool(mut self, pool: Arc<RwLock<qfc_ai_coordinator::ProofPool>>) -> Self {
+        self.proof_pool = Some(pool);
+        self
+    }
+
+    /// Set the shared task pool (v2.0, replaces internal pool)
+    pub fn with_task_pool(mut self, pool: Arc<RwLock<qfc_ai_coordinator::TaskPool>>) -> Self {
+        self.task_pool = pool;
         self
     }
 
@@ -1198,6 +1214,32 @@ impl QfcApiServer for RpcServer {
         // 7. Proof passed — update inference score
         consensus.update_inference_score(&proof.validator, proof.flops_estimated, 1);
 
+        // 8. Push to proof pool for block inclusion (v2.0)
+        // Convert qfc_inference::InferenceProof → qfc_types::InferenceProof via borsh roundtrip
+        let types_proof: qfc_types::InferenceProof =
+            borsh::from_slice(&borsh::to_vec(&proof).unwrap()).unwrap();
+        if let Some(ref pool) = self.proof_pool {
+            pool.write().add(types_proof);
+        }
+
+        // 9. Check if this proof completes a public task (v2.0)
+        {
+            let mut task_pool = self.task_pool.write();
+            if task_pool.get_public_task(&proof.input_hash).is_some() {
+                let result_data = submission
+                    .result_data
+                    .as_ref()
+                    .and_then(|s| hex::decode(s.strip_prefix("0x").unwrap_or(s)).ok())
+                    .unwrap_or_else(|| proof.output_hash.as_bytes().to_vec());
+                task_pool.complete_public_task(
+                    &proof.input_hash,
+                    result_data,
+                    proof.validator,
+                    proof.execution_time_ms,
+                );
+            }
+        }
+
         info!(
             "Updated inference score for {} epoch {}: {} FLOPS, {}ms (spot_checked={})",
             proof.validator,
@@ -1302,6 +1344,38 @@ impl QfcApiServer for RpcServer {
     // ---- v2.0: Public Inference API endpoints ----
 
     async fn submit_public_task(&self, request: RpcSubmitPublicTask) -> RpcResult<String> {
+        // Parse submitter address
+        let submitter = Self::parse_address(&request.submitter)?;
+
+        // Verify signature (Ed25519 over task fields)
+        let sig_bytes = hex::decode(
+            request
+                .signature
+                .strip_prefix("0x")
+                .unwrap_or(&request.signature),
+        )
+        .map_err(|e| RpcError::InvalidParams(format!("Invalid signature hex: {}", e)))?;
+
+        // Build message = task_type || model_id || input_data || max_fee
+        let mut sign_msg = Vec::new();
+        sign_msg.extend_from_slice(request.task_type.as_bytes());
+        sign_msg.extend_from_slice(request.model_id.as_bytes());
+        sign_msg.extend_from_slice(request.input_data.as_bytes());
+        sign_msg.extend_from_slice(request.max_fee.as_bytes());
+        let msg_hash = blake3_hash(&sign_msg);
+
+        // Look up submitter's public key from validators (or accept if dev mode)
+        let consensus = self.chain.consensus();
+        let validators = consensus.get_validators();
+        if let Some(validator) = validators.iter().find(|v| v.address == submitter) {
+            let sig = qfc_types::Signature::from_slice(&sig_bytes)
+                .ok_or_else(|| RpcError::InvalidParams("Invalid signature length".into()))?;
+            if verify_hash_signature(&validator.public_key, &msg_hash, &sig).is_err() {
+                return Err(RpcError::Execution("Invalid signature for submitter".into()).into());
+            }
+        }
+        // Non-validators can still submit if they have balance (signature check is best-effort)
+
         // Parse model ID from "name" or "name:version" format
         let (model_name, model_version) = if request.model_id.contains(':') {
             let parts: Vec<&str> = request.model_id.splitn(2, ':').collect();
@@ -1335,6 +1409,23 @@ impl QfcApiServer for RpcServer {
             .map(|s| u128::from_str_radix(s, 16).unwrap_or(0))
             .unwrap_or_else(|| request.max_fee.parse::<u128>().unwrap_or(0));
 
+        // Escrow: deduct fee from submitter balance immediately
+        let fee_u256 = U256::from_u128(max_fee);
+        let state = self.chain.state();
+        let balance = state
+            .get_balance(&submitter)
+            .map_err(|e| RpcError::Execution(format!("Failed to get balance: {}", e)))?;
+        if balance < fee_u256 {
+            return Err(RpcError::Execution(format!(
+                "Insufficient balance: have {}, need {}",
+                balance, fee_u256
+            ))
+            .into());
+        }
+        state
+            .sub_balance(&submitter, fee_u256)
+            .map_err(|e| RpcError::Execution(format!("Failed to escrow fee: {}", e)))?;
+
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -1353,7 +1444,6 @@ impl QfcApiServer for RpcServer {
 
         let mut pool = self.task_pool.write();
         let task_id = {
-            // Generate a task ID
             let mut data = Vec::with_capacity(16);
             data.extend_from_slice(&now.to_le_bytes());
             data.extend_from_slice(&(pool.pending_count() as u64).to_le_bytes());
@@ -1369,7 +1459,13 @@ impl QfcApiServer for RpcServer {
             now + 60_000, // 60s deadline
         );
 
-        let public_task_id = pool.submit_public_task(Address::ZERO, task, max_fee);
+        let public_task_id = pool.submit_public_task(submitter, task, max_fee);
+        info!(
+            "Public task submitted by {}: {} (fee: {})",
+            submitter,
+            hex::encode(&public_task_id.as_bytes()[..8]),
+            max_fee
+        );
         Ok(hex::encode(public_task_id.as_bytes()))
     }
 

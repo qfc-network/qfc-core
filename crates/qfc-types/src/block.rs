@@ -1,6 +1,6 @@
 //! Block and BlockHeader types
 
-use crate::{Address, Hash, Signature, Transaction, Vote};
+use crate::{Address, Hash, InferenceProof, Signature, Transaction, Vote};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -95,6 +95,9 @@ pub struct BlockHeader {
     /// Receipts root (Merkle Tree)
     pub receipts_root: Hash,
 
+    /// Inference proofs root (Merkle Tree, v2.0)
+    pub proofs_root: Hash,
+
     /// Block producer address
     pub producer: Address,
 
@@ -126,6 +129,7 @@ impl Default for BlockHeader {
             state_root: Hash::ZERO,
             transactions_root: Hash::ZERO,
             receipts_root: Hash::ZERO,
+            proofs_root: Hash::ZERO,
             producer: Address::ZERO,
             contribution_score: 0,
             vrf_proof: VrfProof::default(),
@@ -156,6 +160,9 @@ pub struct Block {
     /// Votes from validators for finality
     pub votes: Vec<Vote>,
 
+    /// Inference proofs included in this block (v2.0)
+    pub inference_proofs: Vec<InferenceProof>,
+
     /// Block producer's signature
     pub signature: Signature,
 }
@@ -166,6 +173,7 @@ impl Default for Block {
             header: BlockHeader::default(),
             transactions: Vec::new(),
             votes: Vec::new(),
+            inference_proofs: Vec::new(),
             signature: Signature::ZERO,
         }
     }
@@ -178,6 +186,7 @@ impl Block {
             header,
             transactions,
             votes: Vec::new(),
+            inference_proofs: Vec::new(),
             signature: Signature::ZERO,
         }
     }
@@ -253,6 +262,7 @@ impl Block {
 pub struct BlockBody {
     pub transactions: Vec<Transaction>,
     pub votes: Vec<Vote>,
+    pub inference_proofs: Vec<InferenceProof>,
     pub signature: Signature,
 }
 
@@ -261,6 +271,7 @@ impl BlockBody {
         Self {
             transactions,
             votes,
+            inference_proofs: Vec::new(),
             signature,
         }
     }
@@ -269,6 +280,7 @@ impl BlockBody {
         Self {
             transactions: block.transactions.clone(),
             votes: block.votes.clone(),
+            inference_proofs: block.inference_proofs.clone(),
             signature: block.signature,
         }
     }

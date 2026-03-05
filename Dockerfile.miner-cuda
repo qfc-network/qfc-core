@@ -1,0 +1,89 @@
+# QFC Inference Miner Dockerfile — CUDA (NVIDIA GPU)
+# Standalone miner image for AI inference tasks
+
+# ============================================
+# Stage 1: Build
+# ============================================
+FROM nvidia/cuda:12.2.0-devel-ubuntu22.04 AS builder
+
+WORKDIR /build
+
+# Install Rust + build dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    pkg-config \
+    libssl-dev \
+    libclang-dev \
+    cmake \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Copy source
+COPY . .
+
+# Build only the miner binary with CUDA
+RUN cargo build --release --features candle,cuda --bin qfc-miner
+
+# ============================================
+# Stage 2: Runtime
+# ============================================
+FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
+
+WORKDIR /app
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy binary from builder
+COPY --from=builder /build/target/release/qfc-miner /usr/local/bin/qfc-miner
+
+# Create model cache directory
+RUN mkdir -p /models
+
+# Environment variables
+ENV QFC_MINER_RPC_URL=http://127.0.0.1:8545
+ENV QFC_MINER_WALLET=""
+ENV QFC_MINER_BACKEND=cuda
+ENV QFC_MINER_MODEL_DIR=/models
+ENV QFC_MINER_MAX_MEMORY=0
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+# Model cache volume
+VOLUME ["/models"]
+
+# No exposed ports — miner is an RPC client
+
+# Entrypoint script
+COPY <<'EOF' /entrypoint.sh
+#!/bin/bash
+set -e
+
+if [ -z "$QFC_MINER_WALLET" ]; then
+    echo "ERROR: QFC_MINER_WALLET must be set"
+    exit 1
+fi
+
+ARGS="--validator-rpc ${QFC_MINER_RPC_URL:-http://127.0.0.1:8545}"
+ARGS="$ARGS --wallet ${QFC_MINER_WALLET}"
+ARGS="$ARGS --backend ${QFC_MINER_BACKEND:-cuda}"
+ARGS="$ARGS --model-dir ${QFC_MINER_MODEL_DIR:-/models}"
+ARGS="$ARGS --max-memory ${QFC_MINER_MAX_MEMORY:-0}"
+
+if [ "$QFC_MINER_VERBOSE" = "true" ] || [ "$QFC_MINER_VERBOSE" = "1" ]; then
+    ARGS="$ARGS --verbose"
+fi
+
+echo "Starting QFC miner (CUDA) with: qfc-miner $ARGS"
+exec qfc-miner $ARGS
+EOF
+
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
