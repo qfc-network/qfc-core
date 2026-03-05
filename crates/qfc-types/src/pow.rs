@@ -184,6 +184,178 @@ impl MiningStats {
     }
 }
 
+// ============ v2.0: AI Inference Types ============
+
+/// Backend type for AI inference execution (v2.0)
+///
+/// Mirrors qfc_inference::BackendType but defined here for type-level
+/// use without pulling in the full inference crate.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, ::core::hash::Hash, BorshSerialize, BorshDeserialize, Serialize, Deserialize,
+)]
+pub enum BackendType {
+    /// NVIDIA CUDA GPU
+    Cuda,
+    /// Apple Metal GPU (Apple Silicon)
+    Metal,
+    /// CPU-only fallback
+    Cpu,
+}
+
+impl std::fmt::Display for BackendType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BackendType::Cuda => write!(f, "CUDA"),
+            BackendType::Metal => write!(f, "Metal"),
+            BackendType::Cpu => write!(f, "CPU"),
+        }
+    }
+}
+
+/// Model identifier for AI inference (v2.0)
+#[derive(
+    Clone, Debug, PartialEq, Eq, ::core::hash::Hash, BorshSerialize, BorshDeserialize, Serialize, Deserialize,
+)]
+pub struct ModelId {
+    /// Model name (e.g. "llama-7b", "bert-base")
+    pub name: String,
+    /// Model version hash (content-addressed)
+    pub version: String,
+}
+
+impl ModelId {
+    pub fn new(name: impl Into<String>, version: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            version: version.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for ModelId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}@{}", self.name, self.version)
+    }
+}
+
+/// Compute task types supported by the network (v2.0)
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
+pub enum ComputeTaskType {
+    /// Text generation (LLM inference)
+    TextGeneration {
+        model_id: ModelId,
+        prompt_hash: Hash,
+        max_tokens: u32,
+        temperature_fp: u32,
+        seed: u64,
+    },
+    /// Image classification
+    ImageClassification {
+        model_id: ModelId,
+        input_hash: Hash,
+    },
+    /// Embedding generation
+    Embedding {
+        model_id: ModelId,
+        input_hash: Hash,
+    },
+    /// Generic ONNX model execution
+    OnnxInference {
+        model_hash: Hash,
+        input_hash: Hash,
+    },
+}
+
+/// Inference proof submitted to the network (v2.0)
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
+pub struct InferenceProof {
+    /// Validator/miner address
+    pub validator: Address,
+    /// Epoch number
+    pub epoch: u64,
+    /// The task type executed
+    pub task_type: ComputeTaskType,
+    /// Hash of input data
+    pub input_hash: Hash,
+    /// Hash of inference output: blake3(output_tensor_bytes)
+    pub output_hash: Hash,
+    /// Execution time in milliseconds
+    pub execution_time_ms: u64,
+    /// Estimated FLOPS of computation
+    pub flops_estimated: u64,
+    /// Backend used (CUDA / Metal / CPU)
+    pub backend: BackendType,
+    /// Timestamp
+    pub timestamp: u64,
+    /// Signature over the proof
+    pub signature: Signature,
+}
+
+impl InferenceProof {
+    /// Create a new inference proof (unsigned)
+    pub fn new(
+        validator: Address,
+        epoch: u64,
+        task_type: ComputeTaskType,
+        input_hash: Hash,
+        output_hash: Hash,
+        execution_time_ms: u64,
+        flops_estimated: u64,
+        backend: BackendType,
+        timestamp: u64,
+    ) -> Self {
+        Self {
+            validator,
+            epoch,
+            task_type,
+            input_hash,
+            output_hash,
+            execution_time_ms,
+            flops_estimated,
+            backend,
+            timestamp,
+            signature: Signature::default(),
+        }
+    }
+
+    /// Set the signature
+    pub fn set_signature(&mut self, signature: Signature) {
+        self.signature = signature;
+    }
+
+    /// Get bytes for signing (excludes signature field)
+    pub fn to_bytes_without_signature(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(self.validator.as_bytes());
+        bytes.extend_from_slice(&self.epoch.to_le_bytes());
+        bytes.extend_from_slice(self.input_hash.as_bytes());
+        bytes.extend_from_slice(self.output_hash.as_bytes());
+        bytes.extend_from_slice(&self.execution_time_ms.to_le_bytes());
+        bytes.extend_from_slice(&self.flops_estimated.to_le_bytes());
+        bytes.extend_from_slice(&self.timestamp.to_le_bytes());
+        bytes
+    }
+
+    /// Serialize to bytes
+    pub fn to_bytes(&self) -> Vec<u8> {
+        borsh::to_vec(self).expect("InferenceProof serialization should not fail")
+    }
+
+    /// Deserialize from bytes
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, borsh::io::Error> {
+        borsh::from_slice(bytes)
+    }
+}
+
+/// Versioned compute proof — supports both v1 PoW and v2 inference (v2.0)
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
+pub enum ComputeProof {
+    /// v1 legacy (Blake3 PoW)
+    PowV1(WorkProof),
+    /// v2 AI inference
+    InferenceV2(InferenceProof),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,5 +444,71 @@ mod tests {
         assert_eq!(stats.total_proofs, 1);
         assert_eq!(stats.total_work_count, 42);
         assert_eq!(stats.last_proof_epoch, 100);
+    }
+
+    // ============ v2.0 Tests ============
+
+    #[test]
+    fn test_inference_proof_serialization() {
+        let proof = InferenceProof::new(
+            Address::default(),
+            1,
+            ComputeTaskType::Embedding {
+                model_id: ModelId::new("bert-base", "v1"),
+                input_hash: Hash::ZERO,
+            },
+            Hash::ZERO,
+            Hash::new([0xab; 32]),
+            150,
+            5000,
+            BackendType::Cpu,
+            1234567890,
+        );
+
+        let bytes = proof.to_bytes();
+        let decoded = InferenceProof::from_bytes(&bytes).unwrap();
+        assert_eq!(proof, decoded);
+    }
+
+    #[test]
+    fn test_compute_proof_enum() {
+        let pow = ComputeProof::PowV1(WorkProof::new(
+            Address::default(),
+            1,
+            42,
+            Hash::ZERO,
+            100,
+            1234567890,
+        ));
+        assert!(matches!(pow, ComputeProof::PowV1(_)));
+
+        let inf = ComputeProof::InferenceV2(InferenceProof::new(
+            Address::default(),
+            1,
+            ComputeTaskType::Embedding {
+                model_id: ModelId::new("bert-base", "v1"),
+                input_hash: Hash::ZERO,
+            },
+            Hash::ZERO,
+            Hash::new([0xab; 32]),
+            150,
+            5000,
+            BackendType::Cpu,
+            1234567890,
+        ));
+        assert!(matches!(inf, ComputeProof::InferenceV2(_)));
+    }
+
+    #[test]
+    fn test_backend_type_display() {
+        assert_eq!(format!("{}", BackendType::Cuda), "CUDA");
+        assert_eq!(format!("{}", BackendType::Metal), "Metal");
+        assert_eq!(format!("{}", BackendType::Cpu), "CPU");
+    }
+
+    #[test]
+    fn test_model_id_display() {
+        let id = ModelId::new("llama-7b", "v1.0");
+        assert_eq!(format!("{}", id), "llama-7b@v1.0");
     }
 }

@@ -3,8 +3,8 @@
 use crate::error::RpcError;
 use crate::eth::EthApiServer;
 use crate::qfc::{
-    QfcApiServer, RpcEpoch, RpcFaucetResponse, RpcNodeInfo, RpcValidator, RpcValidatorMetrics,
-    RpcValidatorScoreBreakdown,
+    QfcApiServer, RpcComputeInfo, RpcEpoch, RpcFaucetResponse, RpcInferenceStats, RpcModel,
+    RpcNodeInfo, RpcValidator, RpcValidatorMetrics, RpcValidatorScoreBreakdown,
 };
 use crate::types::{BlockNumber, BlockTag, CallRequest, RpcBlock, RpcReceipt, RpcTransaction};
 use jsonrpsee::core::RpcResult;
@@ -886,6 +886,94 @@ impl QfcApiServer for RpcServer {
             tx_hash: tx_hash.to_string(),
             amount: format!("0x{:x}", amount_value),
             to: to_address.to_string(),
+        })
+    }
+
+    // ---- v2.0: AI Compute endpoints ----
+
+    async fn get_compute_info(&self) -> RpcResult<RpcComputeInfo> {
+        // Get validator info if this node is a validator
+        let validators = self.chain.get_validators();
+        let our_validator = validators.iter().find(|v| {
+            // Find our validator node (if we are one)
+            v.provides_compute
+        });
+
+        match our_validator {
+            Some(v) => Ok(RpcComputeInfo {
+                backend: v
+                    .compute_backend
+                    .as_ref()
+                    .map(|b| format!("{}", b))
+                    .unwrap_or_else(|| "none".to_string()),
+                supported_models: v
+                    .supported_models
+                    .iter()
+                    .map(|m| format!("{}", m))
+                    .collect(),
+                gpu_memory_mb: v.gpu_memory_mb,
+                inference_score: format!("0x{:x}", v.inference_score),
+                gpu_tier: "unknown".to_string(), // TODO: derive from hardware
+                provides_compute: true,
+            }),
+            None => Ok(RpcComputeInfo {
+                backend: "none".to_string(),
+                supported_models: vec![],
+                gpu_memory_mb: 0,
+                inference_score: "0x0".to_string(),
+                gpu_tier: "none".to_string(),
+                provides_compute: false,
+            }),
+        }
+    }
+
+    async fn get_supported_models(&self) -> RpcResult<Vec<RpcModel>> {
+        // Return the default approved models for v2.0
+        // In production, this comes from on-chain governance
+        Ok(vec![
+            RpcModel {
+                name: "qfc-bench-small".to_string(),
+                version: "v1.0".to_string(),
+                min_memory_mb: 512,
+                min_tier: "Cold".to_string(),
+                approved: true,
+            },
+            RpcModel {
+                name: "qfc-bench-medium".to_string(),
+                version: "v1.0".to_string(),
+                min_memory_mb: 4096,
+                min_tier: "Warm".to_string(),
+                approved: true,
+            },
+            RpcModel {
+                name: "qfc-bench-large".to_string(),
+                version: "v1.0".to_string(),
+                min_memory_mb: 24000,
+                min_tier: "Hot".to_string(),
+                approved: true,
+            },
+        ])
+    }
+
+    async fn get_inference_stats(&self) -> RpcResult<RpcInferenceStats> {
+        // Aggregate inference stats from validators
+        let validators = self.chain.get_validators();
+        let total_tasks: u64 = validators.iter().map(|v| v.tasks_completed).sum();
+        let avg_pass_rate = if !validators.is_empty() {
+            let sum: f64 = validators
+                .iter()
+                .map(|v| v.verification_pass_ratio())
+                .sum();
+            sum / validators.len() as f64
+        } else {
+            0.0
+        };
+
+        Ok(RpcInferenceStats {
+            tasks_completed: total_tasks.to_string(),
+            avg_time_ms: "0".to_string(), // TODO: track average
+            flops_total: "0".to_string(),  // TODO: accumulate
+            pass_rate: format!("{:.2}", avg_pass_rate * 100.0),
         })
     }
 }
