@@ -156,17 +156,11 @@ pub trait QfcApi {
 
     /// Submit a model proposal
     #[method(name = "proposeModel")]
-    async fn propose_model(
-        &self,
-        request: RpcProposeModelRequest,
-    ) -> RpcResult<String>;
+    async fn propose_model(&self, request: RpcProposeModelRequest) -> RpcResult<String>;
 
     /// Vote on a model proposal
     #[method(name = "voteModel")]
-    async fn vote_model(
-        &self,
-        request: RpcVoteModelRequest,
-    ) -> RpcResult<bool>;
+    async fn vote_model(&self, request: RpcVoteModelRequest) -> RpcResult<bool>;
 
     /// Get all model proposals
     #[method(name = "getModelProposals")]
@@ -176,17 +170,11 @@ pub trait QfcApi {
 
     /// Submit a public inference task (paid)
     #[method(name = "submitPublicTask")]
-    async fn submit_public_task(
-        &self,
-        request: RpcSubmitPublicTask,
-    ) -> RpcResult<String>;
+    async fn submit_public_task(&self, request: RpcSubmitPublicTask) -> RpcResult<String>;
 
     /// Get public task status
     #[method(name = "getPublicTaskStatus")]
-    async fn get_public_task_status(
-        &self,
-        task_id: String,
-    ) -> RpcResult<RpcPublicTaskStatus>;
+    async fn get_public_task_status(&self, task_id: String) -> RpcResult<RpcPublicTaskStatus>;
 }
 
 /// Faucet response

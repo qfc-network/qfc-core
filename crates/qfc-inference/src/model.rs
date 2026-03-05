@@ -97,9 +97,7 @@ pub struct ModelRegistry {
 impl ModelRegistry {
     /// Create a new empty registry
     pub fn new() -> Self {
-        Self {
-            models: Vec::new(),
-        }
+        Self { models: Vec::new() }
     }
 
     /// Create a registry with the default approved models for v2.0
@@ -112,7 +110,8 @@ impl ModelRegistry {
         let models = vec![
             ModelInfo {
                 id: ModelId::new("qfc-embed-small", "v1.0"),
-                description: "Small embedding model (all-MiniLM-L6-v2, 384-dim) for Cold tier".to_string(),
+                description: "Small embedding model (all-MiniLM-L6-v2, 384-dim) for Cold tier"
+                    .to_string(),
                 min_memory_mb: 512,
                 min_tier: GpuTier::Cold,
                 size_mb: 80,
@@ -120,7 +119,8 @@ impl ModelRegistry {
             },
             ModelInfo {
                 id: ModelId::new("qfc-embed-medium", "v1.0"),
-                description: "Medium embedding model (all-mpnet-base-v2, 768-dim) for Warm tier".to_string(),
+                description: "Medium embedding model (all-mpnet-base-v2, 768-dim) for Warm tier"
+                    .to_string(),
                 min_memory_mb: 2048,
                 min_tier: GpuTier::Warm,
                 size_mb: 420,
@@ -128,7 +128,8 @@ impl ModelRegistry {
             },
             ModelInfo {
                 id: ModelId::new("qfc-classify-small", "v1.0"),
-                description: "BERT classification model (bert-base-uncased) for Warm tier".to_string(),
+                description: "BERT classification model (bert-base-uncased) for Warm tier"
+                    .to_string(),
                 min_memory_mb: 2048,
                 min_tier: GpuTier::Warm,
                 size_mb: 440,
@@ -141,9 +142,7 @@ impl ModelRegistry {
 
     /// Check if a model is approved
     pub fn is_approved(&self, model_id: &ModelId) -> bool {
-        self.models
-            .iter()
-            .any(|m| m.id == *model_id && m.approved)
+        self.models.iter().any(|m| m.id == *model_id && m.approved)
     }
 
     /// Get model info

@@ -211,11 +211,7 @@ async fn main() -> Result<()> {
 
                 // Start sync manager (with inference engine for spot-check verification)
                 let sync_manager = {
-                    let sm = SyncManager::new(
-                        chain.clone(),
-                        mempool.clone(),
-                        service.clone(),
-                    );
+                    let sm = SyncManager::new(chain.clone(), mempool.clone(), service.clone());
                     // Attach a CPU inference engine for spot-check re-execution
                     let engine = qfc_inference::backend::cpu::CpuEngine::new();
                     sm.with_inference_engine(Box::new(engine))
@@ -326,7 +322,10 @@ async fn main() -> Result<()> {
         let mut mining_config = MiningConfig::default().with_threads(threads);
         mining_config.compute_mode = compute_mode.clone();
         mining_config.inference_backend = Some(args.inference_backend.clone());
-        mining_config.model_dir = args.model_dir.as_ref().map(|p| p.to_string_lossy().into_owned());
+        mining_config.model_dir = args
+            .model_dir
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned());
 
         info!("Compute mode: {:?}", compute_mode);
 
@@ -365,7 +364,10 @@ async fn main() -> Result<()> {
         info!("Block producer: ACTIVE");
     }
     if mining_active {
-        info!("Mining: ACTIVE (20% compute contribution, mode: {})", args.compute_mode);
+        info!(
+            "Mining: ACTIVE (20% compute contribution, mode: {})",
+            args.compute_mode
+        );
     }
     info!("===========================================");
 

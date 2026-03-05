@@ -67,8 +67,7 @@ pub fn calculate_contribution_score_v2(
         if total_inference_score > 0 && validator.inference_score > 0 {
             // v2: Use inference_score
             // inference_score = f(flops, tasks_completed, verification_pass_rate)
-            let compute_ratio =
-                validator.inference_score as f64 / total_inference_score as f64;
+            let compute_ratio = validator.inference_score as f64 / total_inference_score as f64;
             score += compute_ratio * WEIGHT_COMPUTE;
         } else if total_hashrate > 0 {
             // v1 fallback: Use hashrate
@@ -268,8 +267,8 @@ mod tests {
         let score = calculate_contribution_score_v2(
             &v,
             100000,
-            0,      // no hashrate
-            10000,  // total inference score
+            0,     // no hashrate
+            10000, // total inference score
             0,
             NetworkState::Normal,
         );

@@ -8,8 +8,8 @@ use qfc_mempool::Mempool;
 use qfc_network::{NetworkMessage, NetworkService, SyncEvent, SyncRequest, SyncResponse};
 use qfc_rpc::SyncStatusProvider;
 use qfc_types::{
-    Block, Hash, Heartbeat, SlashingEvidence, ValidatorMessage, Vote, VoteDecision, WorkProof,
-    InferenceProof,
+    Block, Hash, Heartbeat, InferenceProof, SlashingEvidence, ValidatorMessage, Vote, VoteDecision,
+    WorkProof,
 };
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
@@ -69,7 +69,10 @@ impl SyncManager {
     }
 
     /// Attach an inference engine for spot-check verification (v2.0)
-    pub fn with_inference_engine(mut self, engine: Box<dyn qfc_inference::InferenceEngine>) -> Self {
+    pub fn with_inference_engine(
+        mut self,
+        engine: Box<dyn qfc_inference::InferenceEngine>,
+    ) -> Self {
         self.inference_engine = Some(Arc::new(tokio::sync::RwLock::new(engine)));
         self
     }
@@ -866,7 +869,10 @@ impl SyncManager {
         let validator = match validators.iter().find(|v| v.address == proof.validator) {
             Some(v) => v,
             None => {
-                debug!("Inference proof from unknown validator: {}", proof.validator);
+                debug!(
+                    "Inference proof from unknown validator: {}",
+                    proof.validator
+                );
                 return;
             }
         };
@@ -918,19 +924,15 @@ impl SyncManager {
                 // input_data. This ensures the spot-check uses identical task_id +
                 // input_data as the miner, preventing false-positive fraud detection.
                 let epoch = consensus.get_epoch();
-                let epoch_seed = u64::from_le_bytes(
-                    epoch.seed[..8].try_into().unwrap_or([0u8; 8]),
-                );
+                let epoch_seed = u64::from_le_bytes(epoch.seed[..8].try_into().unwrap_or([0u8; 8]));
                 let mut task_pool = qfc_ai_coordinator::TaskPool::new();
                 task_pool.generate_synthetic_tasks(proof.epoch, epoch_seed, u64::MAX);
 
                 // Find the task matching proof.input_hash (= original task_id)
                 let matching_task = {
                     let mut found = None;
-                    while let Some(t) = task_pool.fetch_task(
-                        qfc_inference::GpuTier::Hot,
-                        u64::MAX,
-                    ) {
+                    while let Some(t) = task_pool.fetch_task(qfc_inference::GpuTier::Hot, u64::MAX)
+                    {
                         if t.task_id == proof.input_hash {
                             found = Some(t);
                             break;
@@ -941,18 +943,19 @@ impl SyncManager {
 
                 if let Some(task) = matching_task {
                     let engine = engine_lock.read().await;
-                    match qfc_ai_coordinator::verify_spot_check(
-                        &inference_proof,
-                        &task,
-                        &**engine,
-                    ).await {
+                    match qfc_ai_coordinator::verify_spot_check(&inference_proof, &task, &**engine)
+                        .await
+                    {
                         Ok(result) => {
                             info!(
                                 "Spot-check PASSED for inference proof from {}: {}",
                                 proof.validator, result.details
                             );
                         }
-                        Err(qfc_ai_coordinator::VerificationError::OutputHashMismatch { expected, got }) => {
+                        Err(qfc_ai_coordinator::VerificationError::OutputHashMismatch {
+                            expected,
+                            got,
+                        }) => {
                             warn!(
                                 "Spot-check FAILED for {}: output hash mismatch (expected {}, got {})",
                                 proof.validator,
@@ -960,11 +963,7 @@ impl SyncManager {
                                 hex::encode(&got.as_bytes()[..8]),
                             );
                             // Slash the miner for fraud: 5% stake, 6 hours jail
-                            consensus.slash_validator(
-                                &proof.validator,
-                                5,
-                                6 * 60 * 60 * 1000,
-                            );
+                            consensus.slash_validator(&proof.validator, 5, 6 * 60 * 60 * 1000);
                             return;
                         }
                         Err(e) => {

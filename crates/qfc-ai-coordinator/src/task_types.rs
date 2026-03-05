@@ -22,7 +22,11 @@ pub struct TaskRequirements {
 /// Get requirements for a given task type
 pub fn task_requirements(task_type: &ComputeTaskType) -> TaskRequirements {
     match task_type {
-        ComputeTaskType::TextGeneration { model_id, max_tokens, .. } => {
+        ComputeTaskType::TextGeneration {
+            model_id,
+            max_tokens,
+            ..
+        } => {
             let (tier, memory) = model_tier_and_memory(&model_id.name);
             TaskRequirements {
                 min_tier: tier,
@@ -32,33 +36,27 @@ pub fn task_requirements(task_type: &ComputeTaskType) -> TaskRequirements {
                 timeout_ms: 30_000,
             }
         }
-        ComputeTaskType::ImageClassification { model_id, .. } => {
-            TaskRequirements {
-                min_tier: GpuTier::Cold,
-                min_memory_mb: 512,
-                model_id: Some(model_id.clone()),
-                estimated_flops: 4_000_000_000,
-                timeout_ms: 10_000,
-            }
-        }
-        ComputeTaskType::Embedding { model_id, .. } => {
-            TaskRequirements {
-                min_tier: GpuTier::Cold,
-                min_memory_mb: 1024,
-                model_id: Some(model_id.clone()),
-                estimated_flops: 1_000_000_000,
-                timeout_ms: 10_000,
-            }
-        }
-        ComputeTaskType::OnnxInference { .. } => {
-            TaskRequirements {
-                min_tier: GpuTier::Cold,
-                min_memory_mb: 1024,
-                model_id: None,
-                estimated_flops: 2_000_000_000,
-                timeout_ms: 15_000,
-            }
-        }
+        ComputeTaskType::ImageClassification { model_id, .. } => TaskRequirements {
+            min_tier: GpuTier::Cold,
+            min_memory_mb: 512,
+            model_id: Some(model_id.clone()),
+            estimated_flops: 4_000_000_000,
+            timeout_ms: 10_000,
+        },
+        ComputeTaskType::Embedding { model_id, .. } => TaskRequirements {
+            min_tier: GpuTier::Cold,
+            min_memory_mb: 1024,
+            model_id: Some(model_id.clone()),
+            estimated_flops: 1_000_000_000,
+            timeout_ms: 10_000,
+        },
+        ComputeTaskType::OnnxInference { .. } => TaskRequirements {
+            min_tier: GpuTier::Cold,
+            min_memory_mb: 1024,
+            model_id: None,
+            estimated_flops: 2_000_000_000,
+            timeout_ms: 15_000,
+        },
     }
 }
 

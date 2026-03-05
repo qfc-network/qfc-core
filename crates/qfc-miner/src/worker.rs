@@ -170,13 +170,13 @@ impl InferenceWorker {
 
     /// Convert an RPC task response into an InferenceTask
     fn convert_task(&self, resp: &InferenceTaskResponse) -> Result<InferenceTask, String> {
-        let task_id_bytes = hex::decode(&resp.task_id)
-            .map_err(|e| format!("Invalid task_id hex: {}", e))?;
+        let task_id_bytes =
+            hex::decode(&resp.task_id).map_err(|e| format!("Invalid task_id hex: {}", e))?;
         let task_id = Hash::from_slice(&task_id_bytes)
             .ok_or_else(|| "task_id must be 32 bytes".to_string())?;
 
-        let input_data = hex::decode(&resp.input_data)
-            .map_err(|e| format!("Invalid input_data hex: {}", e))?;
+        let input_data =
+            hex::decode(&resp.input_data).map_err(|e| format!("Invalid input_data hex: {}", e))?;
 
         let input_hash = qfc_crypto::blake3_hash(&input_data);
 

@@ -10,8 +10,8 @@ use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config as BertConfig, DTYPE};
 use tokenizers::Tokenizer;
 
-use crate::InferenceError;
 use super::LoadedModel;
+use crate::InferenceError;
 
 /// BERT-based embedding model
 pub struct BertEmbedding {
@@ -75,9 +75,10 @@ impl BertEmbedding {
     /// Returns the mean-pooled embedding as f32 bytes.
     pub fn embed(&self, text: &str) -> Result<Vec<u8>, InferenceError> {
         // Tokenize
-        let encoding = self.tokenizer.encode(text, true).map_err(|e| {
-            InferenceError::ExecutionFailed(format!("Tokenization failed: {}", e))
-        })?;
+        let encoding = self
+            .tokenizer
+            .encode(text, true)
+            .map_err(|e| InferenceError::ExecutionFailed(format!("Tokenization failed: {}", e)))?;
 
         let token_ids = encoding.get_ids().to_vec();
         let attention_mask = encoding.get_attention_mask().to_vec();
@@ -181,6 +182,9 @@ mod tests {
     fn test_bert_embedding_dim() {
         // Can't test loading without downloading, but verify the trait
         // and type compile correctly
-        assert_eq!(std::mem::size_of::<BertEmbedding>(), std::mem::size_of::<BertEmbedding>());
+        assert_eq!(
+            std::mem::size_of::<BertEmbedding>(),
+            std::mem::size_of::<BertEmbedding>()
+        );
     }
 }

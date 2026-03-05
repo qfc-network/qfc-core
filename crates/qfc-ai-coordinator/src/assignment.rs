@@ -22,12 +22,7 @@ pub struct MinerCapability {
 }
 
 impl MinerCapability {
-    pub fn new(
-        address: Address,
-        backend: BackendType,
-        tier: GpuTier,
-        memory_mb: u64,
-    ) -> Self {
+    pub fn new(address: Address, backend: BackendType, tier: GpuTier, memory_mb: u64) -> Self {
         Self {
             address,
             backend,
@@ -51,9 +46,7 @@ pub struct MinerRegistry {
 
 impl MinerRegistry {
     pub fn new() -> Self {
-        Self {
-            miners: Vec::new(),
-        }
+        Self { miners: Vec::new() }
     }
 
     /// Register or update a miner's capability

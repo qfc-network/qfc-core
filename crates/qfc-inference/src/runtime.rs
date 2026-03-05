@@ -6,7 +6,16 @@ use std::fmt;
 
 /// Backend type for inference execution
 #[derive(
-    Clone, Copy, Debug, PartialEq, Eq, Hash, BorshSerialize, BorshDeserialize, Serialize, Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    BorshSerialize,
+    BorshDeserialize,
+    Serialize,
+    Deserialize,
 )]
 pub enum BackendType {
     /// NVIDIA CUDA GPU

@@ -32,9 +32,8 @@ impl MetalEngine {
             ));
         }
 
-        let device = candle_core::Device::new_metal(0).map_err(|e| {
-            InferenceError::BackendUnavailable(format!("Metal device: {}", e))
-        })?;
+        let device = candle_core::Device::new_metal(0)
+            .map_err(|e| InferenceError::BackendUnavailable(format!("Metal device: {}", e)))?;
 
         let memory = crate::runtime::detect_hardware().memory_mb;
         let device_name = detect_apple_chip();

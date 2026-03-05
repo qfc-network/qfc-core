@@ -22,9 +22,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Setup logging
     let filter = if cli.verbose { "debug" } else { "info" };
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .init();
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     info!("QFC AI Inference Miner v{}", env!("CARGO_PKG_VERSION"));
 
@@ -33,8 +31,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Parse wallet address
     let wallet_hex = cli.wallet.strip_prefix("0x").unwrap_or(&cli.wallet);
-    let wallet_bytes = hex::decode(wallet_hex)
-        .map_err(|e| anyhow::anyhow!("Invalid wallet address: {}", e))?;
+    let wallet_bytes =
+        hex::decode(wallet_hex).map_err(|e| anyhow::anyhow!("Invalid wallet address: {}", e))?;
     let wallet_address = Address::from_slice(&wallet_bytes)
         .ok_or_else(|| anyhow::anyhow!("Wallet address must be 20 bytes"))?;
 
@@ -65,7 +63,11 @@ async fn main() -> anyhow::Result<()> {
     info!("Running hardware benchmark...");
     match engine.benchmark() {
         Ok(bench) => {
-            info!("Benchmark: {:.2} MFLOPS ({} ms)", bench.flops / 1e6, bench.benchmark_time_ms);
+            info!(
+                "Benchmark: {:.2} MFLOPS ({} ms)",
+                bench.flops / 1e6,
+                bench.benchmark_time_ms
+            );
         }
         Err(e) => {
             tracing::warn!("Benchmark failed: {}", e);

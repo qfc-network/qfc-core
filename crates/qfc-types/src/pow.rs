@@ -191,7 +191,16 @@ impl MiningStats {
 /// Mirrors qfc_inference::BackendType but defined here for type-level
 /// use without pulling in the full inference crate.
 #[derive(
-    Clone, Copy, Debug, PartialEq, Eq, ::core::hash::Hash, BorshSerialize, BorshDeserialize, Serialize, Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    ::core::hash::Hash,
+    BorshSerialize,
+    BorshDeserialize,
+    Serialize,
+    Deserialize,
 )]
 pub enum BackendType {
     /// NVIDIA CUDA GPU
@@ -214,7 +223,15 @@ impl std::fmt::Display for BackendType {
 
 /// Model identifier for AI inference (v2.0)
 #[derive(
-    Clone, Debug, PartialEq, Eq, ::core::hash::Hash, BorshSerialize, BorshDeserialize, Serialize, Deserialize,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    ::core::hash::Hash,
+    BorshSerialize,
+    BorshDeserialize,
+    Serialize,
+    Deserialize,
 )]
 pub struct ModelId {
     /// Model name (e.g. "llama-7b", "bert-base")
@@ -250,20 +267,11 @@ pub enum ComputeTaskType {
         seed: u64,
     },
     /// Image classification
-    ImageClassification {
-        model_id: ModelId,
-        input_hash: Hash,
-    },
+    ImageClassification { model_id: ModelId, input_hash: Hash },
     /// Embedding generation
-    Embedding {
-        model_id: ModelId,
-        input_hash: Hash,
-    },
+    Embedding { model_id: ModelId, input_hash: Hash },
     /// Generic ONNX model execution
-    OnnxInference {
-        model_hash: Hash,
-        input_hash: Hash,
-    },
+    OnnxInference { model_hash: Hash, input_hash: Hash },
 }
 
 /// Inference proof submitted to the network (v2.0)
