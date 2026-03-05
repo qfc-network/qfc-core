@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y \
 COPY . .
 
 # Build release binaries (node + miner)
-RUN cargo build --release --bin qfc-node --bin qfc-miner
+RUN cargo build --release --features candle --bin qfc-node --bin qfc-miner
 
 # ============================================
 # Stage 2: Runtime

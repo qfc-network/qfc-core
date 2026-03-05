@@ -914,50 +914,72 @@ impl SyncManager {
         // 6. Probabilistic spot-check (~5%)
         if qfc_ai_coordinator::should_spot_check(&inference_proof) {
             if let Some(ref engine_lock) = self.inference_engine {
-                // Reconstruct the InferenceTask from proof fields
-                let task = qfc_inference::InferenceTask {
-                    task_id: proof.input_hash,
-                    epoch: proof.epoch,
-                    task_type: inference_proof.task_type.clone(),
-                    input_data: Vec::new(), // Synthetic tasks use deterministic input from hash
-                    created_at: proof.timestamp,
-                    deadline: proof.timestamp + 30_000,
+                // Regenerate synthetic tasks to find the original task with correct
+                // input_data. This ensures the spot-check uses identical task_id +
+                // input_data as the miner, preventing false-positive fraud detection.
+                let epoch = consensus.get_epoch();
+                let epoch_seed = u64::from_le_bytes(
+                    epoch.seed[..8].try_into().unwrap_or([0u8; 8]),
+                );
+                let mut task_pool = qfc_ai_coordinator::TaskPool::new();
+                task_pool.generate_synthetic_tasks(proof.epoch, epoch_seed, u64::MAX);
+
+                // Find the task matching proof.input_hash (= original task_id)
+                let matching_task = {
+                    let mut found = None;
+                    while let Some(t) = task_pool.fetch_task(
+                        qfc_inference::GpuTier::Hot,
+                        u64::MAX,
+                    ) {
+                        if t.task_id == proof.input_hash {
+                            found = Some(t);
+                            break;
+                        }
+                    }
+                    found
                 };
 
-                let engine = engine_lock.read().await;
-                match qfc_ai_coordinator::verify_spot_check(
-                    &inference_proof,
-                    &task,
-                    &**engine,
-                ).await {
-                    Ok(result) => {
-                        info!(
-                            "Spot-check PASSED for inference proof from {}: {}",
-                            proof.validator, result.details
-                        );
+                if let Some(task) = matching_task {
+                    let engine = engine_lock.read().await;
+                    match qfc_ai_coordinator::verify_spot_check(
+                        &inference_proof,
+                        &task,
+                        &**engine,
+                    ).await {
+                        Ok(result) => {
+                            info!(
+                                "Spot-check PASSED for inference proof from {}: {}",
+                                proof.validator, result.details
+                            );
+                        }
+                        Err(qfc_ai_coordinator::VerificationError::OutputHashMismatch { expected, got }) => {
+                            warn!(
+                                "Spot-check FAILED for {}: output hash mismatch (expected {}, got {})",
+                                proof.validator,
+                                hex::encode(&expected.as_bytes()[..8]),
+                                hex::encode(&got.as_bytes()[..8]),
+                            );
+                            // Slash the miner for fraud: 5% stake, 6 hours jail
+                            consensus.slash_validator(
+                                &proof.validator,
+                                5,
+                                6 * 60 * 60 * 1000,
+                            );
+                            return;
+                        }
+                        Err(e) => {
+                            // Re-execution failure is not necessarily fraud; log and skip
+                            warn!(
+                                "Spot-check re-execution error for {}: {}",
+                                proof.validator, e
+                            );
+                        }
                     }
-                    Err(qfc_ai_coordinator::VerificationError::OutputHashMismatch { expected, got }) => {
-                        warn!(
-                            "Spot-check FAILED for {}: output hash mismatch (expected {}, got {})",
-                            proof.validator,
-                            hex::encode(&expected.as_bytes()[..8]),
-                            hex::encode(&got.as_bytes()[..8]),
-                        );
-                        // Slash the miner for fraud: 5% stake, 6 hours jail
-                        consensus.slash_validator(
-                            &proof.validator,
-                            5,
-                            6 * 60 * 60 * 1000,
-                        );
-                        return;
-                    }
-                    Err(e) => {
-                        // Re-execution failure is not necessarily fraud; log and skip
-                        warn!(
-                            "Spot-check re-execution error for {}: {}",
-                            proof.validator, e
-                        );
-                    }
+                } else {
+                    debug!(
+                        "Spot-check: no matching synthetic task for {}, skipping",
+                        proof.validator
+                    );
                 }
             } else {
                 debug!(
