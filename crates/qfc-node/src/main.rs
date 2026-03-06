@@ -219,6 +219,19 @@ async fn main() -> Result<()> {
             NetworkConfig::default()
         };
 
+        // Use validator key as P2P identity for deterministic peer ID
+        if let Some(validator_key_hex) = &args.validator {
+            if let Ok(key_bytes) = hex::decode(validator_key_hex) {
+                if key_bytes.len() == 32 {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&key_bytes);
+                    network_config.secret_key = Some(arr);
+                }
+            }
+        } else if args.dev {
+            network_config.secret_key = Some([0x01u8; 32]);
+        }
+
         // Set listen address with specified port
         network_config.listen_addresses = vec![format!("/ip4/0.0.0.0/tcp/{}", args.p2p_port)
             .parse()
