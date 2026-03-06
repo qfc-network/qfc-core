@@ -95,9 +95,7 @@ fn download_file(
         .arg(&dest)
         .arg(&url)
         .output()
-        .map_err(|e| {
-            InferenceError::ExecutionFailed(format!("Failed to run curl: {}", e))
-        })?;
+        .map_err(|e| InferenceError::ExecutionFailed(format!("Failed to run curl: {}", e)))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -139,12 +137,14 @@ pub fn download_model(model_name: &str) -> Result<DownloadedModel, InferenceErro
         .join(".cache/qfc-models")
         .join(model_name);
 
-    let weights_path =
-        download_file(&repo, repo_info.repo_id, repo_info.weights_file, &cache_dir)?;
-    let tokenizer_path =
-        download_file(&repo, repo_info.repo_id, repo_info.tokenizer_file, &cache_dir)?;
-    let config_path =
-        download_file(&repo, repo_info.repo_id, repo_info.config_file, &cache_dir)?;
+    let weights_path = download_file(&repo, repo_info.repo_id, repo_info.weights_file, &cache_dir)?;
+    let tokenizer_path = download_file(
+        &repo,
+        repo_info.repo_id,
+        repo_info.tokenizer_file,
+        &cache_dir,
+    )?;
+    let config_path = download_file(&repo, repo_info.repo_id, repo_info.config_file, &cache_dir)?;
 
     tracing::info!("Model {} downloaded successfully", model_name);
 
