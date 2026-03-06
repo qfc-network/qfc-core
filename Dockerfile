@@ -19,7 +19,8 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy manifests first (changes rarely → cached layer)
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml ./
+COPY Cargo.loc[k] ./
 COPY crates/qfc-types/Cargo.toml crates/qfc-types/Cargo.toml
 COPY crates/qfc-crypto/Cargo.toml crates/qfc-crypto/Cargo.toml
 COPY crates/qfc-storage/Cargo.toml crates/qfc-storage/Cargo.toml
