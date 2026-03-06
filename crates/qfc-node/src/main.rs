@@ -158,8 +158,11 @@ async fn main() -> Result<()> {
             address,
         ))
     } else if args.dev {
-        // Dev mode: generate a deterministic validator key
-        let dev_secret = [0x42u8; 32]; // Deterministic dev key
+        // Dev mode: use first testnet validator key
+        let dev_secret = hex::decode("25935d3094fc8c8c6b4fc3279bccd893b10c638d09ecca78e8a38400e1b9500f")
+            .expect("valid hex")
+            .try_into()
+            .unwrap_or([0u8; 32]);
         let vrf_key = VrfKeypair::from_secret_bytes(&dev_secret)?;
         let address = qfc_crypto::address_from_public_key(&vrf_key.public_key());
 
