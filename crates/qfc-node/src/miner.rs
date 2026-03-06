@@ -223,10 +223,9 @@ impl MiningService {
 
             // Advance consensus epoch if expired (needed when this node is not the block producer)
             let head_hash = self.chain.head().map(|h| h.hash).unwrap_or_default();
-            let current_epoch = self.consensus.maybe_advance_epoch(
-                self.config.epoch_duration_ms,
-                head_hash,
-            );
+            let current_epoch = self
+                .consensus
+                .maybe_advance_epoch(self.config.epoch_duration_ms, head_hash);
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
