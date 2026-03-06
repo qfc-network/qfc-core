@@ -1,14 +1,26 @@
 # QFC Node Dockerfile
-# Multi-stage build with dependency caching for fast rebuilds
+# Uses cargo-chef for dependency caching across CI runners
 
 # syntax=docker/dockerfile:1
 
 # ============================================
-# Stage 1: Build
+# Stage 1: Chef planner — analyse dependencies
 # ============================================
-FROM rust:1.75-bookworm AS builder
-
+FROM rust:1.75-bookworm AS chef
+RUN cargo install cargo-chef --locked
 WORKDIR /build
+
+# ============================================
+# Stage 2: Prepare recipe (depends only on Cargo.toml / Cargo.lock)
+# ============================================
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+# ============================================
+# Stage 3: Cook dependencies (cached Docker layer)
+# ============================================
+FROM chef AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
@@ -18,59 +30,16 @@ RUN apt-get update && apt-get install -y \
     cmake \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy manifests first (changes rarely → cached layer)
-COPY Cargo.toml ./
-COPY Cargo.loc[k] ./
-COPY crates/qfc-types/Cargo.toml crates/qfc-types/Cargo.toml
-COPY crates/qfc-crypto/Cargo.toml crates/qfc-crypto/Cargo.toml
-COPY crates/qfc-storage/Cargo.toml crates/qfc-storage/Cargo.toml
-COPY crates/qfc-trie/Cargo.toml crates/qfc-trie/Cargo.toml
-COPY crates/qfc-state/Cargo.toml crates/qfc-state/Cargo.toml
-COPY crates/qfc-executor/Cargo.toml crates/qfc-executor/Cargo.toml
-COPY crates/qfc-mempool/Cargo.toml crates/qfc-mempool/Cargo.toml
-COPY crates/qfc-consensus/Cargo.toml crates/qfc-consensus/Cargo.toml
-COPY crates/qfc-pow/Cargo.toml crates/qfc-pow/Cargo.toml
-COPY crates/qfc-chain/Cargo.toml crates/qfc-chain/Cargo.toml
-COPY crates/qfc-network/Cargo.toml crates/qfc-network/Cargo.toml
-COPY crates/qfc-rpc/Cargo.toml crates/qfc-rpc/Cargo.toml
-COPY crates/qfc-node/Cargo.toml crates/qfc-node/Cargo.toml
-COPY crates/qfc-inference/Cargo.toml crates/qfc-inference/Cargo.toml
-COPY crates/qfc-ai-coordinator/Cargo.toml crates/qfc-ai-coordinator/Cargo.toml
-COPY crates/qfc-miner/Cargo.toml crates/qfc-miner/Cargo.toml
-COPY crates/qfc-lsp/Cargo.toml crates/qfc-lsp/Cargo.toml
-COPY crates/qfc-qsc/Cargo.toml crates/qfc-qsc/Cargo.toml
-COPY crates/qfc-qvm/Cargo.toml crates/qfc-qvm/Cargo.toml
+# Cook dependencies — this layer is cached until Cargo.toml/Cargo.lock change
+COPY --from=planner /build/recipe.json recipe.json
+RUN cargo chef cook --release --features candle --recipe-path recipe.json
 
-# Create stub lib.rs / main.rs for each crate so cargo can resolve deps
-RUN find crates -name Cargo.toml -exec sh -c ' \
-    dir=$(dirname "$1"); \
-    mkdir -p "$dir/src"; \
-    if grep -q "\\[\\[bin\\]\\]" "$1" || [ "$(basename "$dir")" = "qfc-node" ] || [ "$(basename "$dir")" = "qfc-miner" ]; then \
-        echo "fn main() {}" > "$dir/src/main.rs"; \
-    fi; \
-    echo "" > "$dir/src/lib.rs" \
-    ' _ {} \;
-
-# Build dependencies only (cached unless Cargo.toml/Cargo.lock change)
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/build/target \
-    cargo build --release --features candle --bin qfc-node --bin qfc-miner 2>&1 || true
-
-# Now copy real source code
+# Copy source and build actual binaries (only project crates recompile)
 COPY . .
-
-# Touch all source files to invalidate the stub builds but keep dep artifacts
-RUN find crates -name "*.rs" -exec touch {} +
-
-# Build actual binaries (only recompiles project crates, deps are cached)
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/build/target \
-    cargo build --release --features candle --bin qfc-node --bin qfc-miner \
-    && cp /build/target/release/qfc-node /usr/local/bin/qfc-node \
-    && cp /build/target/release/qfc-miner /usr/local/bin/qfc-miner
+RUN cargo build --release --features candle --bin qfc-node --bin qfc-miner
 
 # ============================================
-# Stage 2: Runtime
+# Stage 4: Runtime
 # ============================================
 FROM debian:bookworm-slim
 
@@ -84,8 +53,8 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy binaries from builder
-COPY --from=builder /usr/local/bin/qfc-node /usr/local/bin/qfc-node
-COPY --from=builder /usr/local/bin/qfc-miner /usr/local/bin/qfc-miner
+COPY --from=builder /build/target/release/qfc-node /usr/local/bin/qfc-node
+COPY --from=builder /build/target/release/qfc-miner /usr/local/bin/qfc-miner
 
 # Create data directory
 RUN mkdir -p /data /config /models
