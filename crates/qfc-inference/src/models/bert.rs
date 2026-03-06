@@ -33,15 +33,7 @@ impl BertEmbedding {
         let config_str = std::fs::read_to_string(config_path).map_err(|e| {
             InferenceError::ExecutionFailed(format!("Failed to read config: {}", e))
         })?;
-        // Inject defaults for fields that some models omit but candle requires
-        let mut config_json: serde_json::Value =
-            serde_json::from_str(&config_str).map_err(|e| {
-                InferenceError::ExecutionFailed(format!("Failed to parse config JSON: {}", e))
-            })?;
-        if let Some(obj) = config_json.as_object_mut() {
-            obj.entry("type_vocab_size").or_insert(serde_json::json!(2));
-        }
-        let config: BertConfig = serde_json::from_value(config_json).map_err(|e| {
+        let config: BertConfig = serde_json::from_str(&config_str).map_err(|e| {
             InferenceError::ExecutionFailed(format!("Failed to parse config: {}", e))
         })?;
 
@@ -128,8 +120,7 @@ impl BertEmbedding {
             .to_dtype(DType::F32)
             .map_err(|e| InferenceError::ExecutionFailed(e.to_string()))?;
 
-        let masked = output_f32
-            .broadcast_mul(&mask_f32)
+        let masked = (&output_f32 * &mask_f32)
             .map_err(|e| InferenceError::ExecutionFailed(e.to_string()))?;
 
         let sum = masked
