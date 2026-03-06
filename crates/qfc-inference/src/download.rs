@@ -33,7 +33,7 @@ pub fn get_hf_repo(model_name: &str) -> Option<HfModelRepo> {
             config_file: "config.json",
         }),
         "qfc-embed-medium" => Some(HfModelRepo {
-            repo_id: "sentence-transformers/all-mpnet-base-v2",
+            repo_id: "sentence-transformers/all-MiniLM-L12-v2",
             weights_file: "model.safetensors",
             tokenizer_file: "tokenizer.json",
             config_file: "config.json",
