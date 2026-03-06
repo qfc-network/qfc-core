@@ -170,9 +170,35 @@ pub struct RpcTransaction {
     pub gas: String,
     pub gas_price: String,
     pub input: String,
+    // Ethereum-compatible signature fields (required by ethers.js)
+    pub r: String,
+    pub s: String,
+    pub v: String,
+    #[serde(rename = "type")]
+    pub tx_type: String,
+    pub chain_id: String,
 }
 
 impl RpcTransaction {
+    /// Extract sender, r, s, v from a transaction, handling both Ethereum and Ed25519 formats
+    fn extract_signature_fields(tx: &Transaction) -> (Address, String, String, String) {
+        if tx.public_key.0[0] == 0xEE {
+            // Ethereum transaction: r/s stored in signature, v in public_key[1], sender in public_key[2..22]
+            let sender = Address::from_slice(&tx.public_key.0[2..22]).unwrap_or(Address::ZERO);
+            let r = format!("0x{}", hex::encode(&tx.signature.0[..32]));
+            let s = format!("0x{}", hex::encode(&tx.signature.0[32..]));
+            let v = format!("0x{:x}", tx.public_key.0[1]);
+            (sender, r, s, v)
+        } else {
+            // Ed25519 native: split 64-byte signature into r/s halves, use v=0x1b
+            let sender = qfc_crypto::address_from_public_key(&tx.public_key);
+            let r = format!("0x{}", hex::encode(&tx.signature.0[..32]));
+            let s = format!("0x{}", hex::encode(&tx.signature.0[32..]));
+            let v = "0x1b".to_string();
+            (sender, r, s, v)
+        }
+    }
+
     pub fn from_tx(
         tx: Transaction,
         hash: Hash,
@@ -180,8 +206,8 @@ impl RpcTransaction {
         block_number: u64,
         tx_index: u32,
     ) -> Self {
-        // Derive sender from public key (Ed25519)
-        let sender = qfc_crypto::address_from_public_key(&tx.public_key);
+        let (sender, r, s, v) = Self::extract_signature_fields(&tx);
+        let chain_id = format!("0x{:x}", tx.chain_id);
 
         Self {
             hash: hash.to_string(),
@@ -195,10 +221,18 @@ impl RpcTransaction {
             gas: format!("0x{:x}", tx.gas_limit),
             gas_price: format!("0x{:x}", tx.gas_price.0),
             input: format!("0x{}", hex::encode(&tx.data)),
+            r,
+            s,
+            v,
+            tx_type: "0x0".to_string(),
+            chain_id,
         }
     }
 
-    pub fn from_pending(tx: Transaction, hash: Hash, sender: Address) -> Self {
+    pub fn from_pending(tx: Transaction, hash: Hash, _sender: Address) -> Self {
+        let (sender, r, s, v) = Self::extract_signature_fields(&tx);
+        let chain_id = format!("0x{:x}", tx.chain_id);
+
         Self {
             hash: hash.to_string(),
             nonce: format!("0x{:x}", tx.nonce),
@@ -211,6 +245,11 @@ impl RpcTransaction {
             gas: format!("0x{:x}", tx.gas_limit),
             gas_price: format!("0x{:x}", tx.gas_price.0),
             input: format!("0x{}", hex::encode(&tx.data)),
+            r,
+            s,
+            v,
+            tx_type: "0x0".to_string(),
+            chain_id,
         }
     }
 }

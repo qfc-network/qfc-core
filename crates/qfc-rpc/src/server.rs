@@ -922,11 +922,15 @@ impl QfcApiServer for RpcServer {
 
         let to_address = Self::parse_address(&address)?;
 
-        // Parse amount (in wei)
-        let amount_str = amount.strip_prefix("0x").unwrap_or(&amount);
-        let amount_value = u128::from_str_radix(amount_str, 16)
-            .or_else(|_| amount_str.parse::<u128>())
-            .map_err(|e| RpcError::InvalidParams(format!("Invalid amount: {}", e)))?;
+        // Parse amount (in wei) — hex if "0x" prefix, otherwise decimal
+        let amount_value = if let Some(hex_str) = amount.strip_prefix("0x") {
+            u128::from_str_radix(hex_str, 16)
+                .map_err(|e| RpcError::InvalidParams(format!("Invalid hex amount: {}", e)))?
+        } else {
+            amount
+                .parse::<u128>()
+                .map_err(|e| RpcError::InvalidParams(format!("Invalid amount: {}", e)))?
+        };
 
         // Faucet uses dev validator key [0x42; 32]
         // Ed25519 address: 0x10d7812fbe50096ae82569fdad35f79628bc0084
