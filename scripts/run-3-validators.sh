@@ -3,11 +3,12 @@
 
 set -e
 
-# Validator keys (deterministic for testing)
-# Key format: 32 bytes hex
-VAL1_KEY="4242424242424242424242424242424242424242424242424242424242424242"
-VAL2_KEY="4343434343434343434343434343434343434343434343434343434343434343"
-VAL3_KEY="4444444444444444444444444444444444444444444444444444444444444444"
+# Validator keys (Ed25519 secret keys matching genesis validators)
+# Set these env vars before running, or pass as arguments.
+# Generate with: cargo run --example keygen -p qfc-crypto
+VAL1_KEY="${VAL1_KEY:?Set VAL1_KEY env var (32-byte hex)}"
+VAL2_KEY="${VAL2_KEY:?Set VAL2_KEY env var (32-byte hex)}"
+VAL3_KEY="${VAL3_KEY:?Set VAL3_KEY env var (32-byte hex)}"
 
 # Data directories
 DATA1="/tmp/qfc_val1"

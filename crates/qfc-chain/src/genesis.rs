@@ -72,24 +72,24 @@ impl GenesisConfig {
             );
         }
 
-        // Dev validator accounts (Ed25519 derived addresses)
-        // Key [0x42; 32] -> 0x10d7812fbe50096ae82569fdad35f79628bc0084
-        // Key [0x43; 32] -> 0xfd3dabd401f1b94789d89ce947be9345cfbf44c3
-        // Key [0x44; 32] -> 0xb6d2be7dc3b62c39e5c5a6b744076e9c4dffb552
+        // Testnet validator accounts (Ed25519 derived addresses)
+        // Key 25935d30...1b9500f -> 0x03e6ef4d607eb35bacc6dc4e82be79dad766aa21
+        // Key 2488d109...9afa624 -> 0x8e7ced6ed8cae614681d0fc22bda9a886c7a2a49
+        // Key 711a67ae...d829d6  -> 0x8f454b790049ad4da1326f5526f076831ff1e2d0
         alloc.insert(
-            "0x10d7812fbe50096ae82569fdad35f79628bc0084".to_string(),
+            "0x03e6ef4d607eb35bacc6dc4e82be79dad766aa21".to_string(),
             GenesisAllocation {
                 balance: "1000000000000000000000000000".to_string(), // 1B QFC
             },
         );
         alloc.insert(
-            "0xfd3dabd401f1b94789d89ce947be9345cfbf44c3".to_string(),
+            "0x8e7ced6ed8cae614681d0fc22bda9a886c7a2a49".to_string(),
             GenesisAllocation {
                 balance: "1000000000000000000000000000".to_string(), // 1B QFC
             },
         );
         alloc.insert(
-            "0xb6d2be7dc3b62c39e5c5a6b744076e9c4dffb552".to_string(),
+            "0x8f454b790049ad4da1326f5526f076831ff1e2d0".to_string(),
             GenesisAllocation {
                 balance: "1000000000000000000000000000".to_string(), // 1B QFC
             },
@@ -104,21 +104,18 @@ impl GenesisConfig {
             },
         );
 
-        // Dev validators (deterministic keys for testing)
-        // Key [0x42; 32] -> 0x10d7812fbe50096ae82569fdad35f79628bc0084
-        // Key [0x43; 32] -> 0xfd3dabd401f1b94789d89ce947be9345cfbf44c3
-        // Key [0x44; 32] -> 0xb6d2be7dc3b62c39e5c5a6b744076e9c4dffb552
+        // Testnet validators (proper Ed25519 keypairs)
         let validators = vec![
             GenesisValidator {
-                address: "0x10d7812fbe50096ae82569fdad35f79628bc0084".to_string(),
+                address: "0x03e6ef4d607eb35bacc6dc4e82be79dad766aa21".to_string(),
                 stake: "1000000".to_string(),
             },
             GenesisValidator {
-                address: "0xfd3dabd401f1b94789d89ce947be9345cfbf44c3".to_string(),
+                address: "0x8e7ced6ed8cae614681d0fc22bda9a886c7a2a49".to_string(),
                 stake: "1000000".to_string(),
             },
             GenesisValidator {
-                address: "0xb6d2be7dc3b62c39e5c5a6b744076e9c4dffb552".to_string(),
+                address: "0x8f454b790049ad4da1326f5526f076831ff1e2d0".to_string(),
                 stake: "1000000".to_string(),
             },
         ];
