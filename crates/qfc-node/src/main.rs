@@ -202,11 +202,10 @@ async fn main() -> Result<()> {
         let cpu_engine = qfc_inference::backend::cpu::CpuEngine::new();
         let epoch = consensus.get_epoch();
         let epoch_seed = u64::from_le_bytes(epoch.seed[..8].try_into().unwrap_or([0u8; 8]));
-        let mut gen = challenge_generator.write();
-        // Use a blocking spawn since generate_challenges is async
-        // But since CpuEngine is fast, we can use block_on safely at startup
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(gen.generate_challenges(&cpu_engine, epoch.number, epoch_seed));
+        // Clone to avoid holding RwLock guard across .await
+        let mut gen = challenge_generator.write().clone();
+        gen.generate_challenges(&cpu_engine, epoch.number, epoch_seed).await;
+        *challenge_generator.write() = gen;
     }
 
     // Start P2P network first (so we can pass it to RPC server)
