@@ -119,7 +119,7 @@ impl Chain {
         }
 
         // Apply validators
-        for (address, stake) in self.config.genesis.parse_validators() {
+        for (address, _public_key, stake) in self.config.genesis.parse_validators() {
             self.state.set_stake(&address, stake)?;
             debug!("Genesis validator: {} stake = {}", address, stake);
         }
@@ -164,12 +164,17 @@ impl Chain {
             .genesis
             .parse_validators()
             .into_iter()
-            .map(|(address, stake)| {
+            .map(|(address, public_key, stake)| {
                 let mut v = ValidatorNode::default();
                 v.address = address;
+                v.public_key = public_key;
                 v.stake = stake;
                 v.contribution_score = 1000; // Default contribution score
-                info!("Registering genesis validator: {}", address);
+                info!(
+                    "Registering genesis validator: {} (pubkey set: {})",
+                    address,
+                    public_key != qfc_types::PublicKey::ZERO
+                );
                 v
             })
             .collect();
