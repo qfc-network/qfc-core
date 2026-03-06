@@ -97,6 +97,22 @@ impl Chain {
                 }
             }
 
+            // Restore state root from the latest block
+            if let Some(state_root_bytes) = self
+                .db
+                .get(cf::METADATA, qfc_storage::meta::LATEST_STATE_ROOT)?
+            {
+                if let Some(state_root) = Hash::from_slice(&state_root_bytes) {
+                    self.state.set_root(state_root);
+                    info!("Restored state root: {}", state_root);
+                }
+            } else if let Some(head) = self.head.read().as_ref() {
+                // Fallback: use head block's state root
+                let state_root = head.block.state_root();
+                self.state.set_root(state_root);
+                info!("Restored state root from head block: {}", state_root);
+            }
+
             // Try to load validators from checkpoint
             self.load_validator_checkpoint();
 

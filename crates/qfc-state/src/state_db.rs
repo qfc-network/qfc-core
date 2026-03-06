@@ -52,6 +52,15 @@ impl StateDB {
         }
     }
 
+    /// Restore state to a specific root (used on chain restart)
+    pub fn set_root(&self, root: Hash) {
+        *self.trie.write() = Trie::with_root(self.db.clone(), root);
+        *self.root.write() = root;
+        self.account_cache.write().clear();
+        self.storage_cache.write().clear();
+        self.code_cache.write().clear();
+    }
+
     /// Get the current state root
     pub fn root(&self) -> Hash {
         *self.root.read()
