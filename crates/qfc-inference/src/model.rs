@@ -104,7 +104,7 @@ impl ModelRegistry {
     ///
     /// These map to real HuggingFace models:
     /// - qfc-embed-small → sentence-transformers/all-MiniLM-L6-v2 (~80MB, 384-dim)
-    /// - qfc-embed-medium → sentence-transformers/all-mpnet-base-v2 (~420MB, 768-dim)
+    /// - qfc-embed-medium → sentence-transformers/all-MiniLM-L12-v2 (~120MB, 384-dim)
     /// - qfc-classify-small → google-bert/bert-base-uncased (~440MB, 768-dim)
     pub fn default_v2() -> Self {
         let models = vec![
@@ -119,11 +119,11 @@ impl ModelRegistry {
             },
             ModelInfo {
                 id: ModelId::new("qfc-embed-medium", "v1.0"),
-                description: "Medium embedding model (all-mpnet-base-v2, 768-dim) for Warm tier"
+                description: "Medium embedding model (all-MiniLM-L12-v2, 384-dim) for Cold tier"
                     .to_string(),
-                min_memory_mb: 2048,
-                min_tier: GpuTier::Warm,
-                size_mb: 420,
+                min_memory_mb: 512,
+                min_tier: GpuTier::Cold,
+                size_mb: 120,
                 approved: true,
             },
             ModelInfo {
@@ -218,10 +218,9 @@ mod tests {
         let unknown = ModelId::new("unknown-model", "v1.0");
         assert!(!registry.is_approved(&unknown));
 
-        // Cold tier can run small embedding model only
+        // Cold tier can run small and medium embedding models
         let cold_models = registry.models_for_tier(GpuTier::Cold);
-        assert_eq!(cold_models.len(), 1);
-        assert_eq!(cold_models[0].id.name, "qfc-embed-small");
+        assert_eq!(cold_models.len(), 2);
 
         // Hot tier can run all models
         let hot_models = registry.models_for_tier(GpuTier::Hot);
