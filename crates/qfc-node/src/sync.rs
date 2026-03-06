@@ -884,8 +884,11 @@ impl SyncManager {
             0
         };
 
-        // Update the validator's hashrate
+        // Update the validator's hashrate and mark as compute provider
         consensus.update_hashrate(&proof.validator, estimated_hashrate);
+        if estimated_hashrate > 0 {
+            consensus.set_provides_compute(&proof.validator, true);
+        }
 
         info!(
             "Received work proof from {} for epoch {}: {} valid hashes, ~{} H/s",
