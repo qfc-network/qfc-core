@@ -48,7 +48,6 @@ pub struct ChallengePenalty {
 }
 
 /// Generates and tracks challenge tasks
-#[derive(Clone)]
 pub struct ChallengeGenerator {
     challenge_pool: Vec<ChallengeTask>,
     active_challenges: HashMap<Hash, ChallengeTask>,
