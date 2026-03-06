@@ -2,7 +2,7 @@
 //!
 //! Usage: cargo run --example keygen -p qfc-crypto
 
-use qfc_crypto::{Keypair, address_from_public_key};
+use qfc_crypto::{address_from_public_key, Keypair};
 
 fn main() {
     println!("=== QFC Validator Key Generation ===\n");

@@ -206,7 +206,8 @@ async fn main() -> Result<()> {
         let epoch_seed = u64::from_le_bytes(epoch.seed[..8].try_into().unwrap_or([0u8; 8]));
         // Clone to avoid holding RwLock guard across .await
         let mut gen = challenge_generator.write().clone();
-        gen.generate_challenges(&cpu_engine, epoch.number, epoch_seed).await;
+        gen.generate_challenges(&cpu_engine, epoch.number, epoch_seed)
+            .await;
         *challenge_generator.write() = gen;
     }
 
