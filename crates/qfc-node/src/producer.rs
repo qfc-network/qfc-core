@@ -20,6 +20,9 @@ use std::time::Duration;
 use tokio::time::{interval, Instant};
 use tracing::{debug, error, info, warn};
 
+/// Epoch duration in milliseconds (matches EPOCH_DURATION_SECS)
+const EPOCH_DURATION_MS: u64 = qfc_types::EPOCH_DURATION_SECS * 1000;
+
 /// Block producer configuration
 #[derive(Clone, Debug)]
 pub struct ProducerConfig {
@@ -103,10 +106,29 @@ impl BlockProducer {
         let heartbeat_interval = 3; // Send heartbeat every 3 slots
         let mut slot: u64 = 0;
 
+        // Track epoch advancement
+        let mut last_epoch_advance = Instant::now();
+
         loop {
             block_timer.tick().await;
             slot += 1;
             heartbeat_counter += 1;
+
+            // Advance epoch if enough time has passed
+            if last_epoch_advance.elapsed() >= Duration::from_millis(EPOCH_DURATION_MS) {
+                let current = self.consensus.get_epoch();
+                let next_number = current.number + 1;
+                let head_hash = self.chain.head().map(|h| h.hash).unwrap_or_default();
+                let mut new_seed = [0u8; 32];
+                new_seed.copy_from_slice(head_hash.as_bytes());
+                // Mix epoch number into seed for uniqueness
+                let epoch_bytes = next_number.to_le_bytes();
+                for i in 0..8 {
+                    new_seed[i] ^= epoch_bytes[i];
+                }
+                self.consensus.start_epoch(next_number, new_seed);
+                last_epoch_advance = Instant::now();
+            }
 
             // Send periodic heartbeat
             if heartbeat_counter >= heartbeat_interval {

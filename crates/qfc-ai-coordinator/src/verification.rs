@@ -44,8 +44,13 @@ pub fn verify_basic(
     expected_epoch: u64,
     approved_models: &qfc_inference::model::ModelRegistry,
 ) -> Result<VerificationResult, VerificationError> {
-    // 1. Check epoch matches
-    if proof.epoch != expected_epoch {
+    // 1. Check epoch matches (allow ±1 tolerance for clock skew between nodes)
+    let diff = if proof.epoch >= expected_epoch {
+        proof.epoch - expected_epoch
+    } else {
+        expected_epoch - proof.epoch
+    };
+    if diff > 1 {
         return Err(VerificationError::EpochMismatch {
             expected: expected_epoch,
             got: proof.epoch,
@@ -148,7 +153,7 @@ mod tests {
         let registry = ModelRegistry::default_v2();
         let proof = InferenceProof::new(
             Address::default(),
-            2, // wrong epoch
+            5, // wrong epoch (>1 difference from expected)
             ComputeTaskType::Embedding {
                 model_id: ModelId::new("qfc-embed-small", "v1.0"),
                 input_hash: Hash::ZERO,
@@ -161,11 +166,30 @@ mod tests {
             1234567890,
         );
 
+        // Epoch 5 vs expected 1 → diff > 1 → error
         let result = verify_basic(&proof, 1, &registry);
         assert!(matches!(
             result,
             Err(VerificationError::EpochMismatch { .. })
         ));
+
+        // Epoch 2 vs expected 1 → diff = 1 → OK (±1 tolerance)
+        let proof_close = InferenceProof::new(
+            Address::default(),
+            2,
+            ComputeTaskType::Embedding {
+                model_id: ModelId::new("qfc-embed-small", "v1.0"),
+                input_hash: Hash::ZERO,
+            },
+            Hash::ZERO,
+            Hash::new([0xab; 32]),
+            150,
+            1_000_000_000,
+            BackendType::Cpu,
+            1234567890,
+        );
+        let result_close = verify_basic(&proof_close, 1, &registry);
+        assert!(result_close.is_ok());
     }
 
     #[test]
