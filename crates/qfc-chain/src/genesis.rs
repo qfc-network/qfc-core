@@ -100,10 +100,10 @@ impl GenesisConfig {
             },
         );
 
-        // Faucet accounts (secp256k1/ethers.js derived addresses for same keys)
-        // Key [0x42; 32] -> 0x17c5185167401eD00cF5F5b2fc97D9BBfDb7D025
+        // Faucet account (Ed25519 address from key [0x42;32])
+        // This key is used by the built-in qfc_requestFaucet RPC
         alloc.insert(
-            "0x17c5185167401eD00cF5F5b2fc97D9BBfDb7D025".to_string(),
+            "0x10d7812fbe50096ae82569fdad35f79628bc0084".to_string(),
             GenesisAllocation {
                 balance: "1000000000000000000000000000".to_string(), // 1B QFC (faucet)
             },
