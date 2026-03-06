@@ -222,27 +222,11 @@ impl MiningService {
             }
 
             // Advance consensus epoch if expired (needed when this node is not the block producer)
-            {
-                let epoch = self.consensus.get_epoch();
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64;
-                let epoch_duration_ms = self.config.epoch_duration_ms;
-                if now_ms >= epoch.start_time + epoch_duration_ms {
-                    let next = epoch.number + 1;
-                    let head_hash = self.chain.head().map(|h| h.hash).unwrap_or_default();
-                    let mut seed = [0u8; 32];
-                    seed.copy_from_slice(head_hash.as_bytes());
-                    let eb = next.to_le_bytes();
-                    for i in 0..8 {
-                        seed[i] ^= eb[i];
-                    }
-                    self.consensus.start_epoch(next, seed);
-                }
-            }
-
-            let current_epoch = self.consensus.get_epoch().number;
+            let head_hash = self.chain.head().map(|h| h.hash).unwrap_or_default();
+            let current_epoch = self.consensus.maybe_advance_epoch(
+                self.config.epoch_duration_ms,
+                head_hash,
+            );
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
