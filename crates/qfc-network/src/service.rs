@@ -6,6 +6,7 @@ use crate::error::{NetworkError, Result};
 use crate::sync_protocol::{SyncRequest, SyncResponse, SYNC_PROTOCOL};
 use futures::StreamExt;
 use libp2p::{
+    dns,
     gossipsub::{self, IdentTopic, MessageAuthenticity},
     identify, kad, noise, ping,
     request_response::{self, OutboundRequestId, ProtocolSupport},
@@ -81,8 +82,9 @@ impl NetworkService {
         let local_peer_id = PeerId::from(local_key.public());
         info!("Local peer ID: {}", local_peer_id);
 
-        // Create transport
-        let transport = tcp::tokio::Transport::default()
+        // Create transport (DNS-enabled for /dns4/ multiaddrs)
+        let transport = dns::tokio::Transport::system(tcp::tokio::Transport::default())
+            .map_err(|e| NetworkError::Transport(e.to_string()))?
             .upgrade(libp2p::core::upgrade::Version::V1Lazy)
             .authenticate(noise::Config::new(&local_key).unwrap())
             .multiplex(yamux::Config::default())
@@ -172,10 +174,26 @@ impl NetworkService {
                 .map_err(|e| NetworkError::Listen(e.to_string()))?;
         }
 
-        // Connect to bootnodes
+        // Connect to bootnodes — extract peer IDs and add to Kademlia
         for bootnode in &config.bootnodes {
+            // Extract peer ID from multiaddr (e.g., /dns4/node-1/tcp/30303/p2p/<PEER_ID>)
+            if let Some(libp2p::multiaddr::Protocol::P2p(peer_id)) = bootnode.iter().last() {
+                let mut addr = bootnode.clone();
+                addr.pop(); // Remove /p2p/<peer_id> to get transport-only address
+                swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
+                info!("Added bootnode to Kademlia: {} at {}", peer_id, bootnode);
+            }
+
             if let Err(e) = swarm.dial(bootnode.clone()) {
                 warn!("Failed to dial bootnode {}: {}", bootnode, e);
+            }
+        }
+
+        // Trigger Kademlia bootstrap to discover more peers
+        if !config.bootnodes.is_empty() {
+            match swarm.behaviour_mut().kademlia.bootstrap() {
+                Ok(_) => info!("Kademlia bootstrap initiated"),
+                Err(e) => warn!("Failed to trigger Kademlia bootstrap: {:?}", e),
             }
         }
 
