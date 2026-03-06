@@ -113,7 +113,8 @@ impl BlockProducer {
 
             // Advance epoch if enough time has passed
             let head_hash = self.chain.head().map(|h| h.hash).unwrap_or_default();
-            self.consensus.maybe_advance_epoch(EPOCH_DURATION_MS, head_hash);
+            self.consensus
+                .maybe_advance_epoch(EPOCH_DURATION_MS, head_hash);
 
             // Send periodic heartbeat
             if heartbeat_counter >= heartbeat_interval {
