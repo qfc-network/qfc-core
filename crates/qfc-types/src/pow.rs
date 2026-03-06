@@ -332,16 +332,34 @@ impl InferenceProof {
     }
 
     /// Get bytes for signing (excludes signature field)
+    ///
+    /// Uses Borsh serialization of all fields except signature, matching
+    /// the qfc_inference::InferenceProof implementation.
     pub fn to_bytes_without_signature(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(self.validator.as_bytes());
-        bytes.extend_from_slice(&self.epoch.to_le_bytes());
-        bytes.extend_from_slice(self.input_hash.as_bytes());
-        bytes.extend_from_slice(self.output_hash.as_bytes());
-        bytes.extend_from_slice(&self.execution_time_ms.to_le_bytes());
-        bytes.extend_from_slice(&self.flops_estimated.to_le_bytes());
-        bytes.extend_from_slice(&self.timestamp.to_le_bytes());
-        bytes
+        #[derive(borsh::BorshSerialize)]
+        struct Unsigned {
+            validator: Address,
+            epoch: u64,
+            task_type: ComputeTaskType,
+            input_hash: Hash,
+            output_hash: Hash,
+            execution_time_ms: u64,
+            flops_estimated: u64,
+            backend: BackendType,
+            timestamp: u64,
+        }
+        let unsigned = Unsigned {
+            validator: self.validator,
+            epoch: self.epoch,
+            task_type: self.task_type.clone(),
+            input_hash: self.input_hash,
+            output_hash: self.output_hash,
+            execution_time_ms: self.execution_time_ms,
+            flops_estimated: self.flops_estimated,
+            backend: self.backend,
+            timestamp: self.timestamp,
+        };
+        borsh::to_vec(&unsigned).expect("InferenceProof serialization should not fail")
     }
 
     /// Serialize to bytes
