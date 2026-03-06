@@ -2,8 +2,8 @@
 
 use qfc_crypto::blake3_hash;
 use qfc_types::{
-    Address, Block, BlockHeader, Hash, Signature, VrfProof, BLOCK_VERSION, DEFAULT_BLOCK_GAS_LIMIT,
-    DEFAULT_CHAIN_ID, U256,
+    Address, Block, BlockHeader, Hash, PublicKey, Signature, VrfProof, BLOCK_VERSION,
+    DEFAULT_BLOCK_GAS_LIMIT, DEFAULT_CHAIN_ID, U256,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -39,6 +39,8 @@ pub struct GenesisAllocation {
 pub struct GenesisValidator {
     /// Validator address
     pub address: String,
+    /// Ed25519 public key (hex)
+    pub public_key: String,
     /// Initial stake
     pub stake: String,
 }
@@ -110,21 +112,30 @@ impl GenesisConfig {
         );
 
         // Validators: 1 dev (public) + 3 testnet (keys in private repo)
+        // Public keys are Ed25519 public keys (safe to include in public code)
         let validators = vec![
             GenesisValidator {
                 address: "0x1bff2fcb945733cc3012879cb9fab07928667062".to_string(), // dev [0x01;32]
+                public_key: "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
+                    .to_string(),
                 stake: "1000000".to_string(),
             },
             GenesisValidator {
                 address: "0x8d1dd4291ea7fe924cd4b2e577f6c81f3e4025c8".to_string(),
+                public_key: "7f225ba786bafc9374245d06ac28ec427543d05dff4b55bcbc08cf02ab94ea1d"
+                    .to_string(),
                 stake: "1000000".to_string(),
             },
             GenesisValidator {
                 address: "0x4a737feb30701eb86b708896bf6eff0fb7b2e0b2".to_string(),
+                public_key: "ede3fe8baf9c26d9cff9af12bbc0b2fd74d390f5e5f2911a02870bccde37d506"
+                    .to_string(),
                 stake: "1000000".to_string(),
             },
             GenesisValidator {
                 address: "0xb560ab667adac60e0c9fd5c48b7d309cdf2be685".to_string(),
+                public_key: "f4aba22b9a83084f549f63a34ddaf417fb46e759611ddb22e7b3cc6b207aabee"
+                    .to_string(),
                 stake: "1000000".to_string(),
             },
         ];
@@ -181,8 +192,8 @@ impl GenesisConfig {
             .collect()
     }
 
-    /// Parse validators
-    pub fn parse_validators(&self) -> Vec<(Address, U256)> {
+    /// Parse validators (returns address, public_key, stake)
+    pub fn parse_validators(&self) -> Vec<(Address, PublicKey, U256)> {
         self.validators
             .iter()
             .filter_map(|v| {
@@ -190,8 +201,17 @@ impl GenesisConfig {
                 let addr_bytes = hex::decode(addr_str).ok()?;
                 let address = Address::from_slice(&addr_bytes)?;
 
+                let pk_bytes = hex::decode(&v.public_key).ok()?;
+                let public_key = if pk_bytes.len() == 32 {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&pk_bytes);
+                    PublicKey::new(arr)
+                } else {
+                    PublicKey::ZERO
+                };
+
                 let stake = v.stake.parse::<u128>().ok()?;
-                Some((address, U256::from_u128(stake)))
+                Some((address, public_key, U256::from_u128(stake)))
             })
             .collect()
     }
