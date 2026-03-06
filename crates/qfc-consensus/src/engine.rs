@@ -199,6 +199,35 @@ impl ConsensusEngine {
         info!("Started epoch {} with seed {:?}", epoch_number, &seed[..8]);
     }
 
+    /// Advance epoch if the current one has expired, computing the correct
+    /// epoch number from elapsed time so all nodes converge regardless of
+    /// startup order.  Returns the (possibly updated) epoch number.
+    pub fn maybe_advance_epoch(&self, epoch_duration_ms: u64, head_hash: Hash) -> u64 {
+        let current = self.get_epoch();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        if epoch_duration_ms == 0 || now < current.start_time + epoch_duration_ms {
+            return current.number;
+        }
+
+        // Compute how many epochs have elapsed since this epoch started
+        let elapsed = now - current.start_time;
+        let epochs_passed = elapsed / epoch_duration_ms;
+        let next_number = current.number + epochs_passed;
+
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(head_hash.as_bytes());
+        let eb = next_number.to_le_bytes();
+        for i in 0..8 {
+            seed[i] ^= eb[i];
+        }
+        self.start_epoch(next_number, seed);
+        next_number
+    }
+
     /// Select block producer for current epoch slot
     pub fn select_producer(&self, slot: u64) -> Option<Address> {
         let validators = self.validators.read();

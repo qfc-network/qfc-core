@@ -940,10 +940,15 @@ impl SyncManager {
         };
 
         // 5. Run basic verification (epoch, model, FLOPS)
-        let current_epoch = consensus.get_epoch();
+        // Advance epoch if expired before checking, so we use a fresh epoch number
+        let head_hash = self.chain.head().map(|h| h.hash).unwrap_or_default();
+        let epoch_number = consensus.maybe_advance_epoch(
+            qfc_types::EPOCH_DURATION_SECS * 1000,
+            head_hash,
+        );
         if let Err(e) = qfc_ai_coordinator::verify_basic(
             &inference_proof,
-            current_epoch.number,
+            epoch_number,
             &self.model_registry,
         ) {
             warn!(
