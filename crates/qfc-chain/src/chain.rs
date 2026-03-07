@@ -737,11 +737,15 @@ impl Chain {
 
         match result {
             Ok(exec_result) => {
-                // Return error message as output if failed
                 let output = if exec_result.success {
-                    Vec::new() // No EVM output yet
+                    exec_result.output
                 } else {
-                    exec_result.error.unwrap_or_default().into_bytes()
+                    // Return revert data if available, otherwise error as bytes
+                    if exec_result.output.is_empty() {
+                        exec_result.error.unwrap_or_default().into_bytes()
+                    } else {
+                        exec_result.output
+                    }
                 };
                 Ok((exec_result.success, output, exec_result.gas_used))
             }
