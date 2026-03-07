@@ -74,7 +74,7 @@ impl TaskPool {
             input_hash_index: HashMap::new(),
             assigned: HashMap::new(),
             redundant_assignments: HashMap::new(),
-            redundancy_count: 3,
+            redundancy_count: 2,
         }
     }
 

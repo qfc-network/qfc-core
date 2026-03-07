@@ -20,7 +20,7 @@ impl Default for RedundantConfig {
     fn default() -> Self {
         Self {
             fee_threshold: 1_000_000_000_000_000_000, // 1 QFC
-            redundancy_count: 3,
+            redundancy_count: 2,
         }
     }
 }
