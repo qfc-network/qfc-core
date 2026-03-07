@@ -312,8 +312,8 @@ impl BlockProducer {
         let mut task_pool = self.task_pool.write();
 
         for proof in proofs {
-            // Check if this proof completes a public task
-            if let Some(public_task) = task_pool.get_public_task(&proof.input_hash) {
+            // Check if this proof completes a public task (match by input_hash)
+            if let Some(public_task) = task_pool.get_public_task_by_input_hash(&proof.input_hash) {
                 if matches!(
                     public_task.status,
                     qfc_ai_coordinator::task_pool::PublicTaskStatus::Pending
@@ -338,7 +338,7 @@ impl BlockProducer {
                     // 20% burned (not distributed)
 
                     // Mark task completed
-                    task_pool.complete_public_task(
+                    task_pool.complete_public_task_by_input_hash(
                         &proof.input_hash,
                         proof.output_hash.as_bytes().to_vec(),
                         proof.validator,
