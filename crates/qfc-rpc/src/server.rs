@@ -634,12 +634,13 @@ impl EthApiServer for RpcServer {
                 if success {
                     Ok(format!("0x{}", hex::encode(&output)))
                 } else {
-                    // Return the error message if available
-                    if output.is_empty() {
-                        Ok("0x".to_string())
+                    // Return a proper JSON-RPC error on revert
+                    let revert_msg = if output.is_empty() {
+                        "execution reverted".to_string()
                     } else {
-                        Ok(format!("0x{}", hex::encode(&output)))
-                    }
+                        format!("execution reverted: 0x{}", hex::encode(&output))
+                    };
+                    Err(RpcError::Execution(revert_msg).into())
                 }
             }
             Err(e) => Err(RpcError::Execution(e.to_string()).into()),

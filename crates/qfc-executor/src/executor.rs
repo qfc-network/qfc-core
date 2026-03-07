@@ -26,6 +26,8 @@ pub struct ExecutionResult {
     pub logs: Vec<Log>,
     /// Contract address (if contract creation)
     pub contract_address: Option<Address>,
+    /// Return data from EVM execution
+    pub output: Vec<u8>,
     /// Error message (if failed)
     pub error: Option<String>,
 }
@@ -37,6 +39,7 @@ impl ExecutionResult {
             gas_used,
             logs: Vec::new(),
             contract_address: None,
+            output: Vec::new(),
             error: None,
         }
     }
@@ -47,6 +50,7 @@ impl ExecutionResult {
             gas_used,
             logs: Vec::new(),
             contract_address: Some(contract_address),
+            output: Vec::new(),
             error: None,
         }
     }
@@ -57,6 +61,7 @@ impl ExecutionResult {
             gas_used,
             logs: Vec::new(),
             contract_address: None,
+            output: Vec::new(),
             error: Some(error),
         }
     }
@@ -268,6 +273,7 @@ impl Executor {
                     gas_used: 21_000, // base gas for inference task record
                     logs: Vec::new(),
                     contract_address: None,
+                    output: Vec::new(),
                     error: None,
                 })
             }
@@ -409,14 +415,17 @@ impl Executor {
         if result.success {
             let mut exec_result = ExecutionResult::success(result.gas_used);
             exec_result.logs = result.logs;
+            exec_result.output = result.output;
             Ok(exec_result)
         } else {
-            Ok(ExecutionResult::failure(
+            let mut exec_result = ExecutionResult::failure(
                 result.gas_used,
                 result
                     .error
                     .unwrap_or_else(|| "Execution failed".to_string()),
-            ))
+            );
+            exec_result.output = result.output;
+            Ok(exec_result)
         }
     }
 
