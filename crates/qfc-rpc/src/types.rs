@@ -1,6 +1,6 @@
 //! RPC types for JSON serialization
 
-use qfc_types::{Address, Block, Hash, Receipt, Transaction};
+use qfc_types::{Address, Block, Hash, Receipt, Transaction, TransactionType};
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// Block number parameter - handles both hex strings ("0x0") and tags ("latest")
@@ -180,6 +180,11 @@ pub struct RpcTransaction {
 }
 
 impl RpcTransaction {
+    /// Map TransactionType to Ethereum-style hex type string
+    fn tx_type_hex(tx_type: TransactionType) -> String {
+        format!("0x{:x}", tx_type as u8)
+    }
+
     /// Extract sender, r, s, v from a transaction, handling both Ethereum and Ed25519 formats
     fn extract_signature_fields(tx: &Transaction) -> (Address, String, String, String) {
         if tx.public_key.0[0] == 0xEE {
@@ -224,7 +229,7 @@ impl RpcTransaction {
             r,
             s,
             v,
-            tx_type: "0x0".to_string(),
+            tx_type: Self::tx_type_hex(tx.tx_type),
             chain_id,
         }
     }
@@ -232,6 +237,7 @@ impl RpcTransaction {
     pub fn from_pending(tx: Transaction, hash: Hash, _sender: Address) -> Self {
         let (sender, r, s, v) = Self::extract_signature_fields(&tx);
         let chain_id = format!("0x{:x}", tx.chain_id);
+        let tx_type = Self::tx_type_hex(tx.tx_type);
 
         Self {
             hash: hash.to_string(),
@@ -248,7 +254,7 @@ impl RpcTransaction {
             r,
             s,
             v,
-            tx_type: "0x0".to_string(),
+            tx_type,
             chain_id,
         }
     }
