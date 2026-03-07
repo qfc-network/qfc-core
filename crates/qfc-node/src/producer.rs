@@ -355,6 +355,12 @@ impl BlockProducer {
             }
         }
 
+        // C2: Re-queue tasks assigned to miners that timed out
+        let reassigned = task_pool.reassign_stale_tasks();
+        if reassigned > 0 {
+            info!("Reassigned {} stale inference tasks", reassigned);
+        }
+
         // Prune expired tasks and refund submitters
         let expired = task_pool.prune_expired_public(now_ms());
         for task in expired {
