@@ -58,6 +58,16 @@ pub enum ComputeTaskType {
 }
 
 impl ComputeTaskType {
+    /// Get the input hash that identifies this task's input data
+    pub fn input_hash(&self) -> Hash {
+        match self {
+            Self::TextGeneration { prompt_hash, .. } => *prompt_hash,
+            Self::ImageClassification { input_hash, .. } => *input_hash,
+            Self::Embedding { input_hash, .. } => *input_hash,
+            Self::OnnxInference { input_hash, .. } => *input_hash,
+        }
+    }
+
     /// Get the model ID for this task (if applicable)
     pub fn model_id(&self) -> Option<&ModelId> {
         match self {
