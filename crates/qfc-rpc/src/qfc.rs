@@ -1,5 +1,6 @@
 //! QFC-specific RPC methods
 
+use jsonrpsee::core::SubscriptionResult;
 use jsonrpsee::core::RpcResult;
 use jsonrpsee::proc_macros::rpc;
 use serde::{Deserialize, Serialize};
@@ -188,6 +189,11 @@ pub trait QfcApi {
     /// Get public task status
     #[method(name = "getPublicTaskStatus")]
     async fn get_public_task_status(&self, task_id: String) -> RpcResult<RpcPublicTaskStatus>;
+
+    /// Subscribe to task status updates (WebSocket only).
+    /// Pushes RpcPublicTaskStatus whenever the task transitions state.
+    #[subscription(name = "subscribeTaskStatus" => "taskStatus", unsubscribe = "unsubscribeTaskStatus", item = RpcPublicTaskStatus)]
+    async fn subscribe_task_status(&self, task_id: String) -> SubscriptionResult;
 }
 
 /// Faucet response
@@ -401,20 +407,36 @@ pub struct RpcSubmitPublicTask {
     pub signature: String,
 }
 
-/// Status of a public inference task
+/// Status of a public inference task (B1: structured result envelope)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RpcPublicTaskStatus {
     pub task_id: String,
     pub status: String,
+    /// Submitter address
+    pub submitter: String,
+    /// Task type (e.g. "embedding", "text_generation")
+    pub task_type: String,
+    /// Model used (e.g. "qfc-embed-small:v1.0")
+    pub model_id: String,
+    /// Task creation timestamp (ms)
+    pub created_at: u64,
+    /// Task deadline timestamp (ms)
+    pub deadline: u64,
+    /// Max fee in wei (hex)
+    pub max_fee: String,
+    /// Result payload (base64-encoded bytes), present when status=Completed
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub result_data: Option<String>,
+    pub result: Option<String>,
+    /// Result size in bytes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_size: Option<usize>,
+    /// Miner that completed the task
     #[serde(skip_serializing_if = "Option::is_none")]
     pub miner_address: Option<String>,
+    /// Execution time in milliseconds
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execution_time_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub fee: Option<String>,
 }
 
 // ============ v2.0 P2: Miner Registration & Status Report Types ============

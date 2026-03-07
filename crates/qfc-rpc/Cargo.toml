@@ -28,5 +28,6 @@ hex.workspace = true
 qfc-inference.workspace = true
 qfc-ai-coordinator.workspace = true
 borsh.workspace = true
+base64.workspace = true
 
 [dev-dependencies]
