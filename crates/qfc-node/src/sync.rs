@@ -1006,7 +1006,11 @@ impl SyncManager {
                             );
                             // E3: Open multi-validator arbitration instead of immediate slash
                             let mut arb = self.arbitration_manager.write();
-                            if arb.open_dispute(proof.input_hash, proof.validator, proof.output_hash) {
+                            if arb.open_dispute(
+                                proof.input_hash,
+                                proof.validator,
+                                proof.output_hash,
+                            ) {
                                 // Add our own vote (the spot-check re-execution result)
                                 if let Some(our_addr) = consensus.our_address() {
                                     arb.submit_vote(
