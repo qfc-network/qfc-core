@@ -10,7 +10,7 @@ use crate::qfc::{
     RpcValidator, RpcValidatorMetrics, RpcValidatorScoreBreakdown, RpcVoteModelRequest,
 };
 use crate::types::{BlockNumber, BlockTag, CallRequest, RpcBlock, RpcReceipt, RpcTransaction};
-use jsonrpsee::core::RpcResult;
+use jsonrpsee::core::{RpcResult, SubscriptionResult};
 use jsonrpsee::server::{ServerBuilder, ServerHandle};
 use parking_lot::RwLock;
 use qfc_chain::Chain;
@@ -1744,44 +1744,129 @@ impl QfcApiServer for RpcServer {
         let pool = self.task_pool.read();
 
         match pool.get_public_task(&task_hash) {
-            Some(task) => {
-                let (status, result_data, miner_address, execution_time_ms, fee) =
-                    match &task.status {
-                        qfc_ai_coordinator::task_pool::PublicTaskStatus::Pending => {
-                            ("Pending".to_string(), None, None, None, None)
-                        }
-                        qfc_ai_coordinator::task_pool::PublicTaskStatus::Assigned => {
-                            ("Assigned".to_string(), None, None, None, None)
-                        }
-                        qfc_ai_coordinator::task_pool::PublicTaskStatus::Completed {
-                            result_data,
-                            miner,
-                            execution_time_ms,
-                        } => (
-                            "Completed".to_string(),
-                            Some(hex::encode(result_data)),
-                            Some(miner.to_string()),
-                            Some(*execution_time_ms),
-                            Some(format!("0x{:x}", task.max_fee)),
-                        ),
-                        qfc_ai_coordinator::task_pool::PublicTaskStatus::Failed => {
-                            ("Failed".to_string(), None, None, None, None)
-                        }
-                        qfc_ai_coordinator::task_pool::PublicTaskStatus::Expired => {
-                            ("Expired".to_string(), None, None, None, None)
-                        }
-                    };
-
-                Ok(RpcPublicTaskStatus {
-                    task_id: hex::encode(task.task_id.as_bytes()),
-                    status,
-                    result_data,
-                    miner_address,
-                    execution_time_ms,
-                    fee,
-                })
-            }
+            Some(task) => Ok(Self::build_task_status(task)),
             None => Err(RpcError::InvalidParams("Task not found".to_string()).into()),
+        }
+    }
+
+    async fn subscribe_task_status(
+        &self,
+        pending: jsonrpsee::PendingSubscriptionSink,
+        task_id: String,
+    ) -> SubscriptionResult {
+        use jsonrpsee::SubscriptionMessage;
+
+        let task_hash = match Self::parse_hash(&task_id) {
+            Ok(h) => h,
+            Err(e) => {
+                pending.reject(e).await;
+                return Ok(());
+            }
+        };
+
+        let sink = pending.accept().await?;
+
+        // Send initial status
+        let initial = {
+            let pool = self.task_pool.read();
+            pool.get_public_task(&task_hash).map(Self::build_task_status)
+        };
+        if let Some(status) = initial {
+            let msg = SubscriptionMessage::from_json(&status)?;
+            if sink.send(msg).await.is_err() {
+                return Ok(());
+            }
+        }
+
+        // Poll for status changes every 500ms until terminal state
+        let task_pool = self.task_pool.clone();
+        let mut last_status = String::new();
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            if sink.is_closed() {
+                break;
+            }
+            let snapshot = {
+                let pool = task_pool.read();
+                pool.get_public_task(&task_hash).map(Self::build_task_status)
+            };
+            if let Some(rpc_status) = snapshot {
+                if rpc_status.status != last_status {
+                    last_status.clone_from(&rpc_status.status);
+                    let is_terminal = matches!(
+                        last_status.as_str(),
+                        "Completed" | "Failed" | "Expired"
+                    );
+                    let msg = SubscriptionMessage::from_json(&rpc_status)?;
+                    if sink.send(msg).await.is_err() {
+                        break;
+                    }
+                    if is_terminal {
+                        break;
+                    }
+                }
+            } else {
+                break; // Task pruned
+            }
+        }
+        Ok(())
+    }
+}
+
+// Helper methods
+impl RpcServer {
+    /// Build RpcPublicTaskStatus from a PublicTask (B1: structured envelope)
+    fn build_task_status(
+        task: &qfc_ai_coordinator::task_pool::PublicTask,
+    ) -> RpcPublicTaskStatus {
+        use base64::Engine;
+
+        let model_id = task
+            .inner_task
+            .task_type
+            .model_id()
+            .map(|m| format!("{}:{}", m.name, m.version))
+            .unwrap_or_default();
+
+        let (status, result, result_size, miner_address, execution_time_ms) = match &task.status {
+            qfc_ai_coordinator::task_pool::PublicTaskStatus::Pending => {
+                ("Pending".into(), None, None, None, None)
+            }
+            qfc_ai_coordinator::task_pool::PublicTaskStatus::Assigned => {
+                ("Assigned".into(), None, None, None, None)
+            }
+            qfc_ai_coordinator::task_pool::PublicTaskStatus::Completed {
+                result_data,
+                miner,
+                execution_time_ms,
+            } => (
+                "Completed".into(),
+                Some(base64::engine::general_purpose::STANDARD.encode(result_data)),
+                Some(result_data.len()),
+                Some(miner.to_string()),
+                Some(*execution_time_ms),
+            ),
+            qfc_ai_coordinator::task_pool::PublicTaskStatus::Failed => {
+                ("Failed".into(), None, None, None, None)
+            }
+            qfc_ai_coordinator::task_pool::PublicTaskStatus::Expired => {
+                ("Expired".into(), None, None, None, None)
+            }
+        };
+
+        RpcPublicTaskStatus {
+            task_id: hex::encode(task.task_id.as_bytes()),
+            status,
+            submitter: task.submitter.to_string(),
+            task_type: task.inner_task.task_type.task_type_name().to_string(),
+            model_id,
+            created_at: task.inner_task.created_at,
+            deadline: task.inner_task.deadline,
+            max_fee: format!("0x{:x}", task.max_fee),
+            result,
+            result_size,
+            miner_address,
+            execution_time_ms,
         }
     }
 }
