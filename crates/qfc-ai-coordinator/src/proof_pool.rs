@@ -12,6 +12,10 @@ pub struct ProofPool {
     seen: HashSet<Hash>,
     /// Maximum pool size
     max_size: usize,
+    /// Total proofs accepted (for metrics)
+    total_accepted: u64,
+    /// Total add() calls (for metrics)
+    total_submissions: u64,
 }
 
 impl ProofPool {
@@ -20,11 +24,14 @@ impl ProofPool {
             pending: VecDeque::new(),
             seen: HashSet::new(),
             max_size: 2000,
+            total_accepted: 0,
+            total_submissions: 0,
         }
     }
 
     /// Add a proof to the pool. Returns true if accepted (new), false if duplicate or full.
     pub fn add(&mut self, proof: InferenceProof) -> bool {
+        self.total_submissions += 1;
         let proof_hash = qfc_crypto::blake3_hash(&proof.to_bytes_without_signature());
         if self.seen.contains(&proof_hash) {
             return false;
@@ -34,6 +41,7 @@ impl ProofPool {
         }
         self.seen.insert(proof_hash);
         self.pending.push_back(proof);
+        self.total_accepted += 1;
         true
     }
 
@@ -52,6 +60,16 @@ impl ProofPool {
     /// Number of pending proofs
     pub fn pending_count(&self) -> usize {
         self.pending.len()
+    }
+
+    /// Total proofs accepted since start
+    pub fn total_accepted(&self) -> u64 {
+        self.total_accepted
+    }
+
+    /// Total add() calls since start
+    pub fn total_submissions(&self) -> u64 {
+        self.total_submissions
     }
 }
 
