@@ -53,6 +53,8 @@ pub struct SyncManager {
     challenge_generator: Option<Arc<RwLock<qfc_ai_coordinator::challenge::ChallengeGenerator>>>,
     /// v2.0 P2: Redundant verifier
     redundant_verifier: Option<Arc<RwLock<qfc_ai_coordinator::redundant::RedundantVerifier>>>,
+    /// v2.1 E3: Arbitration manager for multi-validator dispute resolution
+    arbitration_manager: Arc<RwLock<qfc_ai_coordinator::ArbitrationManager>>,
 }
 
 impl SyncManager {
@@ -74,6 +76,9 @@ impl SyncManager {
             proof_pool: None,
             challenge_generator: None,
             redundant_verifier: None,
+            arbitration_manager: Arc::new(RwLock::new(
+                qfc_ai_coordinator::ArbitrationManager::new(),
+            )),
         }
     }
 
@@ -994,13 +999,31 @@ impl SyncManager {
                             got,
                         }) => {
                             warn!(
-                                "Spot-check FAILED for {}: output hash mismatch (expected {}, got {})",
+                                "Spot-check FAILED for {}: output hash mismatch (expected {}, got {}). Opening arbitration.",
                                 proof.validator,
                                 hex::encode(&expected.as_bytes()[..8]),
                                 hex::encode(&got.as_bytes()[..8]),
                             );
-                            // Slash the miner for fraud: 5% stake, 6 hours jail
-                            consensus.slash_validator(&proof.validator, 5, 6 * 60 * 60 * 1000);
+                            // E3: Open multi-validator arbitration instead of immediate slash
+                            let mut arb = self.arbitration_manager.write();
+                            if arb.open_dispute(proof.input_hash, proof.validator, proof.output_hash) {
+                                // Add our own vote (the spot-check re-execution result)
+                                if let Some(our_addr) = consensus.our_address() {
+                                    arb.submit_vote(
+                                        &proof.input_hash,
+                                        qfc_ai_coordinator::ArbitrationVote {
+                                            validator: our_addr,
+                                            output_hash: expected,
+                                            execution_time_ms: 0,
+                                        },
+                                    );
+                                }
+                                info!(
+                                    "Arbitration panel opened for task {} (miner {})",
+                                    hex::encode(&proof.input_hash.as_bytes()[..8]),
+                                    proof.validator,
+                                );
+                            }
                             return;
                         }
                         Err(e) => {
@@ -1090,6 +1113,56 @@ impl SyncManager {
             proof.flops_estimated,
             1, // single task completed
         );
+
+        // 8b. E3: If this task has an open arbitration panel, submit as a vote
+        {
+            let mut arb = self.arbitration_manager.write();
+            if arb.get_panel(&proof.input_hash).is_some() {
+                arb.submit_vote(
+                    &proof.input_hash,
+                    qfc_ai_coordinator::ArbitrationVote {
+                        validator: proof.validator,
+                        output_hash: proof.output_hash,
+                        execution_time_ms: proof.execution_time_ms,
+                    },
+                );
+            }
+
+            // Resolve any panels that have quorum
+            let outcomes = arb.resolve_ready();
+            for (task_id, outcome, miner) in outcomes {
+                match outcome {
+                    qfc_ai_coordinator::ArbitrationOutcome::MinerVindicated => {
+                        info!(
+                            "Arbitration: miner {} vindicated for task {}",
+                            miner,
+                            hex::encode(&task_id.as_bytes()[..8]),
+                        );
+                    }
+                    qfc_ai_coordinator::ArbitrationOutcome::MinerFaulted {
+                        agree_count,
+                        total_count,
+                        ..
+                    } => {
+                        warn!(
+                            "Arbitration: miner {} faulted for task {} ({}/{} validators disagree). Slashing.",
+                            miner,
+                            hex::encode(&task_id.as_bytes()[..8]),
+                            agree_count,
+                            total_count,
+                        );
+                        consensus.slash_validator(&miner, 5, 6 * 60 * 60 * 1000);
+                    }
+                    qfc_ai_coordinator::ArbitrationOutcome::Inconclusive => {
+                        info!(
+                            "Arbitration: inconclusive for task {} (miner {}), no action taken",
+                            hex::encode(&task_id.as_bytes()[..8]),
+                            miner,
+                        );
+                    }
+                }
+            }
+        }
 
         // 9. Push to proof pool for block inclusion (v2.0)
         if let Some(ref pool) = self.proof_pool {

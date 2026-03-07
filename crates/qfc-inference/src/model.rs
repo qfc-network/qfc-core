@@ -25,12 +25,14 @@ pub struct ModelInfo {
     pub approved: bool,
 }
 
-/// Local model cache for downloaded model files
+/// Local model cache with LRU eviction and auto-download
 pub struct ModelCache {
     /// Cache directory
     cache_dir: PathBuf,
     /// Cached model metadata
     cached: HashMap<ModelId, CachedModel>,
+    /// Maximum cache size in bytes (0 = unlimited)
+    max_size_bytes: u64,
 }
 
 /// A cached model on disk
@@ -39,6 +41,15 @@ pub struct CachedModel {
     pub id: ModelId,
     pub path: PathBuf,
     pub size_bytes: u64,
+    /// Last access timestamp (milliseconds since epoch)
+    pub last_accessed: u64,
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 impl ModelCache {
@@ -47,6 +58,16 @@ impl ModelCache {
         Self {
             cache_dir,
             cached: HashMap::new(),
+            max_size_bytes: 0,
+        }
+    }
+
+    /// Create a model cache with a maximum size limit
+    pub fn with_max_size(cache_dir: PathBuf, max_size_bytes: u64) -> Self {
+        Self {
+            cache_dir,
+            cached: HashMap::new(),
+            max_size_bytes,
         }
     }
 
@@ -55,9 +76,14 @@ impl ModelCache {
         self.cached.contains_key(model_id)
     }
 
-    /// Get the path to a cached model
-    pub fn get_path(&self, model_id: &ModelId) -> Option<&PathBuf> {
-        self.cached.get(model_id).map(|c| &c.path)
+    /// Get the path to a cached model, updating last-accessed time
+    pub fn get_path(&mut self, model_id: &ModelId) -> Option<&PathBuf> {
+        if let Some(entry) = self.cached.get_mut(model_id) {
+            entry.last_accessed = now_ms();
+            Some(&entry.path)
+        } else {
+            None
+        }
     }
 
     /// Register a model as cached (after download)
@@ -68,6 +94,7 @@ impl ModelCache {
                 id: model_id,
                 path,
                 size_bytes,
+                last_accessed: now_ms(),
             },
         );
     }
@@ -85,6 +112,72 @@ impl ModelCache {
     /// List all cached models
     pub fn list_cached(&self) -> Vec<&CachedModel> {
         self.cached.values().collect()
+    }
+
+    /// Evict least-recently-used models until total size is under max_size_bytes.
+    /// Returns the number of models evicted.
+    pub fn evict_lru(&mut self) -> usize {
+        if self.max_size_bytes == 0 {
+            return 0;
+        }
+
+        let mut evicted = 0;
+        while self.total_size_bytes() > self.max_size_bytes && !self.cached.is_empty() {
+            // Find the LRU entry
+            let lru_id = self
+                .cached
+                .values()
+                .min_by_key(|c| c.last_accessed)
+                .map(|c| c.id.clone());
+
+            if let Some(id) = lru_id {
+                if let Some(entry) = self.cached.remove(&id) {
+                    // Best-effort delete from disk
+                    let _ = std::fs::remove_file(&entry.path);
+                    tracing::info!(
+                        "Evicted model {} ({} bytes) from cache",
+                        id,
+                        entry.size_bytes
+                    );
+                    evicted += 1;
+                }
+            }
+        }
+        evicted
+    }
+
+    /// Ensure a model is cached, downloading it if necessary.
+    /// Evicts LRU models if the cache is full.
+    /// Returns the path to the cached model files.
+    #[cfg(feature = "candle")]
+    pub fn ensure_model(
+        &mut self,
+        model_id: &ModelId,
+    ) -> Result<PathBuf, crate::InferenceError> {
+        // Already cached — return path
+        if let Some(entry) = self.cached.get_mut(model_id) {
+            entry.last_accessed = now_ms();
+            return Ok(entry.path.clone());
+        }
+
+        // Download the model
+        let downloaded = crate::download::download_model(&model_id.name)?;
+        let size_bytes = [&downloaded.weights_path, &downloaded.tokenizer_path, &downloaded.config_path]
+            .iter()
+            .filter_map(|p| std::fs::metadata(p).ok())
+            .map(|m| m.len())
+            .sum();
+
+        // Register
+        let model_dir = downloaded.weights_path.parent()
+            .unwrap_or(&self.cache_dir)
+            .to_path_buf();
+        self.register(model_id.clone(), model_dir.clone(), size_bytes);
+
+        // Evict if over limit
+        self.evict_lru();
+
+        Ok(model_dir)
     }
 }
 
@@ -206,6 +299,32 @@ mod tests {
         assert!(cache.is_cached(&model_id));
         assert_eq!(cache.total_size_bytes(), 1024 * 1024);
         assert_eq!(cache.list_cached().len(), 1);
+        assert!(cache.get_path(&model_id).is_some());
+    }
+
+    #[test]
+    fn test_model_cache_lru_eviction() {
+        let mut cache = ModelCache::with_max_size(PathBuf::from("/tmp/models"), 2 * 1024 * 1024);
+
+        // Add 3 models, each 1MB
+        for i in 0..3 {
+            let id = ModelId::new(&format!("model-{}", i), "v1");
+            cache.register(id, PathBuf::from(format!("/tmp/models/m{}.bin", i)), 1024 * 1024);
+            // Stagger last_accessed so eviction order is deterministic
+            if let Some(entry) = cache.cached.get_mut(&ModelId::new(&format!("model-{}", i), "v1")) {
+                entry.last_accessed = i as u64;
+            }
+        }
+
+        assert_eq!(cache.total_size_bytes(), 3 * 1024 * 1024);
+
+        // Evict should remove the LRU (model-0)
+        let evicted = cache.evict_lru();
+        assert_eq!(evicted, 1);
+        assert_eq!(cache.total_size_bytes(), 2 * 1024 * 1024);
+        assert!(!cache.is_cached(&ModelId::new("model-0", "v1")));
+        assert!(cache.is_cached(&ModelId::new("model-1", "v1")));
+        assert!(cache.is_cached(&ModelId::new("model-2", "v1")));
     }
 
     #[test]
