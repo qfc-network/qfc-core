@@ -710,7 +710,7 @@ impl Chain {
             value,
             data,
             gas_limit: gas,
-            gas_price: U256::from_u64(1), // Minimal gas price for simulation
+            gas_price: U256::from_u64(1_000_000_000), // 1 Gwei (matches EVM basefee)
             public_key: qfc_types::PublicKey::ZERO,
             signature: Signature::ZERO,
         };
@@ -719,7 +719,8 @@ impl Chain {
         let snapshot = self.state.snapshot();
 
         // Give sender enough balance for gas (simulation only)
-        let gas_cost = U256::from_u64(gas) * U256::from_u64(1); // gas * gas_price
+        // EVM uses 1 Gwei gas_price internally, so we need gas * 1e9
+        let gas_cost = U256::from_u64(gas) * U256::from_u64(1_000_000_000);
         let total_needed = gas_cost + value;
         let _ = self.state.add_balance(&sender, total_needed);
 

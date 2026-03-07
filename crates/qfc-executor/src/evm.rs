@@ -145,6 +145,16 @@ impl<'a> EvmExecutor<'a> {
         self.load_account(&mut db, caller)?;
         self.load_account(&mut db, to)?;
 
+        // For static calls, give the caller enough balance to cover gas
+        // so view functions work without requiring funded accounts
+        let gas_balance = RevmU256::from(gas_limit) * RevmU256::from(1_000_000_000u64);
+        let caller_revm = address_to_revm(caller);
+        if let Some(account) = db.accounts.get_mut(&caller_revm) {
+            if account.info.balance < gas_balance {
+                account.info.balance = gas_balance;
+            }
+        }
+
         let mut evm = self.create_evm(&mut db);
 
         // Configure as static call
