@@ -377,10 +377,39 @@ impl EthApiServer for RpcServer {
 
         match tx {
             Some(t) => {
-                let sender_hash = blake3_hash(t.signature.as_bytes());
-                let sender = Address::from_slice(&sender_hash.as_bytes()[12..32]).unwrap();
-                // Return the original hash that the user queried with
-                Ok(Some(RpcTransaction::from_pending(t, original_hash, sender)))
+                // Look up block location to determine if tx is confirmed
+                let location = self
+                    .chain
+                    .get_transaction_location(&internal_hash)
+                    .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+                if let Some((block_height, tx_index)) = location {
+                    // Confirmed: get block hash and return with full block info
+                    let block_hash = self
+                        .chain
+                        .get_block_by_number(block_height)
+                        .map_err(|e| RpcError::Internal(e.to_string()))?
+                        .map(|b| blake3_hash(&b.header_bytes()))
+                        .unwrap_or(Hash::ZERO);
+
+                    Ok(Some(RpcTransaction::from_tx(
+                        t,
+                        original_hash,
+                        block_hash,
+                        block_height,
+                        tx_index,
+                    )))
+                } else {
+                    // No location found — treat as pending
+                    let sender_hash = blake3_hash(t.signature.as_bytes());
+                    let sender =
+                        Address::from_slice(&sender_hash.as_bytes()[12..32]).unwrap();
+                    Ok(Some(RpcTransaction::from_pending(
+                        t,
+                        original_hash,
+                        sender,
+                    )))
+                }
             }
             None => Ok(None),
         }
