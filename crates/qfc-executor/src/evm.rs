@@ -444,7 +444,7 @@ mod tests {
         let result = executor.static_call(Some(&sender), &recipient, Vec::new(), 100_000);
 
         // Should succeed (static call to empty account)
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "static_call failed: {:?}", result.err());
         let evm_result = result.unwrap();
         // Static call to non-contract address succeeds
         assert!(evm_result.success);
@@ -472,7 +472,7 @@ mod tests {
             hex::decode("602a60005560208060106000396000f3fe60005460005260206000f3").unwrap();
 
         let result = executor.create(&sender, init_code, U256::ZERO, 1_000_000);
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "create failed: {:?}", result.err());
         let evm_result = result.unwrap();
         assert!(
             evm_result.success,
