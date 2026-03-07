@@ -719,9 +719,10 @@ impl Chain {
         let snapshot = self.state.snapshot();
 
         // Give sender enough balance for gas (simulation only)
-        // EVM uses 1 Gwei gas_price internally, so we need gas * 1e9
+        // Gas is deducted twice: once by executor (sub_balance) and once by revm internally.
+        // So we need 2x gas_cost to survive both deductions, plus any value being sent.
         let gas_cost = U256::from_u64(gas) * U256::from_u64(1_000_000_000);
-        let total_needed = gas_cost + value;
+        let total_needed = gas_cost * U256::from_u64(2) + value;
         let _ = self.state.add_balance(&sender, total_needed);
 
         // Create a signed transaction (we skip validation for simulation)
