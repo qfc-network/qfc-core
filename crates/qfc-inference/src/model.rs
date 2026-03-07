@@ -150,10 +150,7 @@ impl ModelCache {
     /// Evicts LRU models if the cache is full.
     /// Returns the path to the cached model files.
     #[cfg(feature = "candle")]
-    pub fn ensure_model(
-        &mut self,
-        model_id: &ModelId,
-    ) -> Result<PathBuf, crate::InferenceError> {
+    pub fn ensure_model(&mut self, model_id: &ModelId) -> Result<PathBuf, crate::InferenceError> {
         // Already cached — return path
         if let Some(entry) = self.cached.get_mut(model_id) {
             entry.last_accessed = now_ms();
@@ -162,14 +159,20 @@ impl ModelCache {
 
         // Download the model
         let downloaded = crate::download::download_model(&model_id.name)?;
-        let size_bytes = [&downloaded.weights_path, &downloaded.tokenizer_path, &downloaded.config_path]
-            .iter()
-            .filter_map(|p| std::fs::metadata(p).ok())
-            .map(|m| m.len())
-            .sum();
+        let size_bytes = [
+            &downloaded.weights_path,
+            &downloaded.tokenizer_path,
+            &downloaded.config_path,
+        ]
+        .iter()
+        .filter_map(|p| std::fs::metadata(p).ok())
+        .map(|m| m.len())
+        .sum();
 
         // Register
-        let model_dir = downloaded.weights_path.parent()
+        let model_dir = downloaded
+            .weights_path
+            .parent()
             .unwrap_or(&self.cache_dir)
             .to_path_buf();
         self.register(model_id.clone(), model_dir.clone(), size_bytes);
@@ -309,9 +312,16 @@ mod tests {
         // Add 3 models, each 1MB
         for i in 0..3 {
             let id = ModelId::new(&format!("model-{}", i), "v1");
-            cache.register(id, PathBuf::from(format!("/tmp/models/m{}.bin", i)), 1024 * 1024);
+            cache.register(
+                id,
+                PathBuf::from(format!("/tmp/models/m{}.bin", i)),
+                1024 * 1024,
+            );
             // Stagger last_accessed so eviction order is deterministic
-            if let Some(entry) = cache.cached.get_mut(&ModelId::new(&format!("model-{}", i), "v1")) {
+            if let Some(entry) = cache
+                .cached
+                .get_mut(&ModelId::new(&format!("model-{}", i), "v1"))
+            {
                 entry.last_accessed = i as u64;
             }
         }

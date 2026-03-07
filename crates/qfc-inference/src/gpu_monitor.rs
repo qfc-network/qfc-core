@@ -120,13 +120,11 @@ fn get_macos_memory() -> (u64, u64) {
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .and_then(|s| {
-            s.lines()
-                .find(|l| l.contains("Pages free"))
-                .and_then(|l| {
-                    l.split(':')
-                        .nth(1)
-                        .and_then(|v| v.trim().trim_end_matches('.').parse::<u64>().ok())
-                })
+            s.lines().find(|l| l.contains("Pages free")).and_then(|l| {
+                l.split(':')
+                    .nth(1)
+                    .and_then(|v| v.trim().trim_end_matches('.').parse::<u64>().ok())
+            })
         })
         .map(|pages| pages * 4096 / (1024 * 1024)) // 4K pages → MB
         .unwrap_or(0);

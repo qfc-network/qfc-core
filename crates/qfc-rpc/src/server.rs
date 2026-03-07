@@ -1769,7 +1769,8 @@ impl QfcApiServer for RpcServer {
         // Send initial status
         let initial = {
             let pool = self.task_pool.read();
-            pool.get_public_task(&task_hash).map(Self::build_task_status)
+            pool.get_public_task(&task_hash)
+                .map(Self::build_task_status)
         };
         if let Some(status) = initial {
             let msg = SubscriptionMessage::from_json(&status)?;
@@ -1788,15 +1789,14 @@ impl QfcApiServer for RpcServer {
             }
             let snapshot = {
                 let pool = task_pool.read();
-                pool.get_public_task(&task_hash).map(Self::build_task_status)
+                pool.get_public_task(&task_hash)
+                    .map(Self::build_task_status)
             };
             if let Some(rpc_status) = snapshot {
                 if rpc_status.status != last_status {
                     last_status.clone_from(&rpc_status.status);
-                    let is_terminal = matches!(
-                        last_status.as_str(),
-                        "Completed" | "Failed" | "Expired"
-                    );
+                    let is_terminal =
+                        matches!(last_status.as_str(), "Completed" | "Failed" | "Expired");
                     let msg = SubscriptionMessage::from_json(&rpc_status)?;
                     if sink.send(msg).await.is_err() {
                         break;
@@ -1816,9 +1816,7 @@ impl QfcApiServer for RpcServer {
 // Helper methods
 impl RpcServer {
     /// Build RpcPublicTaskStatus from a PublicTask (B1: structured envelope)
-    fn build_task_status(
-        task: &qfc_ai_coordinator::task_pool::PublicTask,
-    ) -> RpcPublicTaskStatus {
+    fn build_task_status(task: &qfc_ai_coordinator::task_pool::PublicTask) -> RpcPublicTaskStatus {
         use base64::Engine;
 
         let model_id = task

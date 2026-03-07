@@ -1,7 +1,7 @@
 //! QFC-specific RPC methods
 
-use jsonrpsee::core::SubscriptionResult;
 use jsonrpsee::core::RpcResult;
+use jsonrpsee::core::SubscriptionResult;
 use jsonrpsee::proc_macros::rpc;
 use serde::{Deserialize, Serialize};
 
