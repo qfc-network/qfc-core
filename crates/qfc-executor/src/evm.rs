@@ -45,25 +45,23 @@ impl<'a> revm::DatabaseRef for StateDBRef<'a> {
         let nonce = self.state.get_nonce(&addr).map_err(|e| e.to_string())?;
         let code = self.state.get_code(&addr).map_err(|e| e.to_string())?;
 
-        let code_hash = if code.is_empty() {
-            B256::ZERO
+        if code.is_empty() {
+            // EOA: use KECCAK_EMPTY as code_hash (required by EIP-3607)
+            Ok(Some(AccountInfo {
+                balance: u256_to_revm(balance),
+                nonce,
+                code_hash: revm::primitives::KECCAK_EMPTY,
+                code: None,
+            }))
         } else {
             let hash = qfc_crypto::blake3_hash(&code);
-            B256::from_slice(hash.as_bytes())
-        };
-
-        let bytecode = if code.is_empty() {
-            Bytecode::default()
-        } else {
-            Bytecode::new_raw(Bytes::from(code))
-        };
-
-        Ok(Some(AccountInfo {
-            balance: u256_to_revm(balance),
-            nonce,
-            code_hash,
-            code: Some(bytecode),
-        }))
+            Ok(Some(AccountInfo {
+                balance: u256_to_revm(balance),
+                nonce,
+                code_hash: B256::from_slice(hash.as_bytes()),
+                code: Some(Bytecode::new_raw(Bytes::from(code))),
+            }))
+        }
     }
 
     fn code_by_hash_ref(&self, _code_hash: B256) -> std::result::Result<Bytecode, Self::Error> {
