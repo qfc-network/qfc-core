@@ -209,18 +209,11 @@ impl MetricsServer {
             } else {
                 0
             };
-            let _ = writeln!(
-                out,
-                "qfc_inference_score{{validator=\"{addr}\"}} {score}"
-            );
+            let _ = writeln!(out, "qfc_inference_score{{validator=\"{addr}\"}} {score}");
         }
 
         // --- network ---
-        let peer_count = self
-            .network
-            .as_ref()
-            .map(|n| n.peer_count())
-            .unwrap_or(0);
+        let peer_count = self.network.as_ref().map(|n| n.peer_count()).unwrap_or(0);
         let _ = writeln!(out, "# HELP qfc_peer_count Number of connected peers.");
         let _ = writeln!(out, "# TYPE qfc_peer_count gauge");
         let _ = writeln!(out, "qfc_peer_count {peer_count}");
