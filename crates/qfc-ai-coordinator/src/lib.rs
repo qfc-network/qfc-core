@@ -25,6 +25,7 @@ pub use assignment::{MinerCapability, MinerRegistry};
 pub use governance::{GovernanceError, ModelGovernance, ModelProposal, ProposalStatus};
 pub use proof_pool::ProofPool;
 pub use task_pool::TaskPool;
+pub use task_types::estimate_base_fee;
 pub use verification::{
     should_spot_check, verify_basic, verify_spot_check, VerificationError, VerificationResult,
 };

@@ -1702,6 +1702,16 @@ impl QfcApiServer for RpcServer {
             },
         };
 
+        // Validate fee meets minimum base price
+        let base_fee = qfc_ai_coordinator::estimate_base_fee(&task_type);
+        if max_fee < base_fee {
+            return Err(RpcError::InvalidParams(format!(
+                "Fee too low: {} < base fee {}",
+                max_fee, base_fee
+            ))
+            .into());
+        }
+
         let mut pool = self.task_pool.write();
         let task_id = {
             let mut data = Vec::with_capacity(16);

@@ -40,8 +40,10 @@ pub struct TaskPool {
     current_epoch: u64,
     /// Counter for generating task IDs
     task_counter: u64,
-    /// Public tasks (paid inference requests)
+    /// Public tasks (paid inference requests), keyed by task_id
     public_tasks: HashMap<Hash, PublicTask>,
+    /// Reverse index: input_hash -> task_id (for proof-to-task matching)
+    input_hash_index: HashMap<Hash, Hash>,
     /// Redundant assignment tracking: task_id -> assigned miners
     redundant_assignments: HashMap<Hash, Vec<Address>>,
     /// How many miners to assign for redundant tasks
@@ -55,6 +57,7 @@ impl TaskPool {
             current_epoch: 0,
             task_counter: 0,
             public_tasks: HashMap::new(),
+            input_hash_index: HashMap::new(),
             redundant_assignments: HashMap::new(),
             redundancy_count: 2,
         }
@@ -168,6 +171,7 @@ impl TaskPool {
         max_fee: u128,
     ) -> Hash {
         let task_id = task.task_id;
+        let input_hash = task.task_type.input_hash();
         let now = now_ms();
         let public = PublicTask {
             task_id,
@@ -178,17 +182,26 @@ impl TaskPool {
             submitted_at: now,
         };
         self.public_tasks.insert(task_id, public);
+        // Index by input_hash so proofs can be matched to tasks
+        self.input_hash_index.insert(input_hash, task_id);
         // Also add to the pending queue so miners can pick it up
         self.pending.push_back(task);
         task_id
     }
 
-    /// Get a public task by ID
+    /// Get a public task by task ID
     pub fn get_public_task(&self, task_id: &Hash) -> Option<&PublicTask> {
         self.public_tasks.get(task_id)
     }
 
-    /// Mark a public task as completed
+    /// Get a public task by input_hash (used by settlement to match proofs to tasks)
+    pub fn get_public_task_by_input_hash(&self, input_hash: &Hash) -> Option<&PublicTask> {
+        self.input_hash_index
+            .get(input_hash)
+            .and_then(|task_id| self.public_tasks.get(task_id))
+    }
+
+    /// Mark a public task as completed by task_id
     pub fn complete_public_task(
         &mut self,
         task_id: &Hash,
@@ -203,6 +216,21 @@ impl TaskPool {
                 execution_time_ms,
             };
             true
+        } else {
+            false
+        }
+    }
+
+    /// Mark a public task as completed by input_hash (used by settlement)
+    pub fn complete_public_task_by_input_hash(
+        &mut self,
+        input_hash: &Hash,
+        result_data: Vec<u8>,
+        miner: Address,
+        execution_time_ms: u64,
+    ) -> bool {
+        if let Some(task_id) = self.input_hash_index.get(input_hash).copied() {
+            self.complete_public_task(&task_id, result_data, miner, execution_time_ms)
         } else {
             false
         }
@@ -226,6 +254,9 @@ impl TaskPool {
 
         for id in expired_ids {
             if let Some(mut task) = self.public_tasks.remove(&id) {
+                // Clean up the input_hash index
+                let input_hash = task.inner_task.task_type.input_hash();
+                self.input_hash_index.remove(&input_hash);
                 task.status = PublicTaskStatus::Expired;
                 expired.push(task);
             }
@@ -293,6 +324,35 @@ mod tests {
         // Hot tier should be able to get any remaining task
         let hot_task = pool.fetch_task(GpuTier::Hot, 100_000);
         assert!(hot_task.is_some());
+    }
+
+    #[test]
+    fn test_public_task_input_hash_index() {
+        let mut pool = TaskPool::new();
+        let input_hash = qfc_crypto::blake3_hash(b"test input data");
+        let task_type = qfc_inference::task::ComputeTaskType::Embedding {
+            model_id: qfc_inference::task::ModelId::new("test", "v1"),
+            input_hash,
+        };
+        let task_id = qfc_crypto::blake3_hash(b"task1");
+        let task = InferenceTask::new(task_id, 1, task_type, vec![], now_ms(), u64::MAX);
+        let submitter = Address::ZERO;
+
+        let returned_id = pool.submit_public_task(submitter, task, 1000);
+        assert_eq!(returned_id, task_id);
+
+        // Should be findable by input_hash
+        let found = pool.get_public_task_by_input_hash(&input_hash);
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().task_id, task_id);
+
+        // Complete by input_hash
+        assert!(pool.complete_public_task_by_input_hash(
+            &input_hash,
+            vec![1, 2, 3],
+            Address::ZERO,
+            100,
+        ));
     }
 
     #[test]
