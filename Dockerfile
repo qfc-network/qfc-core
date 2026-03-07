@@ -66,6 +66,7 @@ ENV QFC_P2P_ADDR=0.0.0.0:30303
 ENV QFC_LOG_LEVEL=info
 ENV RUST_LOG=info
 # v2.0: Compute mode (pow | inference, default: pow)
+ENV QFC_METRICS_ADDR=0.0.0.0:6060
 ENV QFC_COMPUTE_MODE=pow
 ENV QFC_INFERENCE_BACKEND=auto
 ENV QFC_MODEL_DIR=/models
@@ -88,6 +89,7 @@ ARGS="--datadir ${QFC_DATA_DIR:-/data}"
 ARGS="$ARGS --rpc-addr ${QFC_RPC_ADDR:-0.0.0.0:8545}"
 ARGS="$ARGS --p2p-port ${QFC_P2P_PORT:-30303}"
 ARGS="$ARGS --log-level ${QFC_LOG_LEVEL:-info}"
+ARGS="$ARGS --metrics-addr ${QFC_METRICS_ADDR:-0.0.0.0:6060}"
 
 # Add validator key if provided
 if [ -n "$QFC_VALIDATOR_KEY" ]; then

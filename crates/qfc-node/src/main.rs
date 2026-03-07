@@ -2,6 +2,7 @@
 //!
 //! Main entry point for running a QFC node.
 
+mod metrics;
 mod miner;
 mod producer;
 mod sync;
@@ -90,6 +91,10 @@ struct Args {
     /// Model cache directory (for inference mode)
     #[arg(long)]
     model_dir: Option<PathBuf>,
+
+    /// Prometheus metrics listen address
+    #[arg(long, default_value = "0.0.0.0:6060")]
+    metrics_addr: SocketAddr,
 }
 
 #[tokio::main]
@@ -407,6 +412,18 @@ async fn main() -> Result<()> {
         false
     };
 
+    // Start Prometheus metrics server
+    let metrics_server = metrics::MetricsServer::new(
+        args.metrics_addr,
+        chain.clone(),
+        consensus.clone(),
+        mempool.clone(),
+        _network_service.clone(),
+        proof_pool.clone(),
+        args.chain_id,
+    );
+    metrics_server.start();
+
     // Print startup info
     info!("===========================================");
     info!("QFC Node is running!");
@@ -416,6 +433,7 @@ async fn main() -> Result<()> {
     if args.rpc {
         info!("RPC endpoint: http://{}", args.rpc_addr);
     }
+    info!("Metrics endpoint: http://{}/metrics", args.metrics_addr);
     if is_validator {
         info!("Block producer: ACTIVE");
     }
