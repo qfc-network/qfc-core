@@ -360,12 +360,7 @@ impl ArbitrationManager {
     }
 
     /// Open a new arbitration panel for a disputed task
-    pub fn open_dispute(
-        &mut self,
-        task_id: Hash,
-        miner: Address,
-        miner_output_hash: Hash,
-    ) -> bool {
+    pub fn open_dispute(&mut self, task_id: Hash, miner: Address, miner_output_hash: Hash) -> bool {
         if self.panels.contains_key(&task_id) {
             return false; // already open
         }
