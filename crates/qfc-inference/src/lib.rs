@@ -18,6 +18,7 @@
 
 pub mod backend;
 pub mod download;
+pub mod gpu_monitor;
 pub mod model;
 pub mod models;
 pub mod proof;
@@ -25,6 +26,7 @@ pub mod runtime;
 pub mod scheduler;
 pub mod task;
 
+pub use gpu_monitor::{collect_gpu_metrics, GpuMetrics};
 pub use proof::{ComputeProof, InferenceProof, InferenceResult};
 pub use runtime::{
     compute_benchmark_score, validate_gpu_claim, BackendType, BenchmarkResult, GpuTier,

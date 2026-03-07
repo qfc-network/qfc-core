@@ -22,6 +22,10 @@ pub mod task_types;
 pub mod verification;
 
 pub use assignment::{MinerCapability, MinerRegistry};
+pub use challenge::{
+    ArbitrationManager, ArbitrationOutcome, ArbitrationPanel, ArbitrationVote, ChallengeGenerator,
+    ChallengePenalty, ChallengeVerdict,
+};
 pub use governance::{GovernanceError, ModelGovernance, ModelProposal, ProposalStatus};
 pub use proof_pool::ProofPool;
 pub use task_pool::TaskPool;
