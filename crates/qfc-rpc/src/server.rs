@@ -402,13 +402,8 @@ impl EthApiServer for RpcServer {
                 } else {
                     // No location found — treat as pending
                     let sender_hash = blake3_hash(t.signature.as_bytes());
-                    let sender =
-                        Address::from_slice(&sender_hash.as_bytes()[12..32]).unwrap();
-                    Ok(Some(RpcTransaction::from_pending(
-                        t,
-                        original_hash,
-                        sender,
-                    )))
+                    let sender = Address::from_slice(&sender_hash.as_bytes()[12..32]).unwrap();
+                    Ok(Some(RpcTransaction::from_pending(t, original_hash, sender)))
                 }
             }
             None => Ok(None),
