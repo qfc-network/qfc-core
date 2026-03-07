@@ -4,12 +4,12 @@ use crate::error::{ExecutorError, Result};
 use qfc_state::StateDB;
 use qfc_types::{Address, Hash, Log, U256};
 use revm::{
-    db::{CacheDB, EmptyDB},
+    db::CacheDB,
     primitives::{
         AccountInfo, Address as RevmAddress, Bytecode, Bytes, CreateScheme,
         ExecutionResult as RevmResult, Output, TransactTo, B256, U256 as RevmU256,
     },
-    Evm,
+    Database as _, Evm,
 };
 use std::collections::HashMap;
 
@@ -28,6 +28,58 @@ pub struct EvmResult {
     pub logs: Vec<Log>,
     /// Error message if failed
     pub error: Option<String>,
+}
+
+/// Wrapper around StateDB that implements revm's DatabaseRef trait.
+/// This allows revm to read account info and storage on-demand from our state.
+struct StateDBRef<'a> {
+    state: &'a StateDB,
+}
+
+impl<'a> revm::DatabaseRef for StateDBRef<'a> {
+    type Error = String;
+
+    fn basic_ref(&self, address: RevmAddress) -> std::result::Result<Option<AccountInfo>, Self::Error> {
+        let addr = revm_to_address(&address);
+        let balance = self.state.get_balance(&addr).map_err(|e| e.to_string())?;
+        let nonce = self.state.get_nonce(&addr).map_err(|e| e.to_string())?;
+        let code = self.state.get_code(&addr).map_err(|e| e.to_string())?;
+
+        let code_hash = if code.is_empty() {
+            B256::ZERO
+        } else {
+            let hash = qfc_crypto::blake3_hash(&code);
+            B256::from_slice(hash.as_bytes())
+        };
+
+        let bytecode = if code.is_empty() {
+            Bytecode::default()
+        } else {
+            Bytecode::new_raw(Bytes::from(code))
+        };
+
+        Ok(Some(AccountInfo {
+            balance: u256_to_revm(balance),
+            nonce,
+            code_hash,
+            code: Some(bytecode),
+        }))
+    }
+
+    fn code_by_hash_ref(&self, _code_hash: B256) -> std::result::Result<Bytecode, Self::Error> {
+        Ok(Bytecode::default())
+    }
+
+    fn storage_ref(&self, address: RevmAddress, index: RevmU256) -> std::result::Result<RevmU256, Self::Error> {
+        let addr = revm_to_address(&address);
+        let slot = revm_to_u256(index);
+        let value = self.state.get_storage(&addr, &slot).map_err(|e| e.to_string())?;
+        Ok(u256_to_revm(value))
+    }
+
+    fn block_hash_ref(&self, _number: RevmU256) -> std::result::Result<B256, Self::Error> {
+        Ok(B256::ZERO)
+    }
 }
 
 /// EVM wrapper for executing smart contracts
@@ -69,10 +121,6 @@ impl<'a> EvmExecutor<'a> {
         gas_limit: u64,
     ) -> Result<EvmResult> {
         let mut db = self.create_state_db()?;
-
-        // Load sender account
-        self.load_account(&mut db, sender)?;
-
         let mut evm = self.create_evm(&mut db);
 
         // Configure transaction
@@ -104,11 +152,6 @@ impl<'a> EvmExecutor<'a> {
         gas_limit: u64,
     ) -> Result<EvmResult> {
         let mut db = self.create_state_db()?;
-
-        // Load accounts
-        self.load_account(&mut db, sender)?;
-        self.load_account(&mut db, to)?;
-
         let mut evm = self.create_evm(&mut db);
 
         // Configure transaction
@@ -140,15 +183,14 @@ impl<'a> EvmExecutor<'a> {
     ) -> Result<EvmResult> {
         let mut db = self.create_state_db()?;
 
-        // Load accounts
         let caller = sender.unwrap_or(&Address::ZERO);
-        self.load_account(&mut db, caller)?;
-        self.load_account(&mut db, to)?;
 
         // For static calls, give the caller enough balance to cover gas
         // so view functions work without requiring funded accounts
         let gas_balance = RevmU256::from(gas_limit) * RevmU256::from(1_000_000_000u64);
         let caller_revm = address_to_revm(caller);
+        // Pre-load the caller account into cache so we can modify the balance
+        let _ = db.basic(caller_revm);
         if let Some(account) = db.accounts.get_mut(&caller_revm) {
             if account.info.balance < gas_balance {
                 account.info.balance = gas_balance;
@@ -176,46 +218,15 @@ impl<'a> EvmExecutor<'a> {
     }
 
     /// Create a revm database backed by our state
-    fn create_state_db(&self) -> Result<CacheDB<EmptyDB>> {
-        Ok(CacheDB::new(EmptyDB::default()))
-    }
-
-    /// Load an account from our state into the revm database
-    fn load_account(&self, db: &mut CacheDB<EmptyDB>, address: &Address) -> Result<()> {
-        let balance = self.state.get_balance(address)?;
-        let nonce = self.state.get_nonce(address)?;
-        let code = self.state.get_code(address)?;
-
-        let code_hash = if code.is_empty() {
-            B256::ZERO
-        } else {
-            let hash = qfc_crypto::blake3_hash(&code);
-            B256::from_slice(hash.as_bytes())
-        };
-
-        let bytecode = if code.is_empty() {
-            Bytecode::default()
-        } else {
-            Bytecode::new_raw(Bytes::from(code))
-        };
-
-        let account_info = AccountInfo {
-            balance: u256_to_revm(balance),
-            nonce,
-            code_hash,
-            code: Some(bytecode),
-        };
-
-        db.insert_account_info(address_to_revm(address), account_info);
-
-        Ok(())
+    fn create_state_db(&self) -> Result<CacheDB<StateDBRef<'a>>> {
+        Ok(CacheDB::new(StateDBRef { state: self.state }))
     }
 
     /// Create a configured EVM instance
     fn create_evm<'b>(
         &self,
-        db: &'b mut CacheDB<EmptyDB>,
-    ) -> Evm<'b, (), &'b mut CacheDB<EmptyDB>> {
+        db: &'b mut CacheDB<StateDBRef<'a>>,
+    ) -> Evm<'b, (), &'b mut CacheDB<StateDBRef<'a>>> {
         let mut evm = Evm::builder().with_db(db).build();
 
         // Configure block environment
