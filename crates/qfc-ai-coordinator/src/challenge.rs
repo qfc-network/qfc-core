@@ -239,6 +239,199 @@ impl Default for ChallengeGenerator {
     }
 }
 
+// ── E3: Multi-validator arbitration ──────────────────────────────────────
+
+/// Minimum validators needed for a valid arbitration panel
+pub const MIN_ARBITRATORS: usize = 3;
+
+/// A vote from a single arbitrator (validator re-executing the task)
+#[derive(Clone, Debug)]
+pub struct ArbitrationVote {
+    pub validator: Address,
+    pub output_hash: Hash,
+    pub execution_time_ms: u64,
+}
+
+/// Outcome of a multi-validator arbitration
+#[derive(Clone, Debug, PartialEq)]
+pub enum ArbitrationOutcome {
+    /// Miner's result matches majority — no fault
+    MinerVindicated,
+    /// Miner's result disagrees with majority — penalize
+    MinerFaulted {
+        majority_hash: Hash,
+        agree_count: usize,
+        total_count: usize,
+    },
+    /// Not enough votes to decide (< MIN_ARBITRATORS)
+    Inconclusive,
+}
+
+/// Manages a dispute for a single task
+#[derive(Clone, Debug)]
+pub struct ArbitrationPanel {
+    pub task_id: Hash,
+    pub miner: Address,
+    pub miner_output_hash: Hash,
+    pub votes: Vec<ArbitrationVote>,
+    pub created_at: u64,
+}
+
+impl ArbitrationPanel {
+    /// Create a new arbitration panel for a disputed task
+    pub fn new(task_id: Hash, miner: Address, miner_output_hash: Hash) -> Self {
+        let created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        Self {
+            task_id,
+            miner,
+            miner_output_hash,
+            votes: Vec::new(),
+            created_at,
+        }
+    }
+
+    /// Add a validator's re-execution vote
+    pub fn add_vote(&mut self, vote: ArbitrationVote) {
+        // Prevent duplicate votes from the same validator
+        if !self.votes.iter().any(|v| v.validator == vote.validator) {
+            self.votes.push(vote);
+        }
+    }
+
+    /// Check if enough votes have been collected
+    pub fn has_quorum(&self) -> bool {
+        self.votes.len() >= MIN_ARBITRATORS
+    }
+
+    /// Resolve the dispute by majority vote
+    pub fn resolve(&self) -> ArbitrationOutcome {
+        if self.votes.len() < MIN_ARBITRATORS {
+            return ArbitrationOutcome::Inconclusive;
+        }
+
+        // Count occurrences of each output hash
+        let mut hash_counts: HashMap<Hash, usize> = HashMap::new();
+        for vote in &self.votes {
+            *hash_counts.entry(vote.output_hash).or_default() += 1;
+        }
+
+        // Find the majority hash (most common)
+        let (majority_hash, majority_count) = hash_counts
+            .into_iter()
+            .max_by_key(|(_, count)| *count)
+            .unwrap(); // safe: votes.len() >= MIN_ARBITRATORS
+
+        // Majority requires > 50% of votes
+        let total = self.votes.len();
+        if majority_count * 2 <= total {
+            // No clear majority — inconclusive
+            return ArbitrationOutcome::Inconclusive;
+        }
+
+        if self.miner_output_hash == majority_hash {
+            ArbitrationOutcome::MinerVindicated
+        } else {
+            ArbitrationOutcome::MinerFaulted {
+                majority_hash,
+                agree_count: majority_count,
+                total_count: total,
+            }
+        }
+    }
+}
+
+/// Manages all active arbitration panels
+pub struct ArbitrationManager {
+    /// Active panels keyed by task_id
+    panels: HashMap<Hash, ArbitrationPanel>,
+    /// Timeout for collecting votes (ms)
+    vote_timeout_ms: u64,
+}
+
+impl ArbitrationManager {
+    pub fn new() -> Self {
+        Self {
+            panels: HashMap::new(),
+            vote_timeout_ms: 60_000, // 60 seconds to collect votes
+        }
+    }
+
+    /// Open a new arbitration panel for a disputed task
+    pub fn open_dispute(
+        &mut self,
+        task_id: Hash,
+        miner: Address,
+        miner_output_hash: Hash,
+    ) -> bool {
+        if self.panels.contains_key(&task_id) {
+            return false; // already open
+        }
+        self.panels.insert(
+            task_id,
+            ArbitrationPanel::new(task_id, miner, miner_output_hash),
+        );
+        true
+    }
+
+    /// Submit a validator's re-execution vote
+    pub fn submit_vote(&mut self, task_id: &Hash, vote: ArbitrationVote) -> bool {
+        if let Some(panel) = self.panels.get_mut(task_id) {
+            panel.add_vote(vote);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Try to resolve panels that have quorum, returning outcomes
+    pub fn resolve_ready(&mut self) -> Vec<(Hash, ArbitrationOutcome, Address)> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        let mut resolved = Vec::new();
+        let mut to_remove = Vec::new();
+
+        for (task_id, panel) in &self.panels {
+            if panel.has_quorum() {
+                let outcome = panel.resolve();
+                resolved.push((*task_id, outcome, panel.miner));
+                to_remove.push(*task_id);
+            } else if now.saturating_sub(panel.created_at) > self.vote_timeout_ms {
+                // Timed out without quorum — inconclusive
+                resolved.push((*task_id, ArbitrationOutcome::Inconclusive, panel.miner));
+                to_remove.push(*task_id);
+            }
+        }
+
+        for id in to_remove {
+            self.panels.remove(&id);
+        }
+
+        resolved
+    }
+
+    /// Get a panel for a task
+    pub fn get_panel(&self, task_id: &Hash) -> Option<&ArbitrationPanel> {
+        self.panels.get(task_id)
+    }
+
+    /// Number of active panels
+    pub fn active_count(&self) -> usize {
+        self.panels.len()
+    }
+}
+
+impl Default for ArbitrationManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,6 +564,146 @@ mod tests {
         let penalty3 = gen.record_result(&miner, &failed).unwrap();
         assert_eq!(penalty3.slash_percent, 5);
         assert!(penalty3.jail_duration_ms > 0);
+    }
+
+    #[test]
+    fn test_arbitration_miner_vindicated() {
+        let task_id = Hash::new([0x10; 32]);
+        let miner = test_addr(0x01);
+        let correct_hash = Hash::new([0xAA; 32]);
+
+        let mut panel = ArbitrationPanel::new(task_id, miner, correct_hash);
+
+        // 3 validators agree with miner
+        for i in 0..3 {
+            panel.add_vote(ArbitrationVote {
+                validator: test_addr(0x10 + i),
+                output_hash: correct_hash,
+                execution_time_ms: 100,
+            });
+        }
+
+        assert!(panel.has_quorum());
+        assert_eq!(panel.resolve(), ArbitrationOutcome::MinerVindicated);
+    }
+
+    #[test]
+    fn test_arbitration_miner_faulted() {
+        let task_id = Hash::new([0x20; 32]);
+        let miner = test_addr(0x01);
+        let miner_hash = Hash::new([0xBB; 32]);
+        let correct_hash = Hash::new([0xAA; 32]);
+
+        let mut panel = ArbitrationPanel::new(task_id, miner, miner_hash);
+
+        // 3 validators disagree with miner
+        for i in 0..3 {
+            panel.add_vote(ArbitrationVote {
+                validator: test_addr(0x10 + i),
+                output_hash: correct_hash,
+                execution_time_ms: 100,
+            });
+        }
+
+        assert!(panel.has_quorum());
+        match panel.resolve() {
+            ArbitrationOutcome::MinerFaulted {
+                majority_hash,
+                agree_count,
+                total_count,
+            } => {
+                assert_eq!(majority_hash, correct_hash);
+                assert_eq!(agree_count, 3);
+                assert_eq!(total_count, 3);
+            }
+            other => panic!("Expected MinerFaulted, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_arbitration_no_quorum() {
+        let task_id = Hash::new([0x30; 32]);
+        let panel = ArbitrationPanel::new(task_id, test_addr(0x01), Hash::new([0xAA; 32]));
+        assert!(!panel.has_quorum());
+        assert_eq!(panel.resolve(), ArbitrationOutcome::Inconclusive);
+    }
+
+    #[test]
+    fn test_arbitration_no_majority() {
+        let task_id = Hash::new([0x40; 32]);
+        let miner = test_addr(0x01);
+        let miner_hash = Hash::new([0xAA; 32]);
+
+        let mut panel = ArbitrationPanel::new(task_id, miner, miner_hash);
+
+        // 3 validators each give different hashes — no majority
+        panel.add_vote(ArbitrationVote {
+            validator: test_addr(0x10),
+            output_hash: Hash::new([0x01; 32]),
+            execution_time_ms: 100,
+        });
+        panel.add_vote(ArbitrationVote {
+            validator: test_addr(0x11),
+            output_hash: Hash::new([0x02; 32]),
+            execution_time_ms: 100,
+        });
+        panel.add_vote(ArbitrationVote {
+            validator: test_addr(0x12),
+            output_hash: Hash::new([0x03; 32]),
+            execution_time_ms: 100,
+        });
+
+        assert!(panel.has_quorum());
+        assert_eq!(panel.resolve(), ArbitrationOutcome::Inconclusive);
+    }
+
+    #[test]
+    fn test_arbitration_duplicate_votes() {
+        let task_id = Hash::new([0x50; 32]);
+        let mut panel = ArbitrationPanel::new(task_id, test_addr(0x01), Hash::new([0xAA; 32]));
+
+        let validator = test_addr(0x10);
+        panel.add_vote(ArbitrationVote {
+            validator,
+            output_hash: Hash::new([0xAA; 32]),
+            execution_time_ms: 100,
+        });
+        panel.add_vote(ArbitrationVote {
+            validator, // duplicate
+            output_hash: Hash::new([0xBB; 32]),
+            execution_time_ms: 100,
+        });
+
+        assert_eq!(panel.votes.len(), 1); // duplicate rejected
+    }
+
+    #[test]
+    fn test_arbitration_manager() {
+        let mut mgr = ArbitrationManager::new();
+        let task_id = Hash::new([0x60; 32]);
+        let miner = test_addr(0x01);
+        let correct_hash = Hash::new([0xAA; 32]);
+
+        assert!(mgr.open_dispute(task_id, miner, correct_hash));
+        assert!(!mgr.open_dispute(task_id, miner, correct_hash)); // duplicate
+        assert_eq!(mgr.active_count(), 1);
+
+        // Submit 3 votes
+        for i in 0..3 {
+            mgr.submit_vote(
+                &task_id,
+                ArbitrationVote {
+                    validator: test_addr(0x10 + i),
+                    output_hash: correct_hash,
+                    execution_time_ms: 100,
+                },
+            );
+        }
+
+        let outcomes = mgr.resolve_ready();
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].1, ArbitrationOutcome::MinerVindicated);
+        assert_eq!(mgr.active_count(), 0);
     }
 
     #[test]
