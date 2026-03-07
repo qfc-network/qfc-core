@@ -11,6 +11,7 @@ use qfc_mempool::Mempool;
 use qfc_network::NetworkService;
 use std::fmt::Write as _;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tracing::{error, info};
 
@@ -22,6 +23,10 @@ pub struct MetricsServer {
     network: Option<Arc<NetworkService>>,
     proof_pool: Arc<RwLock<ProofPool>>,
     chain_id: u64,
+    /// Cached total transaction count (accumulated across scrapes)
+    tx_total: AtomicU64,
+    /// Last block height we counted transactions up to
+    tx_counted_to: AtomicU64,
 }
 
 impl MetricsServer {
@@ -42,6 +47,8 @@ impl MetricsServer {
             network,
             proof_pool,
             chain_id,
+            tx_total: AtomicU64::new(0),
+            tx_counted_to: AtomicU64::new(0),
         }
     }
 
@@ -82,8 +89,24 @@ impl MetricsServer {
         });
     }
 
+    /// Accumulate transaction count for new blocks since last scrape.
+    fn update_tx_total(&self, current_height: u64) -> u64 {
+        let counted_to = self.tx_counted_to.load(Ordering::Relaxed);
+        if current_height > counted_to {
+            let mut added = 0u64;
+            for h in (counted_to + 1)..=current_height {
+                if let Ok(Some(block)) = self.chain.get_block_by_number(h) {
+                    added += block.transactions.len() as u64;
+                }
+            }
+            self.tx_total.fetch_add(added, Ordering::Relaxed);
+            self.tx_counted_to.store(current_height, Ordering::Relaxed);
+        }
+        self.tx_total.load(Ordering::Relaxed)
+    }
+
     fn render_metrics(&self) -> String {
-        let mut out = String::with_capacity(2048);
+        let mut out = String::with_capacity(4096);
 
         // --- chain ---
         let block_height = self.chain.block_number();
@@ -98,6 +121,15 @@ impl MetricsServer {
         );
         let _ = writeln!(out, "# TYPE qfc_blocks_produced_total counter");
         let _ = writeln!(out, "qfc_blocks_produced_total {block_height}");
+
+        // total transactions (accumulated counter)
+        let tx_total = self.update_tx_total(block_height);
+        let _ = writeln!(
+            out,
+            "# HELP qfc_transactions_total Total transactions processed."
+        );
+        let _ = writeln!(out, "# TYPE qfc_transactions_total counter");
+        let _ = writeln!(out, "qfc_transactions_total {tx_total}");
 
         // block time: diff between last two block timestamps
         let block_time = self.compute_block_time(block_height);
@@ -131,6 +163,58 @@ impl MetricsServer {
         let _ = writeln!(out, "# TYPE qfc_epoch_number gauge");
         let _ = writeln!(out, "qfc_epoch_number {}", epoch.number);
 
+        // --- per-validator metrics ---
+        let _ = writeln!(
+            out,
+            "# HELP qfc_contribution_score Per-validator PoC contribution score."
+        );
+        let _ = writeln!(out, "# TYPE qfc_contribution_score gauge");
+        for v in &validators {
+            let addr = v.address;
+            let _ = writeln!(
+                out,
+                "qfc_contribution_score{{validator=\"{addr}\"}} {}",
+                v.contribution_score
+            );
+        }
+
+        let _ = writeln!(
+            out,
+            "# HELP qfc_inference_flops_total Cumulative FLOPS executed by validator."
+        );
+        let _ = writeln!(out, "# TYPE qfc_inference_flops_total counter");
+        for v in &validators {
+            let addr = v.address;
+            let _ = writeln!(
+                out,
+                "qfc_inference_flops_total{{validator=\"{addr}\"}} {}",
+                v.inference_score
+            );
+        }
+
+        let _ = writeln!(
+            out,
+            "# HELP qfc_inference_score Per-validator inference quality score."
+        );
+        let _ = writeln!(out, "# TYPE qfc_inference_score gauge");
+        for v in &validators {
+            let addr = v.address;
+            // inference_score already accumulates FLOPS; combine with tasks and pass rate
+            // for a quality metric consistent with scoring.rs
+            let score = if v.tasks_completed > 0 {
+                let pass_ratio = v.verification_pass_rate as f64 / 10000.0;
+                let flops_norm = v.inference_score as f64 / 1_000_000_000.0; // per GFLOPS
+                (flops_norm * (v.tasks_completed as f64).sqrt() * pass_ratio * pass_ratio * 1000.0)
+                    as u64
+            } else {
+                0
+            };
+            let _ = writeln!(
+                out,
+                "qfc_inference_score{{validator=\"{addr}\"}} {score}"
+            );
+        }
+
         // --- network ---
         let peer_count = self
             .network
@@ -155,7 +239,7 @@ impl MetricsServer {
         let _ = writeln!(out, "# TYPE qfc_chain_id gauge");
         let _ = writeln!(out, "qfc_chain_id {}", self.chain_id);
 
-        // --- inference ---
+        // --- inference (network-wide from proof pool) ---
         let pool = self.proof_pool.read();
         let accepted = pool.total_accepted();
         let submissions = pool.total_submissions();
