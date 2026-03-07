@@ -40,6 +40,8 @@ pub enum TransactionType {
     Undelegate = 8,
     /// Claim delegation rewards
     ClaimDelegationRewards = 9,
+    /// Submit an AI inference task (v2.0)
+    InferenceTask = 10,
 }
 
 impl Default for TransactionType {
@@ -61,6 +63,7 @@ impl From<u8> for TransactionType {
             7 => Self::Delegate,
             8 => Self::Undelegate,
             9 => Self::ClaimDelegationRewards,
+            10 => Self::InferenceTask,
             _ => Self::Transfer,
         }
     }
@@ -268,6 +271,30 @@ impl Transaction {
             value: U256::ZERO,
             data: Vec::new(),
             gas_limit: crate::MINIMUM_GAS * 2,
+            gas_price,
+            public_key: PublicKey::ZERO,
+            signature: Signature::ZERO,
+        }
+    }
+
+    /// Create an inference task transaction
+    /// `data` contains the serialized task parameters (task_type, model_id, input_hash, max_fee)
+    /// `value` is the max fee escrowed for the task
+    pub fn inference_task(
+        data: Vec<u8>,
+        value: U256,
+        nonce: u64,
+        gas_limit: u64,
+        gas_price: U256,
+    ) -> Self {
+        Self {
+            tx_type: TransactionType::InferenceTask,
+            chain_id: crate::DEFAULT_CHAIN_ID,
+            nonce,
+            to: None,
+            value,
+            data,
+            gas_limit,
             gas_price,
             public_key: PublicKey::ZERO,
             signature: Signature::ZERO,

@@ -259,6 +259,18 @@ impl Executor {
             TransactionType::ClaimDelegationRewards => {
                 self.execute_claim_delegation_rewards(&tx.tx, &sender, state)
             }
+            TransactionType::InferenceTask => {
+                // Inference tasks are recorded on-chain for auditability.
+                // Fee escrow is handled by the RPC layer (submitPublicTask).
+                // The tx.data contains the serialized task params.
+                Ok(ExecutionResult {
+                    success: true,
+                    gas_used: 21_000, // base gas for inference task record
+                    logs: Vec::new(),
+                    contract_address: None,
+                    error: None,
+                })
+            }
         };
 
         // 4. Handle result
