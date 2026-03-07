@@ -39,7 +39,10 @@ struct StateDBRef<'a> {
 impl<'a> revm::DatabaseRef for StateDBRef<'a> {
     type Error = String;
 
-    fn basic_ref(&self, address: RevmAddress) -> std::result::Result<Option<AccountInfo>, Self::Error> {
+    fn basic_ref(
+        &self,
+        address: RevmAddress,
+    ) -> std::result::Result<Option<AccountInfo>, Self::Error> {
         let addr = revm_to_address(&address);
         let balance = self.state.get_balance(&addr).map_err(|e| e.to_string())?;
         let nonce = self.state.get_nonce(&addr).map_err(|e| e.to_string())?;
@@ -68,10 +71,17 @@ impl<'a> revm::DatabaseRef for StateDBRef<'a> {
         Ok(Bytecode::default())
     }
 
-    fn storage_ref(&self, address: RevmAddress, index: RevmU256) -> std::result::Result<RevmU256, Self::Error> {
+    fn storage_ref(
+        &self,
+        address: RevmAddress,
+        index: RevmU256,
+    ) -> std::result::Result<RevmU256, Self::Error> {
         let addr = revm_to_address(&address);
         let slot = revm_to_u256(index);
-        let value = self.state.get_storage(&addr, &slot).map_err(|e| e.to_string())?;
+        let value = self
+            .state
+            .get_storage(&addr, &slot)
+            .map_err(|e| e.to_string())?;
         Ok(u256_to_revm(value))
     }
 
