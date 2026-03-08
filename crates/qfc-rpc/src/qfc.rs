@@ -190,6 +190,13 @@ pub trait QfcApi {
     #[method(name = "getPublicTaskStatus")]
     async fn get_public_task_status(&self, task_id: String) -> RpcResult<RpcPublicTaskStatus>;
 
+    /// Estimate the fee for an inference task
+    #[method(name = "estimateInferenceFee")]
+    async fn estimate_inference_fee(
+        &self,
+        request: RpcEstimateInferenceFee,
+    ) -> RpcResult<RpcInferenceFeeEstimate>;
+
     /// Fetch a large inference result from IPFS by CID.
     /// Returns base64-encoded content. This proxies the request so clients
     /// do not need their own IPFS node.
@@ -452,6 +459,49 @@ pub struct RpcPublicTaskStatus {
     /// Execution time in milliseconds
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execution_time_ms: Option<u64>,
+}
+
+/// Request to estimate inference fee
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcEstimateInferenceFee {
+    /// Model ID (e.g. "qfc-embed-small")
+    pub model_id: String,
+    /// Task type: "TextEmbedding", "TextGeneration", "ImageClassification", "OnnxInference"
+    #[serde(default = "default_task_type")]
+    pub task_type: String,
+    /// Input size in bytes (used for future dynamic pricing, currently unused)
+    #[serde(default)]
+    pub input_size: u64,
+    /// Max tokens (for TextGeneration tasks, default 100)
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: u64,
+}
+
+fn default_task_type() -> String {
+    "TextEmbedding".into()
+}
+
+fn default_max_tokens() -> u64 {
+    100
+}
+
+/// Response for inference fee estimation
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcInferenceFeeEstimate {
+    /// Estimated base fee in wei (hex)
+    pub base_fee: String,
+    /// Model ID
+    pub model_id: String,
+    /// GPU tier required: "Hot", "Warm", "Cold"
+    pub gpu_tier: String,
+    /// Estimated execution time in ms
+    pub estimated_time_ms: u64,
+    /// Minimum memory required in MB
+    pub min_memory_mb: u64,
+    /// Estimated FLOPS
+    pub estimated_flops: u64,
 }
 
 // ============ v2.0 P2: Miner Registration & Status Report Types ============

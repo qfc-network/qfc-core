@@ -1812,6 +1812,65 @@ impl QfcApiServer for RpcServer {
         }
     }
 
+    async fn estimate_inference_fee(
+        &self,
+        request: RpcEstimateInferenceFee,
+    ) -> RpcResult<RpcInferenceFeeEstimate> {
+        use qfc_inference::{ComputeTaskType, ModelId};
+
+        // Parse model_id: "name" or "name:version"
+        let (model_name, model_version) = if let Some(idx) = request.model_id.find(':') {
+            (
+                request.model_id[..idx].to_string(),
+                request.model_id[idx + 1..].to_string(),
+            )
+        } else {
+            (request.model_id.clone(), "v1.0".to_string())
+        };
+        let model_id = ModelId::new(&model_name, &model_version);
+
+        // Build a ComputeTaskType from the request
+        let task_type = match request.task_type.as_str() {
+            "TextGeneration" => ComputeTaskType::TextGeneration {
+                model_id,
+                prompt_hash: qfc_types::Hash::ZERO,
+                max_tokens: request.max_tokens as u32,
+                temperature_fp: 0,
+                seed: 0,
+            },
+            "ImageClassification" => ComputeTaskType::ImageClassification {
+                model_id,
+                input_hash: qfc_types::Hash::ZERO,
+            },
+            "OnnxInference" => ComputeTaskType::OnnxInference {
+                model_hash: qfc_types::Hash::ZERO,
+                input_hash: qfc_types::Hash::ZERO,
+            },
+            _ => ComputeTaskType::Embedding {
+                model_id,
+                input_hash: qfc_types::Hash::ZERO,
+            },
+        };
+
+        let reqs = qfc_ai_coordinator::task_types::task_requirements(&task_type);
+        let base_fee = qfc_ai_coordinator::estimate_base_fee(&task_type);
+
+        let tier_str = match reqs.min_tier {
+            qfc_inference::GpuTier::Hot => "Hot",
+            qfc_inference::GpuTier::Warm => "Warm",
+            qfc_inference::GpuTier::Cold => "Cold",
+        };
+
+        Ok(RpcInferenceFeeEstimate {
+            base_fee: format!("0x{:x}", base_fee),
+            model_id: request.model_id,
+            gpu_tier: tier_str.to_string(),
+            estimated_time_ms: reqs.timeout_ms,
+            min_memory_mb: reqs.min_memory_mb,
+            estimated_flops: reqs.estimated_flops,
+        })
+    }
+
     async fn get_inference_result(&self, cid: String) -> RpcResult<String> {
         use base64::Engine;
 
