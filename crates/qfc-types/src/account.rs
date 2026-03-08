@@ -90,6 +90,21 @@ pub struct Account {
     pub is_dormant: bool,
 }
 
+/// Legacy account format (before storage-rent fields were added in #24).
+/// Used only for backward-compatible deserialization of existing DB data.
+#[derive(BorshSerialize, BorshDeserialize)]
+struct LegacyAccount {
+    account_type: AccountType,
+    balance: U256,
+    nonce: u64,
+    code_hash: Option<Hash>,
+    storage_root: Option<Hash>,
+    stake: Option<U256>,
+    contribution_score: Option<u64>,
+    delegated_to: Option<Address>,
+    delegated_amount: Option<U256>,
+}
+
 impl Default for Account {
     fn default() -> Self {
         Self::new_eoa()
@@ -300,9 +315,36 @@ impl Account {
         borsh::to_vec(self).expect("serialization should not fail")
     }
 
-    /// Deserialize account
+    /// Deserialize account.
+    ///
+    /// Handles backward compatibility: accounts serialized before the
+    /// storage-rent fields were added (storage_deposit, last_active_epoch,
+    /// storage_slot_count, is_dormant) are deserialized with default values
+    /// for those fields.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, borsh::io::Error> {
-        borsh::from_slice(bytes)
+        // Try current format first
+        match borsh::from_slice::<Self>(bytes) {
+            Ok(account) => Ok(account),
+            Err(_) => {
+                // Fall back to legacy format (without storage-rent fields)
+                let legacy: LegacyAccount = borsh::from_slice(bytes)?;
+                Ok(Self {
+                    account_type: legacy.account_type,
+                    balance: legacy.balance,
+                    nonce: legacy.nonce,
+                    code_hash: legacy.code_hash,
+                    storage_root: legacy.storage_root,
+                    stake: legacy.stake,
+                    contribution_score: legacy.contribution_score,
+                    delegated_to: legacy.delegated_to,
+                    delegated_amount: legacy.delegated_amount,
+                    storage_deposit: 0,
+                    last_active_epoch: 0,
+                    storage_slot_count: 0,
+                    is_dormant: false,
+                })
+            }
+        }
     }
 }
 
@@ -405,6 +447,50 @@ mod tests {
         // Cannot withdraw more than delegated
         assert!(!account.sub_delegated_amount(U256::from_u64(1500)));
         assert_eq!(account.get_delegated_amount(), U256::from_u64(1000));
+    }
+
+    #[test]
+    fn test_account_legacy_deserialization() {
+        // Simulate old format by serializing a LegacyAccount directly
+        let legacy = super::LegacyAccount {
+            account_type: AccountType::EOA,
+            balance: U256::from_u64(999),
+            nonce: 5,
+            code_hash: None,
+            storage_root: None,
+            stake: None,
+            contribution_score: None,
+            delegated_to: None,
+            delegated_amount: None,
+        };
+        let old_bytes = borsh::to_vec(&legacy).unwrap();
+
+        // New from_bytes should handle old format gracefully
+        let account = Account::from_bytes(&old_bytes).unwrap();
+        assert_eq!(account.balance, U256::from_u64(999));
+        assert_eq!(account.nonce, 5);
+        assert_eq!(account.storage_deposit, 0);
+        assert_eq!(account.last_active_epoch, 0);
+        assert_eq!(account.storage_slot_count, 0);
+        assert!(!account.is_dormant);
+    }
+
+    #[test]
+    fn test_account_new_format_still_works() {
+        // New format round-trip should still work
+        let mut account = Account::new_eoa_with_balance(U256::from_u64(500));
+        account.storage_deposit = 1000;
+        account.last_active_epoch = 42;
+        account.storage_slot_count = 3;
+        account.is_dormant = true;
+
+        let bytes = account.to_bytes();
+        let decoded = Account::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded, account);
+        assert_eq!(decoded.storage_deposit, 1000);
+        assert_eq!(decoded.last_active_epoch, 42);
+        assert_eq!(decoded.storage_slot_count, 3);
+        assert!(decoded.is_dormant);
     }
 
     #[test]
