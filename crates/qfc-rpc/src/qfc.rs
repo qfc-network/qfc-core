@@ -248,6 +248,11 @@ pub trait QfcApi {
     #[subscription(name = "subscribeTaskStatus" => "taskStatus", unsubscribe = "unsubscribeTaskStatus", item = RpcPublicTaskStatus)]
     async fn subscribe_task_status(&self, task_id: String) -> SubscriptionResult;
 
+    /// Get miner vesting schedule — locked vs available balance.
+    /// Miner rewards vest linearly over 30 days with a 7-day cliff.
+    #[method(name = "getMinerVesting")]
+    async fn get_miner_vesting(&self, address: String) -> RpcResult<RpcMinerVesting>;
+
     // ---- v2.0: Bridge endpoints ----
 
     /// Get bridge status (validators, TVL, pending operations)
@@ -651,6 +656,47 @@ pub struct RpcModelStatus {
     pub model_version: String,
     /// Layer: "hot", "warm", "cold"
     pub layer: String,
+}
+
+// ============ v2.0: Miner Vesting Types ============
+
+/// Miner vesting schedule — shows locked vs available mining rewards.
+/// Rewards vest linearly over 30 days with a 7-day cliff.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcMinerVesting {
+    /// Miner address
+    pub miner: String,
+    /// Total lifetime earnings (hex wei)
+    pub total_earned: String,
+    /// Currently vesting / locked amount (hex wei)
+    pub locked: String,
+    /// Available to withdraw (hex wei)
+    pub available: String,
+    /// Number of vesting tranches still active
+    pub active_tranches: u64,
+    /// Detailed vesting tranches (most recent first)
+    pub tranches: Vec<RpcVestingTranche>,
+}
+
+/// A single vesting tranche from a block reward
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcVestingTranche {
+    /// Block height where reward was earned
+    pub block_height: String,
+    /// Total reward amount in this tranche (hex wei)
+    pub amount: String,
+    /// Amount already vested / unlocked (hex wei)
+    pub vested: String,
+    /// Timestamp when vesting started (seconds)
+    pub start_time: String,
+    /// Timestamp when cliff ends (seconds)
+    pub cliff_end: String,
+    /// Timestamp when fully vested (seconds)
+    pub end_time: String,
+    /// Vesting progress percentage (0-100)
+    pub percent_vested: u8,
 }
 
 // ============ v2.0: Parameter Governance RPC Types ============

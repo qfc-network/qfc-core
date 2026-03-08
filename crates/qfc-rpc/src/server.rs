@@ -6,12 +6,12 @@ use crate::qfc::{
     QfcApiServer, RpcAccountRentInfo, RpcBridgeDeposit, RpcBridgeStatus, RpcBridgeWithdrawal,
     RpcComputeInfo, RpcEpoch, RpcEstimateInferenceFee, RpcFaucetResponse, RpcInferenceFeeEstimate,
     RpcInferenceProofSubmission, RpcInferenceStats, RpcInferenceTask, RpcMinerStatusReport,
-    RpcModel, RpcModelProposal, RpcNodeInfo, RpcParameterOverride, RpcParameterProposal,
-    RpcProofResult, RpcProposeModelRequest, RpcProposeParameterRequest, RpcProposeSpendRequest,
-    RpcPublicTaskStatus, RpcRegisterMinerRequest, RpcRegisterMinerResult, RpcSpendProposal,
-    RpcSubmitPublicTask, RpcTaskRequest, RpcTreasuryInfo, RpcUndelegation, RpcUserOperation,
-    RpcUserOperationStatus, RpcValidator, RpcValidatorMetrics, RpcValidatorScoreBreakdown,
-    RpcVoteModelRequest, RpcVoteParameterRequest, RpcVoteSpendRequest,
+    RpcMinerVesting, RpcModel, RpcModelProposal, RpcNodeInfo, RpcParameterOverride,
+    RpcParameterProposal, RpcProofResult, RpcProposeModelRequest, RpcProposeParameterRequest,
+    RpcProposeSpendRequest, RpcPublicTaskStatus, RpcRegisterMinerRequest, RpcRegisterMinerResult,
+    RpcSpendProposal, RpcSubmitPublicTask, RpcTaskRequest, RpcTreasuryInfo, RpcUndelegation,
+    RpcUserOperation, RpcUserOperationStatus, RpcValidator, RpcValidatorMetrics,
+    RpcValidatorScoreBreakdown, RpcVoteModelRequest, RpcVoteParameterRequest, RpcVoteSpendRequest,
 };
 use crate::txpool::{TxPoolApiServer, TxPoolContent, TxPoolStatus};
 use crate::types::{BlockNumber, BlockTag, CallRequest, RpcBlock, RpcReceipt, RpcTransaction};
@@ -2266,6 +2266,128 @@ impl QfcApiServer for RpcServer {
                 value: value.to_string(),
             })
             .collect())
+    }
+
+    // ---- v2.0: Miner vesting endpoint ----
+
+    async fn get_miner_vesting(&self, address: String) -> RpcResult<RpcMinerVesting> {
+        use crate::qfc::RpcVestingTranche;
+
+        let miner_address = Self::parse_address(&address)?;
+        let miner_hex = hex::encode(miner_address.as_bytes());
+
+        // Vesting constants: 7-day cliff, 30-day linear vest
+        const CLIFF_SECS: u64 = 7 * 24 * 3600;
+        const VEST_SECS: u64 = 30 * 24 * 3600;
+
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        // Scan blocks for this miner's inference proofs to build vesting tranches.
+        // In production this would read from MINER_EARNINGS CF; for now we scan
+        // recent blocks (last 30 days worth ≈ 777,600 blocks at 3.3s/block).
+        let current_height = self.chain.block_number();
+        let blocks_per_day = 24 * 3600 * 1000 / qfc_types::BLOCK_TIME_MS;
+        let scan_start = current_height.saturating_sub(blocks_per_day * 31);
+
+        let mut total_earned = U256::zero();
+        let mut total_locked = U256::zero();
+        let mut total_available = U256::zero();
+        let mut tranches = Vec::new();
+
+        let mut height = scan_start;
+        while height <= current_height {
+            let block = match self.chain.get_block_by_number(height) {
+                Ok(Some(b)) => b,
+                _ => {
+                    height += 1;
+                    continue;
+                }
+            };
+
+            let miner_flops: u64 = block
+                .inference_proofs
+                .iter()
+                .filter(|p| p.validator == miner_address)
+                .map(|p| p.flops_estimated)
+                .sum();
+
+            if miner_flops == 0 {
+                height += 1;
+                continue;
+            }
+
+            let total_flops: u64 = block
+                .inference_proofs
+                .iter()
+                .map(|p| p.flops_estimated)
+                .sum();
+
+            if total_flops == 0 {
+                height += 1;
+                continue;
+            }
+
+            // 15% of block reward → miner pool, proportional to FLOPS
+            let block_reward = U256::from_u128(qfc_types::BLOCK_REWARD);
+            let miner_pool = block_reward * U256::from_u128(15) / U256::from_u128(100);
+            let reward = miner_pool * U256::from_u128(miner_flops as u128)
+                / U256::from_u128(total_flops as u128);
+
+            let start_time = block.header.timestamp;
+            let cliff_end = start_time + CLIFF_SECS;
+            let end_time = start_time + VEST_SECS;
+
+            // Calculate vested amount
+            let (vested, percent) = if now_secs < cliff_end {
+                // Before cliff: nothing vested
+                (U256::zero(), 0u8)
+            } else if now_secs >= end_time {
+                // Fully vested
+                (reward, 100u8)
+            } else {
+                // Linear vesting between cliff and end
+                let elapsed = now_secs - start_time;
+                let v =
+                    reward * U256::from_u128(elapsed as u128) / U256::from_u128(VEST_SECS as u128);
+                let pct = (elapsed * 100 / VEST_SECS) as u8;
+                (v, pct)
+            };
+
+            total_earned = total_earned + reward;
+            let locked = reward - vested;
+            total_locked = total_locked + locked;
+            total_available = total_available + vested;
+
+            if percent < 100 {
+                tranches.push(RpcVestingTranche {
+                    block_height: format!("0x{:x}", height),
+                    amount: format!("0x{:x}", reward.0),
+                    vested: format!("0x{:x}", vested.0),
+                    start_time: format!("{}", start_time),
+                    cliff_end: format!("{}", cliff_end),
+                    end_time: format!("{}", end_time),
+                    percent_vested: percent,
+                });
+            }
+
+            height += 1;
+        }
+
+        let active_tranches = tranches.len() as u64;
+        // Return most recent tranches first
+        tranches.reverse();
+
+        Ok(RpcMinerVesting {
+            miner: format!("0x{}", miner_hex),
+            total_earned: format!("0x{:x}", total_earned.0),
+            locked: format!("0x{:x}", total_locked.0),
+            available: format!("0x{:x}", total_available.0),
+            active_tranches,
+            tranches,
+        })
     }
 
     // ---- v2.0: Cross-chain bridge endpoints ----
