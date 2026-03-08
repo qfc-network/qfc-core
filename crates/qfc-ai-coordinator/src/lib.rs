@@ -14,6 +14,7 @@ pub mod assignment;
 pub mod challenge;
 pub mod governance;
 pub mod ipfs;
+pub mod param_governance;
 pub mod proof_pool;
 pub mod redundant;
 pub mod registry;
@@ -28,6 +29,9 @@ pub use challenge::{
     ChallengePenalty, ChallengeVerdict,
 };
 pub use governance::{GovernanceError, ModelGovernance, ModelProposal, ProposalStatus};
+pub use param_governance::{
+    ParamGovernanceError, ParamProposalStatus, ParameterGovernance, ParameterKey, ParameterProposal,
+};
 pub use proof_pool::ProofPool;
 pub use task_pool::TaskPool;
 pub use task_types::estimate_base_fee;

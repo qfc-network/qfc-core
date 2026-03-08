@@ -184,6 +184,24 @@ pub trait QfcApi {
     #[method(name = "getModelProposals")]
     async fn get_model_proposals(&self) -> RpcResult<Vec<RpcModelProposal>>;
 
+    // ---- v2.0: Parameter Governance endpoints ----
+
+    /// Submit a parameter change proposal
+    #[method(name = "proposeParameter")]
+    async fn propose_parameter(&self, request: RpcProposeParameterRequest) -> RpcResult<String>;
+
+    /// Vote on a parameter proposal (stake-weighted)
+    #[method(name = "voteParameter")]
+    async fn vote_parameter(&self, request: RpcVoteParameterRequest) -> RpcResult<bool>;
+
+    /// Get all parameter proposals
+    #[method(name = "getParameterProposals")]
+    async fn get_parameter_proposals(&self) -> RpcResult<Vec<RpcParameterProposal>>;
+
+    /// Get current parameter overrides (values changed by governance)
+    #[method(name = "getParameterOverrides")]
+    async fn get_parameter_overrides(&self) -> RpcResult<Vec<RpcParameterOverride>>;
+
     // ---- v2.0: Public Inference API endpoints ----
 
     /// Submit a public inference task (paid)
@@ -574,4 +592,57 @@ pub struct RpcModelStatus {
     pub model_version: String,
     /// Layer: "hot", "warm", "cold"
     pub layer: String,
+}
+
+// ============ v2.0: Parameter Governance RPC Types ============
+
+/// Request to propose a parameter change
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcProposeParameterRequest {
+    /// Proposer address (hex)
+    pub proposer: String,
+    /// Parameter key (e.g. "block_reward", "min_gas_price")
+    pub parameter: String,
+    /// Proposed new value (decimal string)
+    pub proposed_value: String,
+    /// Description of the change
+    pub description: String,
+}
+
+/// Request to vote on a parameter proposal
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcVoteParameterRequest {
+    /// Proposal ID (hex)
+    pub proposal_id: String,
+    /// Voter address (hex)
+    pub voter: String,
+    /// Whether to approve
+    pub approve: bool,
+}
+
+/// Parameter proposal information
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcParameterProposal {
+    pub proposal_id: String,
+    pub proposer: String,
+    pub parameter: String,
+    pub current_value: String,
+    pub proposed_value: String,
+    pub description: String,
+    pub stake_for: String,
+    pub stake_against: String,
+    pub status: String,
+    pub created_at: u64,
+    pub voting_deadline: u64,
+}
+
+/// A parameter override applied by governance
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcParameterOverride {
+    pub parameter: String,
+    pub value: String,
 }

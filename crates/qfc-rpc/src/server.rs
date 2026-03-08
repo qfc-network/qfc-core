@@ -5,10 +5,11 @@ use crate::eth::EthApiServer;
 use crate::qfc::{
     QfcApiServer, RpcComputeInfo, RpcEpoch, RpcEstimateInferenceFee, RpcFaucetResponse,
     RpcInferenceFeeEstimate, RpcInferenceProofSubmission, RpcInferenceStats, RpcInferenceTask,
-    RpcMinerStatusReport, RpcModel, RpcModelProposal, RpcNodeInfo, RpcProofResult,
-    RpcProposeModelRequest, RpcPublicTaskStatus, RpcRegisterMinerRequest, RpcRegisterMinerResult,
-    RpcSubmitPublicTask, RpcTaskRequest, RpcUndelegation, RpcValidator, RpcValidatorMetrics,
-    RpcValidatorScoreBreakdown, RpcVoteModelRequest,
+    RpcMinerStatusReport, RpcModel, RpcModelProposal, RpcNodeInfo, RpcParameterOverride,
+    RpcParameterProposal, RpcProofResult, RpcProposeModelRequest, RpcProposeParameterRequest,
+    RpcPublicTaskStatus, RpcRegisterMinerRequest, RpcRegisterMinerResult, RpcSubmitPublicTask,
+    RpcTaskRequest, RpcUndelegation, RpcValidator, RpcValidatorMetrics, RpcValidatorScoreBreakdown,
+    RpcVoteModelRequest, RpcVoteParameterRequest,
 };
 use crate::txpool::{TxPoolApiServer, TxPoolContent, TxPoolStatus};
 use crate::types::{BlockNumber, BlockTag, CallRequest, RpcBlock, RpcReceipt, RpcTransaction};
@@ -71,6 +72,8 @@ pub struct RpcServer {
     model_registry: Arc<qfc_inference::model::ModelRegistry>,
     /// v2.0: Model governance
     governance: Arc<RwLock<qfc_ai_coordinator::ModelGovernance>>,
+    /// v2.0: Parameter governance (stake-weighted voting on protocol params)
+    param_governance: Arc<RwLock<qfc_ai_coordinator::ParameterGovernance>>,
     /// v2.0: Inference engine for spot-check re-execution
     inference_engine: Option<Arc<tokio::sync::RwLock<Box<dyn qfc_inference::InferenceEngine>>>>,
     /// v2.0: Pool of verified inference proofs awaiting block inclusion
@@ -104,6 +107,7 @@ impl Clone for RpcServer {
             task_pool: self.task_pool.clone(),
             model_registry: self.model_registry.clone(),
             governance: self.governance.clone(),
+            param_governance: self.param_governance.clone(),
             inference_engine: self.inference_engine.clone(),
             proof_pool: self.proof_pool.clone(),
             challenge_generator: self.challenge_generator.clone(),
@@ -138,6 +142,7 @@ impl RpcServer {
             task_pool: Arc::new(RwLock::new(task_pool)),
             model_registry: Arc::new(qfc_inference::model::ModelRegistry::default_v2()),
             governance: Arc::new(RwLock::new(qfc_ai_coordinator::ModelGovernance::new())),
+            param_governance: Arc::new(RwLock::new(qfc_ai_coordinator::ParameterGovernance::new())),
             inference_engine: None,
             proof_pool: None,
             challenge_generator: None,
@@ -280,6 +285,70 @@ impl RpcServer {
             .try_into()
             .map_err(|_| RpcError::InvalidParams("invalid U256 length".into()))?;
         Ok(U256::from_be_bytes(&bytes))
+    }
+
+    fn parse_parameter_key(s: &str) -> Result<qfc_ai_coordinator::ParameterKey, RpcError> {
+        use qfc_ai_coordinator::ParameterKey;
+        match s {
+            "block_reward" => Ok(ParameterKey::BlockReward),
+            "min_validator_stake" => Ok(ParameterKey::MinValidatorStake),
+            "block_gas_limit" => Ok(ParameterKey::BlockGasLimit),
+            "min_gas_price" => Ok(ParameterKey::MinGasPrice),
+            "fee_producer_percent" => Ok(ParameterKey::FeeProducerPercent),
+            "fee_voters_percent" => Ok(ParameterKey::FeeVotersPercent),
+            "fee_burn_percent" => Ok(ParameterKey::FeeBurnPercent),
+            "producer_reward_percent" => Ok(ParameterKey::ProducerRewardPercent),
+            "voters_reward_percent" => Ok(ParameterKey::VotersRewardPercent),
+            "inference_miners_reward_percent" => Ok(ParameterKey::InferenceMinersRewardPercent),
+            "inference_fee_miner_percent" => Ok(ParameterKey::InferenceFeeMinerPercent),
+            "inference_fee_validators_percent" => Ok(ParameterKey::InferenceFeeValidatorsPercent),
+            "inference_fee_burn_percent" => Ok(ParameterKey::InferenceFeeBurnPercent),
+            "slash_double_sign_percent" => Ok(ParameterKey::SlashDoubleSignPercent),
+            "slash_offline_percent" => Ok(ParameterKey::SlashOfflinePercent),
+            "unstake_delay_secs" => Ok(ParameterKey::UnstakeDelaySecs),
+            "min_delegation" => Ok(ParameterKey::MinDelegation),
+            "max_transactions_per_block" => Ok(ParameterKey::MaxTransactionsPerBlock),
+            _ => Err(RpcError::InvalidParams(format!(
+                "Unknown parameter key: {}",
+                s
+            ))),
+        }
+    }
+
+    fn get_current_param_value(&self, key: &qfc_ai_coordinator::ParameterKey) -> u128 {
+        use qfc_ai_coordinator::ParameterKey;
+
+        // Check overrides first, then fall back to compile-time constants
+        if let Some(val) = self.param_governance.read().get_override(key) {
+            return val;
+        }
+
+        match key {
+            ParameterKey::BlockReward => qfc_types::BLOCK_REWARD,
+            ParameterKey::MinValidatorStake => qfc_types::MIN_VALIDATOR_STAKE,
+            ParameterKey::BlockGasLimit => qfc_types::DEFAULT_BLOCK_GAS_LIMIT as u128,
+            ParameterKey::MinGasPrice => qfc_types::MIN_GAS_PRICE as u128,
+            ParameterKey::FeeProducerPercent => qfc_types::FEE_PRODUCER_PERCENT as u128,
+            ParameterKey::FeeVotersPercent => qfc_types::FEE_VOTERS_PERCENT as u128,
+            ParameterKey::FeeBurnPercent => qfc_types::FEE_BURN_PERCENT as u128,
+            ParameterKey::ProducerRewardPercent => qfc_types::PRODUCER_REWARD_PERCENT as u128,
+            ParameterKey::VotersRewardPercent => qfc_types::VOTERS_REWARD_PERCENT as u128,
+            ParameterKey::InferenceMinersRewardPercent => {
+                qfc_types::INFERENCE_MINERS_REWARD_PERCENT as u128
+            }
+            ParameterKey::InferenceFeeMinerPercent => {
+                qfc_types::INFERENCE_FEE_MINER_PERCENT as u128
+            }
+            ParameterKey::InferenceFeeValidatorsPercent => {
+                qfc_types::INFERENCE_FEE_VALIDATORS_PERCENT as u128
+            }
+            ParameterKey::InferenceFeeBurnPercent => qfc_types::INFERENCE_FEE_BURN_PERCENT as u128,
+            ParameterKey::SlashDoubleSignPercent => qfc_types::SLASH_DOUBLE_SIGN_PERCENT as u128,
+            ParameterKey::SlashOfflinePercent => qfc_types::SLASH_OFFLINE_PERCENT as u128,
+            ParameterKey::UnstakeDelaySecs => qfc_types::UNSTAKE_DELAY_SECS as u128,
+            ParameterKey::MinDelegation => qfc_types::MIN_DELEGATION,
+            ParameterKey::MaxTransactionsPerBlock => qfc_types::MAX_TRANSACTIONS_PER_BLOCK as u128,
+        }
     }
 }
 
@@ -1848,6 +1917,124 @@ impl QfcApiServer for RpcServer {
                     created_at: p.created_at,
                     voting_deadline: p.voting_deadline,
                 }
+            })
+            .collect())
+    }
+
+    // ---- v2.0: Parameter Governance endpoints ----
+
+    async fn propose_parameter(&self, request: RpcProposeParameterRequest) -> RpcResult<String> {
+        let proposer = Self::parse_address(&request.proposer)?;
+
+        // Parse parameter key
+        let parameter = Self::parse_parameter_key(&request.parameter)?;
+
+        // Get current value for this parameter
+        let current_value = self.get_current_param_value(&parameter);
+
+        // Parse proposed value
+        let proposed_value: u128 = request
+            .proposed_value
+            .parse()
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid proposed_value: {}", e)))?;
+
+        // Get proposer's stake
+        let state = self.chain.state();
+        let stake = state.get_stake(&proposer).unwrap_or_default().0.as_u128();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        let proposal_id = self
+            .param_governance
+            .write()
+            .propose(
+                proposer,
+                parameter,
+                current_value,
+                proposed_value,
+                request.description,
+                stake,
+                now,
+            )
+            .map_err(|e| RpcError::Execution(e.to_string()))?;
+
+        Ok(hex::encode(proposal_id.as_bytes()))
+    }
+
+    async fn vote_parameter(&self, request: RpcVoteParameterRequest) -> RpcResult<bool> {
+        let proposal_id = Self::parse_hash(&request.proposal_id)?;
+        let voter = Self::parse_address(&request.voter)?;
+
+        // Get voter's stake for stake-weighted voting
+        let state = self.chain.state();
+        let voter_stake = state.get_stake(&voter).unwrap_or_default().0.as_u128();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        self.param_governance
+            .write()
+            .vote(proposal_id, voter, request.approve, voter_stake, now)
+            .map_err(|e| RpcError::Execution(e.to_string()))?;
+
+        // Tally after each vote to check for early pass/reject
+        let consensus = self.chain.consensus();
+        let validators = consensus.get_validators();
+        let total_stake: u128 = validators.iter().map(|v| v.stake.0.as_u128()).sum();
+        self.param_governance.write().tally(total_stake, now);
+
+        Ok(true)
+    }
+
+    async fn get_parameter_proposals(&self) -> RpcResult<Vec<RpcParameterProposal>> {
+        let gov = self.param_governance.read();
+        let proposals = gov.all_proposals();
+
+        Ok(proposals
+            .into_iter()
+            .map(|p| {
+                let status = match &p.status {
+                    qfc_ai_coordinator::ParamProposalStatus::Active => "Active".to_string(),
+                    qfc_ai_coordinator::ParamProposalStatus::Queued { execute_after } => {
+                        format!("Queued(execute_after={})", execute_after)
+                    }
+                    qfc_ai_coordinator::ParamProposalStatus::Executed => "Executed".to_string(),
+                    qfc_ai_coordinator::ParamProposalStatus::Rejected => "Rejected".to_string(),
+                    qfc_ai_coordinator::ParamProposalStatus::Expired => "Expired".to_string(),
+                    qfc_ai_coordinator::ParamProposalStatus::Cancelled => "Cancelled".to_string(),
+                };
+
+                RpcParameterProposal {
+                    proposal_id: hex::encode(p.proposal_id.as_bytes()),
+                    proposer: p.proposer.to_string(),
+                    parameter: p.parameter.to_string(),
+                    current_value: p.current_value.to_string(),
+                    proposed_value: p.proposed_value.to_string(),
+                    description: p.description.clone(),
+                    stake_for: p.stake_for().to_string(),
+                    stake_against: p.stake_against().to_string(),
+                    status,
+                    created_at: p.created_at,
+                    voting_deadline: p.voting_deadline,
+                }
+            })
+            .collect())
+    }
+
+    async fn get_parameter_overrides(&self) -> RpcResult<Vec<RpcParameterOverride>> {
+        let gov = self.param_governance.read();
+        let overrides = gov.all_overrides();
+
+        Ok(overrides
+            .iter()
+            .map(|(key, value)| RpcParameterOverride {
+                parameter: key.to_string(),
+                value: value.to_string(),
             })
             .collect())
     }
