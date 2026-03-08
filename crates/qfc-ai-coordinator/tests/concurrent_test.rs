@@ -512,7 +512,10 @@ async fn test_concurrent_spot_check_verification() {
     use qfc_inference::backend::cpu::CpuEngine;
     use qfc_inference::InferenceEngine;
 
-    let engine = Arc::new(CpuEngine::new());
+    let mut engine = CpuEngine::new();
+    let model_id = ModelId::new("qfc-embed-small", "v1.0");
+    engine.load_model(&model_id).await.unwrap();
+    let engine = Arc::new(engine);
 
     // Build a task
     let task = InferenceTask::new(

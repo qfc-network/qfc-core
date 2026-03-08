@@ -88,17 +88,16 @@ impl InferenceWorker {
                 task_response.model_name
             );
 
-            // 2. Epoch staleness check — skip before wasting compute
-            if let Ok(current_epoch) = submit::fetch_epoch(&self.config.validator_rpc).await {
-                let diff = if task_response.epoch >= current_epoch {
-                    task_response.epoch - current_epoch
-                } else {
-                    current_epoch - task_response.epoch
-                };
-                if diff > 5 {
+            // 2. Deadline check — skip if task already expired
+            {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                if now_ms > task_response.deadline {
                     warn!(
-                        "Task epoch {} is stale (validator at {}), skipping",
-                        task_response.epoch, current_epoch
+                        "Task already past deadline (deadline: {}, now: {}), skipping",
+                        task_response.deadline, now_ms
                     );
                     continue;
                 }
@@ -210,27 +209,9 @@ impl InferenceWorker {
             let signature = keypair.sign_hash(&proof_hash);
             proof.set_signature(signature);
 
-            // 6. Post-inference epoch check — don't submit if epoch drifted during inference
+            // 6. Submit proof to validator
             let rpc_url = &self.config.validator_rpc;
             let miner_addr = hex::encode(self.config.wallet_address.as_bytes());
-
-            if let Ok(current_epoch) = submit::fetch_epoch(rpc_url).await {
-                let diff = if task_response.epoch >= current_epoch {
-                    task_response.epoch - current_epoch
-                } else {
-                    current_epoch - task_response.epoch
-                };
-                if diff > 5 {
-                    warn!(
-                        "Epoch drifted during inference: task epoch {} → validator epoch {} (skipping submit)",
-                        task_response.epoch, current_epoch
-                    );
-                    tasks_failed += 1;
-                    continue;
-                }
-            }
-
-            // 7. Submit proof to validator
             match submit::submit_proof(rpc_url, &miner_addr, &proof).await {
                 Ok(result) => {
                     tasks_completed += 1;

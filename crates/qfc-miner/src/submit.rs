@@ -396,6 +396,7 @@ pub async fn report_miner_status(
 }
 
 /// Epoch response from validator
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EpochResponse {
@@ -403,6 +404,7 @@ pub struct EpochResponse {
 }
 
 /// Fetch current epoch number from the validator
+#[allow(dead_code)]
 pub async fn fetch_epoch(rpc_url: &str) -> Result<u64, SubmitError> {
     let rpc_request = serde_json::json!({
         "jsonrpc": "2.0",
@@ -450,7 +452,10 @@ pub async fn fetch_epoch(rpc_url: &str) -> Result<u64, SubmitError> {
         .ok_or_else(|| SubmitError::SerializationError("No result in response".to_string()))?;
 
     // Parse hex epoch number (strip 0x prefix)
-    let hex_str = epoch_resp.number.strip_prefix("0x").unwrap_or(&epoch_resp.number);
+    let hex_str = epoch_resp
+        .number
+        .strip_prefix("0x")
+        .unwrap_or(&epoch_resp.number);
     u64::from_str_radix(hex_str, 16)
         .map_err(|e| SubmitError::SerializationError(format!("Invalid epoch hex: {}", e)))
 }
