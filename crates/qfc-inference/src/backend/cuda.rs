@@ -143,6 +143,9 @@ fn estimate_flops_cuda(task_type: &ComputeTaskType) -> u64 {
                 4_000_000_000u64
             }
         }
+        ComputeTaskType::ImageGeneration { steps, .. } => {
+            2_000_000_000u64 * (*steps as u64) + 5_000_000_000u64
+        }
         ComputeTaskType::OnnxInference { .. } => 2_000_000_000u64,
     }
 }

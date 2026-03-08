@@ -57,6 +57,22 @@ pub enum ComputeTaskType {
         /// Language code (e.g. "en", "zh") or empty for auto-detect
         language: String,
     },
+    /// Image generation (Stable Diffusion / FLUX)
+    ImageGeneration {
+        model_id: ModelId,
+        /// Hash of the text prompt
+        prompt_hash: Hash,
+        /// Hash of negative prompt (or ZERO if none)
+        negative_prompt_hash: Hash,
+        /// Output image width in pixels
+        width: u32,
+        /// Output image height in pixels
+        height: u32,
+        /// Number of diffusion steps
+        steps: u32,
+        /// Deterministic seed for reproducibility
+        seed: u64,
+    },
     /// Generic ONNX model execution
     OnnxInference {
         /// Hash of ONNX model file
@@ -73,6 +89,7 @@ impl ComputeTaskType {
             Self::ImageClassification { input_hash, .. } => *input_hash,
             Self::Embedding { input_hash, .. } => *input_hash,
             Self::SpeechToText { audio_hash, .. } => *audio_hash,
+            Self::ImageGeneration { prompt_hash, .. } => *prompt_hash,
             Self::OnnxInference { input_hash, .. } => *input_hash,
         }
     }
@@ -84,6 +101,7 @@ impl ComputeTaskType {
             Self::ImageClassification { model_id, .. } => Some(model_id),
             Self::Embedding { model_id, .. } => Some(model_id),
             Self::SpeechToText { model_id, .. } => Some(model_id),
+            Self::ImageGeneration { model_id, .. } => Some(model_id),
             Self::OnnxInference { .. } => None,
         }
     }
@@ -95,6 +113,7 @@ impl ComputeTaskType {
             Self::ImageClassification { .. } => "image_classification",
             Self::Embedding { .. } => "embedding",
             Self::SpeechToText { .. } => "speech_to_text",
+            Self::ImageGeneration { .. } => "image_generation",
             Self::OnnxInference { .. } => "onnx_inference",
         }
     }
@@ -152,6 +171,7 @@ impl InferenceTask {
                 estimate_model_memory(&model_id.name).min(4096)
             }
             ComputeTaskType::SpeechToText { model_id, .. } => estimate_model_memory(&model_id.name),
+            ComputeTaskType::ImageGeneration { .. } => 6_000, // SD 1.5 needs ~6GB
             ComputeTaskType::OnnxInference { .. } => 1024,
         }
     }

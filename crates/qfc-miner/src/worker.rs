@@ -327,6 +327,15 @@ impl InferenceWorker {
                 audio_hash: input_hash,
                 language: resp.language.clone().unwrap_or_default(),
             },
+            "image_generation" => ComputeTaskType::ImageGeneration {
+                model_id,
+                prompt_hash: input_hash,
+                negative_prompt_hash: qfc_types::Hash::ZERO,
+                width: 512,
+                height: 512,
+                steps: 20,
+                seed: resp.epoch,
+            },
             other => return Err(format!("Unknown task type: {}", other)),
         };
 
