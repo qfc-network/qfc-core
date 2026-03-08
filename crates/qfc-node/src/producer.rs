@@ -225,7 +225,41 @@ impl BlockProducer {
         // Settle inference fees for proofs matched to public tasks (v2.0)
         self.settle_inference_fees(&inference_proofs, &our_address);
 
-        // Commit state to get new state root
+        // Calculate fees from receipts (needed for reward distribution)
+        let total_fees = self.calculate_total_fees(&transactions, &receipts);
+
+        // Get voters for reward distribution (empty for newly produced block)
+        let voters = self.get_block_voters(&qfc_types::Hash::ZERO);
+
+        // Distribute ALL rewards BEFORE committing state so they are included
+        // in the block's state root. Previously rewards were distributed after
+        // commit, causing miner/voter/producer rewards to be lost.
+        let block_number = parent_block.number() + 1;
+        match self.distribute_rewards(
+            block_number,
+            &our_address,
+            total_fees,
+            &voters,
+            &inference_proofs,
+        ) {
+            Ok(distribution) => {
+                debug!(
+                    "Pre-commit rewards for block #{}: producer={}, voters={}, burned={}",
+                    block_number,
+                    distribution.producer_reward,
+                    distribution.voter_reward,
+                    distribution.fee_burned
+                );
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to distribute rewards for block #{}: {}",
+                    block_number, e
+                );
+            }
+        }
+
+        // Commit state to get new state root (now includes all rewards)
         let state_root = state.commit()?;
 
         // Produce the block
@@ -273,40 +307,6 @@ impl BlockProducer {
         for tx in &transactions {
             let tx_hash = blake3_hash(&tx.to_bytes_without_signature());
             self.mempool.write().remove(&tx_hash);
-        }
-
-        // Calculate total fees from receipts
-        let total_fees = self.calculate_total_fees(&transactions, &receipts);
-
-        // Get voters for this block (for reward distribution)
-        let voters = self.get_block_voters(&block_hash);
-
-        // Distribute rewards (including inference miner rewards)
-        // Note: inference_proofs were moved into produce_block, so we collect
-        // miner addresses and FLOPS from the block's stored proofs
-        let block_proofs: Vec<InferenceProof> = block.inference_proofs.clone();
-        match self.distribute_rewards(
-            block_number,
-            &our_address,
-            total_fees,
-            &voters,
-            &block_proofs,
-        ) {
-            Ok(distribution) => {
-                debug!(
-                    "Distributed rewards for block #{}: producer={}, voters={}, burned={}",
-                    block_number,
-                    distribution.producer_reward,
-                    distribution.voter_reward,
-                    distribution.fee_burned
-                );
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to distribute rewards for block #{}: {}",
-                    block_number, e
-                );
-            }
         }
 
         info!(
