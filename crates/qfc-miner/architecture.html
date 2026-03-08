@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QFC Inference Miner — Architecture</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --card: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --dim: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --orange: #d29922;
+    --purple: #bc8cff;
+    --red: #f85149;
+    --cyan: #39d2c0;
+    --yellow: #f0c000;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 32px;
+    line-height: 1.5;
+  }
+  h1 { font-size: 28px; margin-bottom: 8px; }
+  h1 span { color: var(--accent); }
+  .subtitle { color: var(--dim); margin-bottom: 40px; font-size: 15px; }
+  h2 { font-size: 18px; color: var(--accent); margin: 40px 0 16px; }
+
+  /* ── Layout ── */
+  .diagram { display: flex; flex-direction: column; gap: 20px; max-width: 1100px; margin: 0 auto; }
+  .arrow-down { text-align: center; font-size: 28px; color: var(--dim); line-height: 1; }
+
+  /* ── Cards ── */
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    position: relative;
+  }
+  .card-label {
+    position: absolute; top: -11px; left: 20px;
+    background: var(--card); padding: 0 10px;
+    font-size: 13px; font-weight: 600; letter-spacing: .5px; text-transform: uppercase;
+  }
+  .card-label.script { color: var(--orange); }
+  .card-label.binary { color: var(--green); }
+  .card-label.validator { color: var(--purple); }
+
+  /* ── Grids ── */
+  .row { display: flex; gap: 14px; flex-wrap: wrap; }
+  .row > * { flex: 1; min-width: 180px; }
+
+  /* ── Boxes inside cards ── */
+  .box {
+    background: rgba(255,255,255,.04);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px;
+  }
+  .box h3 {
+    font-size: 13px; font-weight: 700; margin-bottom: 8px;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .box ul { list-style: none; padding: 0; }
+  .box li { font-size: 13px; color: var(--dim); padding: 2px 0; }
+  .box li code { color: var(--text); font-size: 12px; background: rgba(255,255,255,.06); padding: 1px 5px; border-radius: 4px; }
+
+  /* ── Tags ── */
+  .tag {
+    display: inline-block; font-size: 11px; font-weight: 600;
+    padding: 2px 8px; border-radius: 10px; margin: 2px 2px;
+  }
+  .tag.green  { background: rgba(63,185,80,.15); color: var(--green); }
+  .tag.blue   { background: rgba(88,166,255,.15); color: var(--accent); }
+  .tag.orange { background: rgba(210,153,34,.15); color: var(--orange); }
+  .tag.purple { background: rgba(188,140,255,.15); color: var(--purple); }
+  .tag.red    { background: rgba(248,81,73,.15); color: var(--red); }
+  .tag.cyan   { background: rgba(57,210,192,.15); color: var(--cyan); }
+
+  /* ── Flow steps ── */
+  .flow {
+    display: flex; gap: 0; align-items: stretch; flex-wrap: wrap;
+    margin: 10px 0;
+  }
+  .flow-step {
+    flex: 1; min-width: 120px; text-align: center;
+    padding: 10px 8px; font-size: 12px; font-weight: 600;
+    border: 1px solid var(--border); position: relative;
+  }
+  .flow-step:first-child { border-radius: 8px 0 0 8px; }
+  .flow-step:last-child  { border-radius: 0 8px 8px 0; }
+  .flow-step::after {
+    content: ''; position: absolute; right: -8px; top: 50%; transform: translateY(-50%);
+    border: 7px solid transparent; border-left-color: var(--border); z-index: 1;
+  }
+  .flow-step:last-child::after { display: none; }
+  .flow-step small { display: block; font-weight: 400; color: var(--dim); margin-top: 2px; }
+
+  /* ── Reward banner ── */
+  .reward-banner {
+    background: linear-gradient(135deg, rgba(63,185,80,.12), rgba(88,166,255,.08));
+    border: 2px solid var(--green);
+    border-radius: 10px;
+    padding: 18px 24px;
+    text-align: center;
+    margin: 8px 0;
+  }
+  .reward-banner .title { font-size: 16px; font-weight: 700; color: var(--green); }
+  .reward-banner .amount { font-size: 28px; font-weight: 800; color: var(--text); margin: 6px 0; }
+  .reward-banner .detail { font-size: 13px; color: var(--dim); }
+
+  /* ── Pie chart (CSS only) ── */
+  .pie-row { display: flex; gap: 24px; align-items: center; flex-wrap: wrap; }
+  .pie {
+    width: 140px; height: 140px; border-radius: 50%; flex-shrink: 0;
+    background: conic-gradient(
+      var(--purple) 0deg 216deg,
+      var(--accent) 216deg 306deg,
+      var(--green) 306deg 360deg
+    );
+    position: relative;
+  }
+  .pie::after {
+    content: ''; position: absolute; inset: 30px;
+    background: var(--card); border-radius: 50%;
+  }
+  .pie-legend { font-size: 13px; }
+  .pie-legend li { padding: 4px 0; list-style: none; display: flex; align-items: center; gap: 8px; }
+  .pie-legend .dot { width: 12px; height: 12px; border-radius: 3px; flex-shrink: 0; }
+
+  /* ── Module table ── */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin: 8px 0; }
+  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  th { color: var(--dim); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; }
+  td code { color: var(--accent); }
+
+  /* ── Connector lines ── */
+  .connector {
+    width: 2px; height: 28px; background: var(--border);
+    margin: 0 auto;
+  }
+  .connector-label {
+    text-align: center; font-size: 11px; color: var(--dim);
+    background: var(--bg); padding: 0 10px;
+    margin: -6px auto 0; width: fit-content; position: relative; z-index: 1;
+  }
+</style>
+</head>
+<body>
+
+<h1><span>QFC</span> Inference Miner — Architecture</h1>
+<p class="subtitle">System architecture, data flow, and reward economics for the standalone inference miner.</p>
+
+<!-- ════════════════════════════════════════════════ -->
+<div class="diagram">
+
+<!-- ── start-miner.sh ── -->
+<div class="card">
+  <div class="card-label script">Shell Script</div>
+  <h3 style="margin-bottom:12px;">start-miner.sh</h3>
+  <div class="flow">
+    <div class="flow-step" style="background:rgba(210,153,34,.08);">Auto-update<small>GitHub Releases</small></div>
+    <div class="flow-step" style="background:rgba(210,153,34,.06);">Download / Build<small>binary or source</small></div>
+    <div class="flow-step" style="background:rgba(210,153,34,.06);">Gen Wallet<small>Ed25519</small></div>
+    <div class="flow-step" style="background:rgba(210,153,34,.06);">Faucet<small>testnet tokens</small></div>
+    <div class="flow-step" style="background:rgba(210,153,34,.08);">Launch<small>exec qfc-miner</small></div>
+  </div>
+</div>
+
+<div class="arrow-down">▼</div>
+
+<!-- ── qfc-miner binary ── -->
+<div class="card">
+  <div class="card-label binary">Binary</div>
+  <h3 style="margin-bottom:14px;">qfc-miner <span style="color:var(--dim);font-weight:400;font-size:13px;">— main.rs</span></h3>
+
+  <!-- Row 1: init modules -->
+  <div class="row" style="margin-bottom:14px;">
+    <div class="box">
+      <h3><span class="tag blue">CLI</span> MinerCli</h3>
+      <ul>
+        <li><code>--wallet</code> address</li>
+        <li><code>--private-key</code> Ed25519</li>
+        <li><code>--backend</code> auto / cuda / metal / cpu</li>
+        <li><code>--model-dir</code> cache path</li>
+        <li><code>--hot-models</code> VRAM pinned</li>
+        <li><code>--vram-reserved-mb</code></li>
+      </ul>
+    </div>
+    <div class="box">
+      <h3><span class="tag orange">HW</span> gpu.rs</h3>
+      <ul>
+        <li>Detect CUDA / Metal / CPU</li>
+        <li>VRAM size, compute cores</li>
+        <li>Classify tier: <span class="tag green">Cold</span> <span class="tag orange">Warm</span> <span class="tag red">Hot</span></li>
+      </ul>
+    </div>
+    <div class="box">
+      <h3><span class="tag purple">Config</span> MinerConfig</h3>
+      <ul>
+        <li><code>wallet_address</code></li>
+        <li><code>backend</code></li>
+        <li><code>validator_rpc</code></li>
+        <li><code>secret_key [u8; 32]</code></li>
+        <li><code>max_memory_mb</code></li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- Row 2: runtime modules -->
+  <div class="row" style="margin-bottom:14px;">
+    <div class="box">
+      <h3><span class="tag cyan">Engine</span> InferenceEngine</h3>
+      <ul>
+        <li><code>CpuEngine</code> — always available</li>
+        <li><code>MetalEngine</code> — Apple Silicon</li>
+        <li><code>CudaEngine</code> — NVIDIA GPU</li>
+        <li><code>OnnxEngine</code> — ONNX Runtime</li>
+      </ul>
+      <div style="margin-top:8px;font-size:12px;color:var(--dim);">Auto-fallback: GPU fail → CPU</div>
+    </div>
+    <div class="box">
+      <h3><span class="tag cyan">Scheduler</span> ModelScheduler</h3>
+      <ul>
+        <li>3-layer VRAM management</li>
+        <li><span class="tag red">Hot</span> pinned in VRAM</li>
+        <li><span class="tag orange">Warm</span> LRU cached</li>
+        <li><span class="tag green">Cold</span> load on demand</li>
+        <li>LRU eviction when over budget</li>
+      </ul>
+    </div>
+    <div class="box">
+      <h3><span class="tag green">Worker</span> InferenceWorker</h3>
+      <ul>
+        <li><code>10s</code> — fetch_task()</li>
+        <li><code>30s</code> — report_status()</li>
+        <li>Deadline check before inference</li>
+        <li>Session earnings accumulator</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- Row 3: pipeline -->
+  <h3 style="font-size:13px;color:var(--dim);margin-bottom:8px;">Inference Pipeline (candle / candle-transformers)</h3>
+  <div class="row" style="margin-bottom:14px;">
+    <div class="box" style="text-align:center;">
+      <span class="tag blue">Embedding</span><br>
+      <span style="font-size:12px;color:var(--dim);">BERT / MiniLM<br>384-dim vectors</span>
+    </div>
+    <div class="box" style="text-align:center;">
+      <span class="tag blue">TextGeneration</span><br>
+      <span style="font-size:12px;color:var(--dim);">Qwen2.5-0.5B<br>autoregressive</span>
+    </div>
+    <div class="box" style="text-align:center;">
+      <span class="tag blue">Whisper</span><br>
+      <span style="font-size:12px;color:var(--dim);">Speech-to-Text<br>mel → encoder → decoder</span>
+    </div>
+    <div class="box" style="text-align:center;">
+      <span class="tag blue">ImageGen</span><br>
+      <span style="font-size:12px;color:var(--dim);">SD / FLUX<br>(planned)</span>
+    </div>
+    <div class="box" style="text-align:center;">
+      <span class="tag blue">ImageClassify</span><br>
+      <span style="font-size:12px;color:var(--dim);">BERT-based<br>classification</span>
+    </div>
+    <div class="box" style="text-align:center;">
+      <span class="tag blue">ONNX</span><br>
+      <span style="font-size:12px;color:var(--dim);">Generic runtime<br>any .onnx model</span>
+    </div>
+  </div>
+
+  <!-- Row 4: proof + submit -->
+  <div class="row" style="margin-bottom:8px;">
+    <div class="box">
+      <h3><span class="tag purple">Proof</span> InferenceProof</h3>
+      <ul>
+        <li><code>input_hash</code> — Blake3 of input data</li>
+        <li><code>output_hash</code> — Blake3 of inference output</li>
+        <li><code>flops_estimated</code> — compute work done</li>
+        <li><code>execution_time_ms</code></li>
+        <li><code>signature</code> — Ed25519 over proof bytes</li>
+      </ul>
+    </div>
+    <div class="box">
+      <h3><span class="tag green">RPC</span> submit.rs</h3>
+      <ul>
+        <li><code>fetch_task()</code> → qfc_getInferenceTask</li>
+        <li><code>submit_proof()</code> → qfc_submitInferenceProof</li>
+        <li><code>register_miner()</code> → qfc_registerMiner</li>
+        <li><code>report_miner_status()</code> → qfc_reportMinerStatus</li>
+      </ul>
+      <div style="margin-top:8px;font-size:11px;color:var(--dim);">JSON-RPC 2.0 over HTTP (curl)</div>
+    </div>
+  </div>
+
+  <!-- Reward banner -->
+  <div class="reward-banner">
+    <div class="title">PROOF ACCEPTED — REWARD EARNED</div>
+    <div class="amount">+0.050000 QFC</div>
+    <div class="detail">Session total: 1.200000 QFC &nbsp;|&nbsp; Tasks: 24 completed, 1 failed</div>
+  </div>
+</div>
+
+<div class="connector"></div>
+<div class="connector-label">JSON-RPC / HTTP</div>
+<div class="connector"></div>
+
+<!-- ── Validator Node ── -->
+<div class="card">
+  <div class="card-label validator">Validator</div>
+  <h3 style="margin-bottom:14px;">qfc-node <span style="color:var(--dim);font-weight:400;font-size:13px;">— Validator Node (port 8545)</span></h3>
+
+  <div class="row" style="margin-bottom:14px;">
+    <div class="box">
+      <h3><span class="tag purple">RPC</span> qfc-rpc</h3>
+      <ul>
+        <li><code>qfc_getInferenceTask</code> → assign from TaskPool</li>
+        <li><code>qfc_submitInferenceProof</code> → verify + spot-check</li>
+        <li><code>qfc_registerMiner</code> → MinerRegistry</li>
+        <li><code>qfc_reportMinerStatus</code> → update models</li>
+      </ul>
+    </div>
+    <div class="box">
+      <h3><span class="tag cyan">Coordinator</span> qfc-ai-coordinator</h3>
+      <ul>
+        <li><code>TaskPool</code> — pending / assigned / completed</li>
+        <li><code>MinerRegistry</code> — capabilities & tiers</li>
+        <li><code>Spot-check</code> — 5% re-execution</li>
+        <li><code>Fee settlement</code> — 70/10/20 split</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- Reward distribution -->
+  <div class="box">
+    <h3><span class="tag green">Rewards</span> Block Producer — distribute_rewards()</h3>
+    <div class="pie-row">
+      <div class="pie"></div>
+      <ul class="pie-legend">
+        <li><span class="dot" style="background:var(--purple);"></span> <strong>60%</strong> Block Producer</li>
+        <li><span class="dot" style="background:var(--accent);"></span> <strong>25%</strong> Voters (finality)</li>
+        <li><span class="dot" style="background:var(--green);"></span> <strong>15%</strong> Miner Pool <span style="color:var(--dim);">— proportional to FLOPS</span></li>
+      </ul>
+    </div>
+    <div style="margin-top:12px;font-size:12px;color:var(--dim);">
+      Fee multipliers: Embedding 1x &nbsp;|&nbsp; TextGen 1x &nbsp;|&nbsp; Whisper 2x &nbsp;|&nbsp; ImageGen 5x
+    </div>
+  </div>
+</div>
+
+</div><!-- .diagram -->
+
+<!-- ════════════════════════════════════════════════ -->
+<h2>Module Map</h2>
+<table>
+  <thead>
+    <tr><th>File</th><th>Role</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>main.rs</code></td><td>Entry point — CLI parsing, hardware detection, engine creation, benchmark, registration, worker launch</td></tr>
+    <tr><td><code>config.rs</code></td><td>MinerCli (clap args) + MinerConfig runtime configuration struct</td></tr>
+    <tr><td><code>gpu.rs</code></td><td>Hardware detection wrapper — CUDA / Metal / CPU, VRAM, compute cores</td></tr>
+    <tr><td><code>submit.rs</code></td><td>JSON-RPC client — fetch_task, submit_proof, register_miner, report_status</td></tr>
+    <tr><td><code>worker.rs</code></td><td>InferenceWorker main loop — task fetch → model load → inference → proof → submit → reward display</td></tr>
+  </tbody>
+</table>
+
+<h2>Key Dependencies</h2>
+<table>
+  <thead>
+    <tr><th>Crate</th><th>Role</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>qfc-inference</code></td><td>InferenceEngine trait, backends (CPU/Metal/CUDA/ONNX), ModelCache, ModelScheduler</td></tr>
+    <tr><td><code>qfc-crypto</code></td><td>Ed25519 keypair, Blake3 hashing, proof signing</td></tr>
+    <tr><td><code>qfc-types</code></td><td>Hash, Address, U256, core type definitions</td></tr>
+    <tr><td><code>candle-core</code></td><td>Tensor computation (when <code>candle</code> feature enabled)</td></tr>
+    <tr><td><code>candle-transformers</code></td><td>Model implementations — BERT, Qwen, Whisper</td></tr>
+    <tr><td><code>hf-hub</code></td><td>HuggingFace model downloading &amp; caching</td></tr>
+  </tbody>
+</table>
+
+<div style="margin-top:48px;text-align:center;color:var(--dim);font-size:12px;">
+  QFC Network &copy; 2026 — Generated from source code analysis
+</div>
+
+</body>
+</html>
