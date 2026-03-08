@@ -248,6 +248,16 @@ pub trait QfcApi {
     #[subscription(name = "subscribeTaskStatus" => "taskStatus", unsubscribe = "unsubscribeTaskStatus", item = RpcPublicTaskStatus)]
     async fn subscribe_task_status(&self, task_id: String) -> SubscriptionResult;
 
+    /// Get miner earnings history.
+    /// Returns per-block earning records for a miner address.
+    /// `period` can be: "day" (last 24h), "week", "month", or "all".
+    #[method(name = "getMinerEarnings")]
+    async fn get_miner_earnings(
+        &self,
+        address: String,
+        period: String,
+    ) -> RpcResult<RpcMinerEarnings>;
+
     // ---- v2.0: Bridge endpoints ----
 
     /// Get bridge status (validators, TVL, pending operations)
@@ -446,6 +456,42 @@ pub struct RpcProofResult {
     pub spot_checked: bool,
     /// Detail message
     pub message: String,
+}
+
+// ============ v2.0: Miner Earnings RPC Types ============
+
+/// Miner earnings summary and history
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcMinerEarnings {
+    /// Miner address
+    pub address: String,
+    /// Total earnings in wei (hex string)
+    pub total_earnings: String,
+    /// Total FLOPS contributed
+    pub total_flops: String,
+    /// Total tasks completed
+    pub total_tasks: String,
+    /// Current balance in wei (hex string)
+    pub balance: String,
+    /// Earning records (newest first)
+    pub records: Vec<RpcEarningRecord>,
+}
+
+/// A single earning record for one block
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcEarningRecord {
+    /// Block height
+    pub block_height: String,
+    /// Reward earned in wei (hex string)
+    pub reward: String,
+    /// FLOPS contributed
+    pub flops: String,
+    /// Number of tasks in this block
+    pub task_count: u32,
+    /// Block timestamp (ms since epoch)
+    pub timestamp: String,
 }
 
 // ============ v2.0: Model Governance RPC Types ============
