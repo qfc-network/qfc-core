@@ -249,3 +249,23 @@ pub fn block_reward_for_year(year: u64) -> U256 {
 pub fn min_delegation() -> U256 {
     U256::from_u128(MIN_DELEGATION)
 }
+
+// ============ State Rent ============
+
+/// Storage deposit per account creation (0.01 QFC — refundable on deletion)
+pub const STORAGE_DEPOSIT_PER_ACCOUNT: u128 = ONE_QFC / 100;
+
+/// Storage deposit per contract byte (0.00001 QFC per byte — refundable)
+pub const STORAGE_DEPOSIT_PER_BYTE: u128 = ONE_QFC / 100_000;
+
+/// Storage rent per slot per epoch (0.000001 QFC per storage slot per epoch)
+pub const STORAGE_RENT_PER_SLOT_PER_EPOCH: u128 = ONE_QFC / 1_000_000;
+
+/// Number of epochs of inactivity before an account becomes dormant
+pub const DORMANT_THRESHOLD_EPOCHS: u64 = 262_800; // ~1 year at 10s epochs
+
+/// Reactivation fee (0.1 QFC — non-refundable)
+pub const REACTIVATION_FEE: u128 = ONE_QFC / 10;
+
+/// Minimum storage deposit balance before account is flagged for rent collection
+pub const MIN_STORAGE_DEPOSIT: u128 = ONE_QFC / 1_000; // 0.001 QFC

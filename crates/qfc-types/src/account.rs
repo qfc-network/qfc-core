@@ -76,6 +76,18 @@ pub struct Account {
 
     /// Amount delegated (for delegators)
     pub delegated_amount: Option<U256>,
+
+    /// Storage deposit balance (refundable on account/contract deletion)
+    pub storage_deposit: u128,
+
+    /// Last epoch this account was active (sent a tx or received rent payment)
+    pub last_active_epoch: u64,
+
+    /// Number of storage slots used by this contract account
+    pub storage_slot_count: u64,
+
+    /// Whether the account is dormant (inactive for DORMANT_THRESHOLD_EPOCHS)
+    pub is_dormant: bool,
 }
 
 impl Default for Account {
@@ -97,6 +109,10 @@ impl Account {
             contribution_score: None,
             delegated_to: None,
             delegated_amount: None,
+            storage_deposit: 0,
+            last_active_epoch: 0,
+            storage_slot_count: 0,
+            is_dormant: false,
         }
     }
 
@@ -112,6 +128,10 @@ impl Account {
             contribution_score: None,
             delegated_to: None,
             delegated_amount: None,
+            storage_deposit: 0,
+            last_active_epoch: 0,
+            storage_slot_count: 0,
+            is_dormant: false,
         }
     }
 
@@ -127,6 +147,10 @@ impl Account {
             contribution_score: None,
             delegated_to: None,
             delegated_amount: None,
+            storage_deposit: 0,
+            last_active_epoch: 0,
+            storage_slot_count: 0,
+            is_dormant: false,
         }
     }
 
@@ -142,6 +166,10 @@ impl Account {
             contribution_score: Some(0),
             delegated_to: None,
             delegated_amount: None,
+            storage_deposit: 0,
+            last_active_epoch: 0,
+            storage_slot_count: 0,
+            is_dormant: false,
         }
     }
 

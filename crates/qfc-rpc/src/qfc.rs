@@ -264,6 +264,10 @@ pub trait QfcApi {
         &self,
         withdrawal_id: String,
     ) -> RpcResult<Option<RpcBridgeWithdrawal>>;
+
+    /// Get rent info for an account (storage deposit, dormancy status, rent owed)
+    #[method(name = "getAccountRentInfo")]
+    async fn get_account_rent_info(&self, address: String) -> RpcResult<RpcAccountRentInfo>;
 }
 
 /// Faucet response
@@ -787,4 +791,18 @@ pub struct RpcBridgeWithdrawal {
     pub signature_count: usize,
     pub observed_at: u64,
     pub eth_unlock_tx: Option<String>,
+}
+
+/// Account rent info
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcAccountRentInfo {
+    pub address: String,
+    pub storage_deposit: String,
+    pub storage_slot_count: u64,
+    pub last_active_epoch: u64,
+    pub is_dormant: bool,
+    pub rent_owed: String,
+    pub current_epoch: u64,
+    pub reactivation_fee: String,
 }

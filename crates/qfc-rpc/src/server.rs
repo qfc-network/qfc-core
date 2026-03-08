@@ -3,8 +3,8 @@
 use crate::error::RpcError;
 use crate::eth::EthApiServer;
 use crate::qfc::{
-    QfcApiServer, RpcBridgeDeposit, RpcBridgeStatus, RpcBridgeWithdrawal, RpcComputeInfo, RpcEpoch,
-    RpcEstimateInferenceFee, RpcFaucetResponse, RpcInferenceFeeEstimate,
+    QfcApiServer, RpcAccountRentInfo, RpcBridgeDeposit, RpcBridgeStatus, RpcBridgeWithdrawal,
+    RpcComputeInfo, RpcEpoch, RpcEstimateInferenceFee, RpcFaucetResponse, RpcInferenceFeeEstimate,
     RpcInferenceProofSubmission, RpcInferenceStats, RpcInferenceTask, RpcMinerStatusReport,
     RpcModel, RpcModelProposal, RpcNodeInfo, RpcParameterOverride, RpcParameterProposal,
     RpcProofResult, RpcProposeModelRequest, RpcProposeParameterRequest, RpcProposeSpendRequest,
@@ -2295,6 +2295,35 @@ impl QfcApiServer for RpcServer {
                 eth_unlock_tx: w.eth_unlock_tx.map(|h| hex::encode(h.as_bytes())),
             }
         }))
+    }
+
+    // ---- v2.0: State rent endpoints ----
+
+    async fn get_account_rent_info(&self, address: String) -> RpcResult<RpcAccountRentInfo> {
+        let addr = Self::parse_address(&address)?;
+        let state = self.chain.state();
+        let account = state
+            .get_account(&addr)
+            .map_err(|e| RpcError::Internal(format!("Failed to get account: {}", e)))?;
+
+        let current_block = self.chain.block_number();
+        let current_epoch = current_block / qfc_types::BLOCKS_PER_EPOCH;
+
+        let epochs_since_active = current_epoch.saturating_sub(account.last_active_epoch);
+        let rent_owed = qfc_types::STORAGE_RENT_PER_SLOT_PER_EPOCH
+            * account.storage_slot_count as u128
+            * epochs_since_active as u128;
+
+        Ok(RpcAccountRentInfo {
+            address: addr.to_string(),
+            storage_deposit: account.storage_deposit.to_string(),
+            storage_slot_count: account.storage_slot_count,
+            last_active_epoch: account.last_active_epoch,
+            is_dormant: account.is_dormant,
+            rent_owed: rent_owed.to_string(),
+            current_epoch,
+            reactivation_fee: qfc_types::REACTIVATION_FEE.to_string(),
+        })
     }
 
     // ---- v2.0: Public Inference API endpoints ----
