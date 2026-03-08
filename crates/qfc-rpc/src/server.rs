@@ -1676,11 +1676,12 @@ impl QfcApiServer for RpcServer {
             });
         }
 
-        // 5. Basic verification (epoch, model, FLOPS)
-        let current_epoch = consensus.get_epoch();
-        if let Err(e) =
-            qfc_ai_coordinator::verify_basic(&proof, current_epoch.number, &self.model_registry)
-        {
+        // 5. Basic verification (timestamp freshness, model, FLOPS)
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if let Err(e) = qfc_ai_coordinator::verify_basic(&proof, now_secs, &self.model_registry) {
             warn!("Proof rejected from {}: {}", submission.miner_address, e);
             return Ok(RpcProofResult {
                 accepted: false,

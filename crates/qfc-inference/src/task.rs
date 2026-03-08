@@ -157,6 +157,8 @@ fn estimate_model_memory(model_name: &str) -> u64 {
         3_000
     } else if model_name.contains("1b") || model_name.contains("1B") {
         2_000
+    } else if model_name.contains("0.5b") || model_name.contains("0.5B") {
+        1_024
     } else {
         4_000 // default estimate
     }

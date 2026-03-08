@@ -8,6 +8,13 @@ use qfc_inference::task::{ComputeTaskType, ModelId};
 use qfc_inference::BackendType;
 use qfc_types::{Address, Hash};
 
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
 fn make_proof(output_byte: u8, flops: u64) -> InferenceProof {
     InferenceProof::new(
         Address::new([0x11; 20]),
@@ -21,19 +28,20 @@ fn make_proof(output_byte: u8, flops: u64) -> InferenceProof {
         100,
         flops,
         BackendType::Cpu,
-        1234567890,
+        now_secs(),
     )
 }
 
 fn bench_verify_basic(c: &mut Criterion) {
     let registry = ModelRegistry::default_v2();
     let proof = make_proof(0xAB, 1_000_000_000);
+    let now = now_secs();
 
     let mut group = c.benchmark_group("verify_basic");
     group.throughput(Throughput::Elements(1));
 
     group.bench_function("single_proof", |b| {
-        b.iter(|| verify_basic(black_box(&proof), black_box(1), black_box(&registry)))
+        b.iter(|| verify_basic(black_box(&proof), black_box(now), black_box(&registry)))
     });
 
     group.finish();
@@ -41,6 +49,7 @@ fn bench_verify_basic(c: &mut Criterion) {
 
 fn bench_verify_basic_batch(c: &mut Criterion) {
     let registry = ModelRegistry::default_v2();
+    let now = now_secs();
 
     let mut group = c.benchmark_group("verify_basic_batch");
 
@@ -53,7 +62,7 @@ fn bench_verify_basic_batch(c: &mut Criterion) {
         group.bench_function(format!("{}_proofs", count), |b| {
             b.iter(|| {
                 for proof in &proofs {
-                    let _ = verify_basic(black_box(proof), black_box(1), black_box(&registry));
+                    let _ = verify_basic(black_box(proof), black_box(now), black_box(&registry));
                 }
             })
         });

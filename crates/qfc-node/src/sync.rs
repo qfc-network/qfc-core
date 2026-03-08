@@ -987,13 +987,13 @@ impl SyncManager {
             }
         };
 
-        // 5. Run basic verification (epoch, model, FLOPS)
-        // Advance epoch if expired before checking, so we use a fresh epoch number
-        let head_hash = self.chain.head().map(|h| h.hash).unwrap_or_default();
-        let epoch_number =
-            consensus.maybe_advance_epoch(qfc_types::EPOCH_DURATION_SECS * 1000, head_hash);
+        // 5. Run basic verification (timestamp freshness, model, FLOPS)
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         if let Err(e) =
-            qfc_ai_coordinator::verify_basic(&inference_proof, epoch_number, &self.model_registry)
+            qfc_ai_coordinator::verify_basic(&inference_proof, now_secs, &self.model_registry)
         {
             warn!(
                 "Inference proof from {} failed basic verification: {}",
