@@ -23,3 +23,8 @@ rand.workspace = true
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 parking_lot.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "verification_bench"
+harness = false

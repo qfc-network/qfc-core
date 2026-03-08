@@ -20,3 +20,8 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "mempool_bench"
+harness = false
