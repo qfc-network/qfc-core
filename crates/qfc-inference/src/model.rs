@@ -5,8 +5,40 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use borsh::{BorshDeserialize, BorshSerialize};
+
 use crate::runtime::GpuTier;
 use crate::task::ModelId;
+
+/// Canonical format that ALL nodes must use for a given model.
+///
+/// This ensures deterministic output across different hardware:
+/// - Same quantization → same integer arithmetic → same argmax → same tokens
+/// - Eliminates FP16 vs FP32 divergence by mandating one format per model
+///
+/// Nodes that use a non-canonical format will produce different output hashes
+/// and fail spot-check verification.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize, Serialize, Deserialize,
+)]
+pub enum CanonicalFormat {
+    /// FP32 safetensors on CPU (fully deterministic, for small models ≤1B)
+    SafetensorsFp32,
+    /// GGUF Q4_K_M quantized (deterministic integer math, for larger models)
+    GgufQ4KM,
+    /// GGUF Q5_K_M quantized (higher quality, for models where Q4 isn't sufficient)
+    GgufQ5KM,
+}
+
+impl std::fmt::Display for CanonicalFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CanonicalFormat::SafetensorsFp32 => write!(f, "safetensors-fp32"),
+            CanonicalFormat::GgufQ4KM => write!(f, "gguf-q4_k_m"),
+            CanonicalFormat::GgufQ5KM => write!(f, "gguf-q5_k_m"),
+        }
+    }
+}
 
 /// Model metadata in the registry
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -23,6 +55,9 @@ pub struct ModelInfo {
     pub size_mb: u64,
     /// Whether this model is approved by governance
     pub approved: bool,
+    /// Canonical format for deterministic verification.
+    /// All nodes MUST use this format for spot-check to pass.
+    pub canonical_format: CanonicalFormat,
 }
 
 /// Local model cache with LRU eviction and auto-download
@@ -212,6 +247,7 @@ impl ModelRegistry {
                 min_tier: GpuTier::Cold,
                 size_mb: 80,
                 approved: true,
+                canonical_format: CanonicalFormat::SafetensorsFp32,
             },
             ModelInfo {
                 id: ModelId::new("qfc-embed-medium", "v1.0"),
@@ -221,6 +257,7 @@ impl ModelRegistry {
                 min_tier: GpuTier::Cold,
                 size_mb: 120,
                 approved: true,
+                canonical_format: CanonicalFormat::SafetensorsFp32,
             },
             ModelInfo {
                 id: ModelId::new("qfc-classify-small", "v1.0"),
@@ -230,6 +267,7 @@ impl ModelRegistry {
                 min_tier: GpuTier::Warm,
                 size_mb: 440,
                 approved: true,
+                canonical_format: CanonicalFormat::SafetensorsFp32,
             },
             ModelInfo {
                 id: ModelId::new("qfc-llm-0.5b", "v1.0"),
@@ -240,6 +278,7 @@ impl ModelRegistry {
                 min_tier: GpuTier::Cold,
                 size_mb: 990,
                 approved: true,
+                canonical_format: CanonicalFormat::SafetensorsFp32,
             },
             ModelInfo {
                 id: ModelId::new("qfc-llm-3b", "v1.0"),
@@ -250,6 +289,7 @@ impl ModelRegistry {
                 min_tier: GpuTier::Warm,
                 size_mb: 2200,
                 approved: true,
+                canonical_format: CanonicalFormat::GgufQ4KM,
             },
             ModelInfo {
                 id: ModelId::new("qfc-llm-7b", "v1.0"),
@@ -260,6 +300,7 @@ impl ModelRegistry {
                 min_tier: GpuTier::Hot,
                 size_mb: 4700,
                 approved: true,
+                canonical_format: CanonicalFormat::GgufQ4KM,
             },
         ];
 
@@ -279,6 +320,11 @@ impl ModelRegistry {
     /// Get all approved models
     pub fn approved_models(&self) -> Vec<&ModelInfo> {
         self.models.iter().filter(|m| m.approved).collect()
+    }
+
+    /// Get the canonical format for a model (required for deterministic verification)
+    pub fn canonical_format(&self, model_id: &ModelId) -> Option<CanonicalFormat> {
+        self.get_model(model_id).map(|m| m.canonical_format)
     }
 
     /// Get models suitable for a given tier
