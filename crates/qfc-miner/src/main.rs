@@ -37,9 +37,7 @@ async fn main() -> anyhow::Result<()> {
         println!();
         println!("Save these! Then fund the address with test QFC:");
         println!("  curl https://faucet.testnet.qfc.network/api/faucet -X POST \\");
-        println!(
-            "    -H 'Content-Type: application/json' \\",
-        );
+        println!("    -H 'Content-Type: application/json' \\",);
         println!(
             "    -d '{{\"address\":\"0x{}\"}}'",
             hex::encode(address.as_bytes())
