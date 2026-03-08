@@ -52,6 +52,7 @@ impl InferenceWorker {
         let mut status_timer = interval(Duration::from_secs(30));
         let mut tasks_completed: u64 = 0;
         let mut tasks_failed: u64 = 0;
+        let mut total_earnings_wei: u128 = 0;
 
         loop {
             tokio::select! {
@@ -216,10 +217,27 @@ impl InferenceWorker {
                 Ok(result) => {
                     tasks_completed += 1;
                     if result.accepted {
-                        info!(
-                            "Proof accepted! (spot_checked: {}, total: {}, failed: {})",
-                            result.spot_checked, tasks_completed, tasks_failed
-                        );
+                        // Parse reward estimate and accumulate
+                        let reward_wei = result
+                            .reward_estimate
+                            .as_deref()
+                            .and_then(parse_hex_u128)
+                            .unwrap_or(0);
+                        total_earnings_wei += reward_wei;
+
+                        let reward_display = format_wei_as_qfc(reward_wei);
+                        let total_display = format_wei_as_qfc(total_earnings_wei);
+
+                        info!("╔══════════════════════════════════════════════════════╗");
+                        info!("║  ✅ PROOF ACCEPTED — REWARD EARNED                  ║");
+                        info!("║                                                      ║");
+                        info!("║  This task:  +{} QFC{}", reward_display, " ".repeat(36_usize.saturating_sub(reward_display.len())));
+                        info!("║  Session total: {} QFC{}", total_display, " ".repeat(33_usize.saturating_sub(total_display.len())));
+                        info!("║  Tasks: {} completed, {} failed{}", tasks_completed, tasks_failed, " ".repeat(24_usize.saturating_sub(format!("{}{}", tasks_completed, tasks_failed).len())));
+                        if result.spot_checked {
+                            info!("║  🔍 Spot-check: PASSED                              ║");
+                        }
+                        info!("╚══════════════════════════════════════════════════════╝");
                     } else {
                         warn!("Proof rejected: {}", result.message);
                     }
@@ -328,4 +346,20 @@ impl InferenceWorker {
     pub fn stop(&self) {
         self.stop_flag.store(true, Ordering::Relaxed);
     }
+}
+
+/// Parse a hex string like "0x1a2b" into u128
+fn parse_hex_u128(s: &str) -> Option<u128> {
+    let hex_str = s.strip_prefix("0x").unwrap_or(s);
+    u128::from_str_radix(hex_str, 16).ok()
+}
+
+/// Format wei amount as human-readable QFC (1 QFC = 1e18 wei)
+fn format_wei_as_qfc(wei: u128) -> String {
+    if wei == 0 {
+        return "0.000000".to_string();
+    }
+    let whole = wei / 1_000_000_000_000_000_000;
+    let frac = wei % 1_000_000_000_000_000_000;
+    format!("{}.{:06}", whole, frac / 1_000_000_000_000)
 }

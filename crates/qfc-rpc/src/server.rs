@@ -1647,6 +1647,7 @@ impl QfcApiServer for RpcServer {
                     accepted: false,
                     spot_checked: false,
                     message: "Unknown miner — register first via qfc_registerMiner".to_string(),
+                    reward_estimate: None,
                 });
             }
         };
@@ -1660,6 +1661,7 @@ impl QfcApiServer for RpcServer {
                         accepted: false,
                         spot_checked: false,
                         message: "Validator is inactive or jailed".to_string(),
+                        reward_estimate: None,
                     });
                 }
             }
@@ -1673,6 +1675,7 @@ impl QfcApiServer for RpcServer {
                 accepted: false,
                 spot_checked: false,
                 message: "Invalid proof signature".to_string(),
+                reward_estimate: None,
             });
         }
 
@@ -1687,6 +1690,7 @@ impl QfcApiServer for RpcServer {
                 accepted: false,
                 spot_checked: false,
                 message: format!("Proof rejected: {}", e),
+                reward_estimate: None,
             });
         }
 
@@ -1738,6 +1742,7 @@ impl QfcApiServer for RpcServer {
                                 spot_checked: true,
                                 message: "Proof rejected: spot-check failed (output hash mismatch)"
                                     .to_string(),
+                                reward_estimate: None,
                             });
                         }
                         Err(e) => {
@@ -1784,6 +1789,7 @@ impl QfcApiServer for RpcServer {
                         accepted: passed,
                         spot_checked: true,
                         message: format!("Challenge result: {:?}", verdict),
+                        reward_estimate: None,
                     });
                 }
             }
@@ -1804,6 +1810,7 @@ impl QfcApiServer for RpcServer {
                             accepted: false,
                             spot_checked: false,
                             message: "Redundant verification: inconsistent output".to_string(),
+                            reward_estimate: None,
                         });
                     }
                 } else {
@@ -1811,6 +1818,7 @@ impl QfcApiServer for RpcServer {
                         accepted: true,
                         spot_checked: false,
                         message: "Redundant verification: waiting for more submissions".to_string(),
+                        reward_estimate: None,
                     });
                 }
             }
@@ -1911,6 +1919,28 @@ impl QfcApiServer for RpcServer {
             spot_checked
         );
 
+        // Compute estimated miner reward based on base fee (15% miner pool)
+        let reward_est = {
+            let base_fee = qfc_ai_coordinator::estimate_base_fee(&proof.task_type);
+            // Miner gets ~15% of base fee per the reward distribution formula
+            let miner_share = base_fee * 15 / 100;
+            format!("0x{:x}", miner_share)
+        };
+
+        // Also query miner's current balance for the response
+        let balance = self
+            .chain
+            .state()
+            .get_balance(&proof.validator)
+            .unwrap_or_default();
+
+        info!(
+            "Miner {} reward estimate: {} wei (balance: {} QFC)",
+            proof.validator,
+            reward_est,
+            format_qfc_balance(balance),
+        );
+
         Ok(RpcProofResult {
             accepted: true,
             spot_checked,
@@ -1919,6 +1949,7 @@ impl QfcApiServer for RpcServer {
             } else {
                 "Proof accepted".to_string()
             },
+            reward_estimate: Some(reward_est),
         })
     }
 
@@ -2824,5 +2855,21 @@ impl TxPoolApiServer for RpcServer {
             pending: format!("0x{:x}", size),
             queued: "0x0".to_string(),
         })
+    }
+}
+
+/// Format a U256 balance as human-readable QFC (1 QFC = 1e18 wei)
+fn format_qfc_balance(balance: qfc_types::U256) -> String {
+    let wei_str = format!("{}", balance);
+    if wei_str.len() <= 18 {
+        format!("0.{:0>18}", wei_str)
+    } else {
+        let (whole, frac) = wei_str.split_at(wei_str.len() - 18);
+        let frac_trimmed = frac.trim_end_matches('0');
+        if frac_trimmed.is_empty() {
+            whole.to_string()
+        } else {
+            format!("{}.{}", whole, &frac[..6.min(frac.len())])
+        }
     }
 }

@@ -49,6 +49,9 @@ pub struct ProofResult {
     pub accepted: bool,
     pub spot_checked: bool,
     pub message: String,
+    /// Estimated reward in wei (hex string), returned by validator on acceptance
+    #[serde(default)]
+    pub reward_estimate: Option<String>,
 }
 
 /// JSON-RPC request/response types
