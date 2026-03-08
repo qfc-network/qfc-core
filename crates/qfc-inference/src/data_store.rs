@@ -141,9 +141,8 @@ impl LocalDataStore {
 
         // Write atomically via temp file + rename
         let tmp_path = path.with_extension("tmp");
-        std::fs::write(&tmp_path, data).map_err(|e| {
-            InferenceError::ExecutionFailed(format!("Failed to write data: {}", e))
-        })?;
+        std::fs::write(&tmp_path, data)
+            .map_err(|e| InferenceError::ExecutionFailed(format!("Failed to write data: {}", e)))?;
         std::fs::rename(&tmp_path, &path).map_err(|e| {
             InferenceError::ExecutionFailed(format!("Failed to rename data file: {}", e))
         })?;
@@ -286,8 +285,7 @@ mod tests {
 
     #[test]
     fn test_resolve_external() {
-        let dir =
-            std::env::temp_dir().join(format!("qfc_resolve_ext_test_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("qfc_resolve_ext_test_{}", std::process::id()));
         let store = LocalDataStore::new(dir.clone()).unwrap();
 
         let data = vec![99u8; 1000];
@@ -301,8 +299,7 @@ mod tests {
 
     #[test]
     fn test_integrity_check() {
-        let dir =
-            std::env::temp_dir().join(format!("qfc_integrity_test_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("qfc_integrity_test_{}", std::process::id()));
         let store = LocalDataStore::new(dir.clone()).unwrap();
 
         let data = b"original data";

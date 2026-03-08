@@ -241,9 +241,24 @@ impl InferenceWorker {
                         info!("╔══════════════════════════════════════════════════════╗");
                         info!("║  ✅ PROOF ACCEPTED — REWARD EARNED                  ║");
                         info!("║                                                      ║");
-                        info!("║  This task:  +{} QFC{}", reward_display, " ".repeat(36_usize.saturating_sub(reward_display.len())));
-                        info!("║  Session total: {} QFC{}", total_display, " ".repeat(33_usize.saturating_sub(total_display.len())));
-                        info!("║  Tasks: {} completed, {} failed{}", tasks_completed, tasks_failed, " ".repeat(24_usize.saturating_sub(format!("{}{}", tasks_completed, tasks_failed).len())));
+                        info!(
+                            "║  This task:  +{} QFC{}",
+                            reward_display,
+                            " ".repeat(36_usize.saturating_sub(reward_display.len()))
+                        );
+                        info!(
+                            "║  Session total: {} QFC{}",
+                            total_display,
+                            " ".repeat(33_usize.saturating_sub(total_display.len()))
+                        );
+                        info!(
+                            "║  Tasks: {} completed, {} failed{}",
+                            tasks_completed,
+                            tasks_failed,
+                            " ".repeat(24_usize.saturating_sub(
+                                format!("{}{}", tasks_completed, tasks_failed).len()
+                            ))
+                        );
                         if result.spot_checked {
                             info!("║  🔍 Spot-check: PASSED                              ║");
                         }
@@ -306,6 +321,11 @@ impl InferenceWorker {
                 max_tokens: 128,
                 temperature_fp: 0,
                 seed: resp.epoch,
+            },
+            "speech_to_text" => ComputeTaskType::SpeechToText {
+                model_id,
+                audio_hash: input_hash,
+                language: resp.language.clone().unwrap_or_default(),
             },
             other => return Err(format!("Unknown task type: {}", other)),
         };

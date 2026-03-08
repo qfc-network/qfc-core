@@ -556,6 +556,9 @@ pub struct RpcSubmitPublicTask {
     pub submitter: String,
     /// Ed25519 signature over (task_type || model_id || input_data || max_fee) hex
     pub signature: String,
+    /// Language code for speech_to_text tasks (e.g. "en", "zh")
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 /// Status of a public inference task (B1: structured result envelope)

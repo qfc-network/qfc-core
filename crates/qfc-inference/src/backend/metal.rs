@@ -149,6 +149,13 @@ fn estimate_flops_metal(task_type: &ComputeTaskType) -> u64 {
         }
         ComputeTaskType::ImageClassification { .. } => 4_000_000_000u64,
         ComputeTaskType::Embedding { .. } => 1_000_000_000u64,
+        ComputeTaskType::SpeechToText { model_id, .. } => {
+            if model_id.name.contains("large") {
+                30_000_000_000u64
+            } else {
+                4_000_000_000u64
+            }
+        }
         ComputeTaskType::OnnxInference { .. } => 2_000_000_000u64,
     }
 }

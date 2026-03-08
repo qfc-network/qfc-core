@@ -2630,14 +2630,20 @@ impl QfcApiServer for RpcServer {
             .unwrap()
             .as_millis() as u64;
 
+        let input_hash = qfc_crypto::blake3_hash(&input_data);
         let task_type = match request.task_type.as_str() {
             "embedding" => qfc_inference::task::ComputeTaskType::Embedding {
                 model_id,
-                input_hash: qfc_crypto::blake3_hash(&input_data),
+                input_hash,
+            },
+            "speech_to_text" => qfc_inference::task::ComputeTaskType::SpeechToText {
+                model_id,
+                audio_hash: input_hash,
+                language: request.language.clone().unwrap_or_default(),
             },
             _ => qfc_inference::task::ComputeTaskType::Embedding {
                 model_id,
-                input_hash: qfc_crypto::blake3_hash(&input_data),
+                input_hash,
             },
         };
 
@@ -2718,6 +2724,11 @@ impl QfcApiServer for RpcServer {
             "ImageClassification" => ComputeTaskType::ImageClassification {
                 model_id,
                 input_hash: qfc_types::Hash::ZERO,
+            },
+            "SpeechToText" => ComputeTaskType::SpeechToText {
+                model_id,
+                audio_hash: qfc_types::Hash::ZERO,
+                language: String::new(),
             },
             "OnnxInference" => ComputeTaskType::OnnxInference {
                 model_hash: qfc_types::Hash::ZERO,

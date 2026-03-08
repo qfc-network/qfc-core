@@ -318,6 +318,28 @@ impl ModelRegistry {
                 canonical_format: CanonicalFormat::GgufQ4KM,
                 weights_hash: None,
             },
+            ModelInfo {
+                id: ModelId::new("qfc-whisper-base", "v1.0"),
+                description: "Whisper base speech-to-text model (~150MB, Cold tier, CPU-capable)"
+                    .to_string(),
+                min_memory_mb: 512,
+                min_tier: GpuTier::Cold,
+                size_mb: 150,
+                approved: true,
+                canonical_format: CanonicalFormat::SafetensorsFp32,
+                weights_hash: None,
+            },
+            ModelInfo {
+                id: ModelId::new("qfc-whisper-large", "v1.0"),
+                description: "Whisper large-v3 speech-to-text model (~1.5GB, Warm tier)"
+                    .to_string(),
+                min_memory_mb: 3072,
+                min_tier: GpuTier::Warm,
+                size_mb: 1500,
+                approved: true,
+                canonical_format: CanonicalFormat::SafetensorsFp32,
+                weights_hash: None,
+            },
         ];
 
         Self { models }
@@ -439,9 +461,9 @@ mod tests {
         let unknown = ModelId::new("unknown-model", "v1.0");
         assert!(!registry.is_approved(&unknown));
 
-        // Cold tier can run small/medium embedding + Qwen 0.5B
+        // Cold tier can run small/medium embedding + Qwen 0.5B + Whisper base
         let cold_models = registry.models_for_tier(GpuTier::Cold);
-        assert_eq!(cold_models.len(), 3);
+        assert_eq!(cold_models.len(), 4);
 
         // Warm tier can run Cold models + 3B
         let warm_models = registry.models_for_tier(GpuTier::Warm);

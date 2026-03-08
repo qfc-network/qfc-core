@@ -38,6 +38,8 @@ pub struct HfModelRepo {
     /// Pinned HuggingFace git revision (commit hash) for reproducible downloads.
     /// If None, uses the latest version (main branch).
     pub revision: Option<&'static str>,
+    /// Extra files to download (e.g. mel filters for Whisper)
+    pub extra_files: &'static [&'static str],
 }
 
 /// Get HuggingFace repo info for a QFC model name
@@ -52,6 +54,7 @@ pub fn get_hf_repo(model_name: &str) -> Option<HfModelRepo> {
             format: ModelFormat::Safetensors,
             tokenizer_repo_id: None,
             revision: None,
+            extra_files: &[],
         }),
         "qfc-embed-medium" => Some(HfModelRepo {
             repo_id: "sentence-transformers/all-MiniLM-L12-v2",
@@ -61,6 +64,7 @@ pub fn get_hf_repo(model_name: &str) -> Option<HfModelRepo> {
             format: ModelFormat::Safetensors,
             tokenizer_repo_id: None,
             revision: None,
+            extra_files: &[],
         }),
         "qfc-classify-small" => Some(HfModelRepo {
             repo_id: "google-bert/bert-base-uncased",
@@ -70,6 +74,7 @@ pub fn get_hf_repo(model_name: &str) -> Option<HfModelRepo> {
             format: ModelFormat::Safetensors,
             tokenizer_repo_id: None,
             revision: None,
+            extra_files: &[],
         }),
         "qfc-llm-0.5b" => Some(HfModelRepo {
             repo_id: "Qwen/Qwen2.5-0.5B-Instruct",
@@ -79,6 +84,7 @@ pub fn get_hf_repo(model_name: &str) -> Option<HfModelRepo> {
             format: ModelFormat::Safetensors,
             tokenizer_repo_id: None,
             revision: None,
+            extra_files: &[],
         }),
         "qfc-llm-3b" => Some(HfModelRepo {
             repo_id: "Qwen/Qwen2.5-3B-Instruct-GGUF",
@@ -88,6 +94,7 @@ pub fn get_hf_repo(model_name: &str) -> Option<HfModelRepo> {
             format: ModelFormat::Gguf,
             tokenizer_repo_id: Some("Qwen/Qwen2.5-3B-Instruct"),
             revision: None,
+            extra_files: &[],
         }),
         "qfc-llm-7b" => Some(HfModelRepo {
             repo_id: "Qwen/Qwen2.5-7B-Instruct-GGUF",
@@ -97,6 +104,27 @@ pub fn get_hf_repo(model_name: &str) -> Option<HfModelRepo> {
             format: ModelFormat::Gguf,
             tokenizer_repo_id: Some("Qwen/Qwen2.5-7B-Instruct"),
             revision: None,
+            extra_files: &[],
+        }),
+        "qfc-whisper-base" => Some(HfModelRepo {
+            repo_id: "openai/whisper-base",
+            weights_file: "model.safetensors",
+            tokenizer_file: "tokenizer.json",
+            config_file: "config.json",
+            format: ModelFormat::Safetensors,
+            tokenizer_repo_id: None,
+            revision: None,
+            extra_files: &["mel_filters.npz"],
+        }),
+        "qfc-whisper-large" => Some(HfModelRepo {
+            repo_id: "openai/whisper-large-v3",
+            weights_file: "model.safetensors",
+            tokenizer_file: "tokenizer.json",
+            config_file: "config.json",
+            format: ModelFormat::Safetensors,
+            tokenizer_repo_id: None,
+            revision: None,
+            extra_files: &["mel_filters.npz"],
         }),
         _ => None,
     }
@@ -108,6 +136,8 @@ pub struct DownloadedModel {
     pub weights_path: PathBuf,
     pub tokenizer_path: PathBuf,
     pub config_path: PathBuf,
+    /// Extra downloaded files (e.g. mel_filters.npz for Whisper)
+    pub extra_paths: Vec<(String, PathBuf)>,
 }
 
 /// Download a single file using hf-hub, falling back to curl on failure
@@ -221,12 +251,20 @@ pub fn download_model(model_name: &str) -> Result<DownloadedModel, InferenceErro
         (tp, cp)
     };
 
+    // Download extra files (e.g. mel filters)
+    let mut extra_paths = Vec::new();
+    for extra_file in repo_info.extra_files {
+        let path = download_file(&repo, repo_info.repo_id, extra_file, &cache_dir)?;
+        extra_paths.push((extra_file.to_string(), path));
+    }
+
     tracing::info!("Model {} downloaded successfully", model_name);
 
     Ok(DownloadedModel {
         weights_path,
         tokenizer_path,
         config_path,
+        extra_paths,
     })
 }
 
