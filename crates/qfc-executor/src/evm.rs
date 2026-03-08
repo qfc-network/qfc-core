@@ -459,6 +459,102 @@ mod tests {
     }
 
     #[test]
+    fn test_precompile_sha256() {
+        let state = create_test_state();
+        let sender = Address::new([0x11; 20]);
+        state
+            .set_balance(&sender, U256::from_u128(1_000_000_000_000_000_000))
+            .unwrap();
+
+        let executor = EvmExecutor::new(&state, 9000, 1, 1234567890, Address::ZERO, 30_000_000);
+
+        // Call SHA256 precompile (address 0x02) with "hello"
+        let input = b"hello".to_vec();
+        let sha256_addr =
+            Address::new([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+        let result = executor.static_call(Some(&sender), &sha256_addr, input, 100_000);
+        assert!(
+            result.is_ok(),
+            "sha256 precompile call failed: {:?}",
+            result.err()
+        );
+        let evm_result = result.unwrap();
+        assert!(
+            evm_result.success,
+            "sha256 precompile failed: {:?}",
+            evm_result.error
+        );
+        assert_eq!(evm_result.output.len(), 32, "sha256 should return 32 bytes");
+
+        // Verify against known SHA256("hello")
+        let expected =
+            hex::decode("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
+                .unwrap();
+        assert_eq!(evm_result.output, expected);
+    }
+
+    #[test]
+    fn test_precompile_ecrecover() {
+        let state = create_test_state();
+        let sender = Address::new([0x11; 20]);
+        state
+            .set_balance(&sender, U256::from_u128(1_000_000_000_000_000_000))
+            .unwrap();
+
+        let executor = EvmExecutor::new(&state, 9000, 1, 1234567890, Address::ZERO, 30_000_000);
+
+        // ecrecover precompile at address 0x01
+        // Input: hash (32 bytes) + v (32 bytes) + r (32 bytes) + s (32 bytes) = 128 bytes
+        // Use a known test vector
+        let input = hex::decode(
+            "456e9aea5e197a1f1af7a3e85a3212fa4049a3ba34c2289b4c860fc0b0c64ef3\
+             000000000000000000000000000000000000000000000000000000000000001c\
+             9242685bf161793cc25603c231bc2f568eb630ea16aa137d2664ac8038825608\
+             4f8ae3bd7535248d0bd448298cc2e2071e56992d0774dc340c368ae950852ada",
+        )
+        .unwrap();
+        let ecrecover_addr =
+            Address::new([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        let result = executor.static_call(Some(&sender), &ecrecover_addr, input, 100_000);
+        assert!(result.is_ok(), "ecrecover call failed: {:?}", result.err());
+        let evm_result = result.unwrap();
+        assert!(
+            evm_result.success,
+            "ecrecover failed: {:?}",
+            evm_result.error
+        );
+        // Should return 32 bytes (left-padded address)
+        assert_eq!(evm_result.output.len(), 32);
+        // The recovered address should be non-zero
+        assert_ne!(evm_result.output, vec![0u8; 32]);
+    }
+
+    #[test]
+    fn test_precompile_identity() {
+        let state = create_test_state();
+        let sender = Address::new([0x11; 20]);
+        state
+            .set_balance(&sender, U256::from_u128(1_000_000_000_000_000_000))
+            .unwrap();
+
+        let executor = EvmExecutor::new(&state, 9000, 1, 1234567890, Address::ZERO, 30_000_000);
+
+        // Call identity precompile (address 0x04) — returns input unchanged
+        let input = vec![1, 2, 3, 4, 5];
+        let identity_addr =
+            Address::new([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4]);
+        let result = executor.static_call(Some(&sender), &identity_addr, input.clone(), 100_000);
+        assert!(result.is_ok());
+        let evm_result = result.unwrap();
+        assert!(
+            evm_result.success,
+            "identity precompile failed: {:?}",
+            evm_result.error
+        );
+        assert_eq!(evm_result.output, input);
+    }
+
+    #[test]
     fn test_contract_deployment() {
         let state = create_test_state();
 
