@@ -277,8 +277,17 @@ impl BlockProducer {
         // Get voters for this block (for reward distribution)
         let voters = self.get_block_voters(&block_hash);
 
-        // Distribute rewards
-        match self.distribute_rewards(block_number, &our_address, total_fees, &voters) {
+        // Distribute rewards (including inference miner rewards)
+        // Note: inference_proofs were moved into produce_block, so we collect
+        // miner addresses and FLOPS from the block's stored proofs
+        let block_proofs: Vec<InferenceProof> = block.inference_proofs.clone();
+        match self.distribute_rewards(
+            block_number,
+            &our_address,
+            total_fees,
+            &voters,
+            &block_proofs,
+        ) {
             Ok(distribution) => {
                 debug!(
                     "Distributed rewards for block #{}: producer={}, voters={}, burned={}",
@@ -403,7 +412,8 @@ impl BlockProducer {
 
     /// Distribute block rewards and fees after block production
     ///
-    /// Block rewards: 70% producer, 30% voters (proportional by contribution score)
+    /// Block rewards: 60% producer, 25% voters, 15% inference miners
+    /// If no inference proofs, the 15% miner share goes back to producer+voters (70/30).
     /// Transaction fees: 50% producer, 30% voters, 20% burned
     pub fn distribute_rewards(
         &self,
@@ -411,7 +421,10 @@ impl BlockProducer {
         producer: &qfc_types::Address,
         total_fees: U256,
         voters: &[(qfc_types::Address, u64)], // (voter_address, contribution_score)
+        inference_proofs: &[InferenceProof],
     ) -> anyhow::Result<RewardDistribution> {
+        use qfc_types::INFERENCE_MINERS_REWARD_PERCENT;
+
         let state = self.chain.state();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -422,41 +435,54 @@ impl BlockProducer {
         let year = self.calculate_year(block_height);
         let block_reward = block_reward_for_year(year);
 
-        // Producer block reward (70%)
+        // Inference miner reward pool (15%)
+        let miner_pool =
+            block_reward * U256::from_u64(INFERENCE_MINERS_REWARD_PERCENT) / U256::from_u64(100);
+
+        // Distribute to inference miners proportional to FLOPS, or redistribute if none
+        let miner_reward = if !inference_proofs.is_empty() {
+            self.distribute_miner_rewards(&miner_pool, inference_proofs)?
+        } else {
+            U256::ZERO
+        };
+        let undistributed_miner = miner_pool - miner_reward;
+
+        // Producer block reward (60% + undistributed miner share * 70%)
         let producer_block_reward =
             block_reward * U256::from_u64(PRODUCER_REWARD_PERCENT) / U256::from_u64(100);
+        let producer_extra = undistributed_miner * U256::from_u64(70) / U256::from_u64(100);
 
         // Producer fee share (50%)
         let producer_fee_share =
             total_fees * U256::from_u64(FEE_PRODUCER_PERCENT) / U256::from_u64(100);
 
         // Total producer reward
-        let producer_reward = producer_block_reward + producer_fee_share;
+        let producer_reward = producer_block_reward + producer_extra + producer_fee_share;
 
         // Add producer reward to balance
         state.add_balance(producer, producer_reward)?;
 
-        // Voter block reward pool (30%)
+        // Voter block reward pool (25% + undistributed miner share * 30%)
         let voters_block_reward =
             block_reward * U256::from_u64(VOTERS_REWARD_PERCENT) / U256::from_u64(100);
+        let voters_extra = undistributed_miner * U256::from_u64(30) / U256::from_u64(100);
 
         // Voter fee pool (30%)
         let voters_fee_share =
             total_fees * U256::from_u64(FEE_VOTERS_PERCENT) / U256::from_u64(100);
 
         // Total voter reward pool
-        let voters_reward_pool = voters_block_reward + voters_fee_share;
+        let voters_reward_pool = voters_block_reward + voters_extra + voters_fee_share;
 
         // Distribute voter rewards proportionally by contribution score
         let voter_reward = self.distribute_voter_rewards(&voters_reward_pool, voters)?;
 
         // Fee burned (20%)
         let fee_burned = total_fees * U256::from_u64(FEE_BURN_PERCENT) / U256::from_u64(100);
-        // Note: Burned fees are simply not distributed, effectively removed from circulation
 
         debug!(
-            "Block #{} rewards: producer={}, voters={}, burned={}",
-            block_height, producer_reward, voter_reward, fee_burned
+            "Block #{} rewards: producer={}, voters={}, miners={}, burned={}",
+            block_height, producer_reward, voter_reward, miner_reward, fee_burned
         );
 
         // Create reward distribution record
@@ -505,6 +531,46 @@ impl BlockProducer {
                 debug!(
                     "Voter {} reward: {} (score: {}/{})",
                     voter_address, voter_reward, score, total_score
+                );
+            }
+        }
+
+        Ok(distributed)
+    }
+
+    /// Distribute inference miner rewards proportionally by FLOPS contributed
+    fn distribute_miner_rewards(
+        &self,
+        total_reward: &U256,
+        proofs: &[InferenceProof],
+    ) -> anyhow::Result<U256> {
+        if proofs.is_empty() || total_reward.is_zero() {
+            return Ok(U256::ZERO);
+        }
+
+        let state = self.chain.state();
+        let total_flops: u64 = proofs.iter().map(|p| p.flops_estimated).sum();
+        if total_flops == 0 {
+            return Ok(U256::ZERO);
+        }
+
+        let mut distributed = U256::ZERO;
+
+        // Aggregate FLOPS per miner (a miner may have multiple proofs)
+        let mut miner_flops: std::collections::HashMap<qfc_types::Address, u64> =
+            std::collections::HashMap::new();
+        for proof in proofs {
+            *miner_flops.entry(proof.validator).or_default() += proof.flops_estimated;
+        }
+
+        for (miner, flops) in &miner_flops {
+            let reward = *total_reward * U256::from_u64(*flops) / U256::from_u64(total_flops);
+            if !reward.is_zero() {
+                state.add_balance(miner, reward)?;
+                distributed = distributed + reward;
+                debug!(
+                    "Miner {} inference reward: {} ({} FLOPS / {} total)",
+                    miner, reward, flops, total_flops
                 );
             }
         }

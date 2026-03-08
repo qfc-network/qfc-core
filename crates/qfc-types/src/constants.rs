@@ -74,11 +74,16 @@ pub const VOTE_TIMEOUT_SECS: u64 = 5;
 /// Block reward in wei (10 QFC)
 pub const BLOCK_REWARD: u128 = 10_000_000_000_000_000_000; // 10^19 wei
 
-/// Producer reward percentage (70%)
-pub const PRODUCER_REWARD_PERCENT: u64 = 70;
+/// Producer reward percentage (60%)
+pub const PRODUCER_REWARD_PERCENT: u64 = 60;
 
-/// Voters reward percentage (30%)
-pub const VOTERS_REWARD_PERCENT: u64 = 30;
+/// Voters reward percentage (25%)
+pub const VOTERS_REWARD_PERCENT: u64 = 25;
+
+/// Inference miners reward percentage (15%)
+/// Distributed to miners who submitted proofs in this block, proportional to FLOPS.
+/// If no inference proofs, this share goes back to producer + voters at 70/30 ratio.
+pub const INFERENCE_MINERS_REWARD_PERCENT: u64 = 15;
 
 /// Fee distribution: producer (50%)
 pub const FEE_PRODUCER_PERCENT: u64 = 50;
