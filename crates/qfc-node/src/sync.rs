@@ -485,8 +485,13 @@ impl SyncManager {
             }
         };
 
-        // Add to mempool
-        match self.mempool.write().add(tx, sender) {
+        // Add to mempool with nonce validation
+        let state = self.chain.state();
+        match self
+            .mempool
+            .write()
+            .add_with_nonce_check(tx, sender, Some(state.as_ref()))
+        {
             Ok(_) => {
                 info!(
                     "Added transaction {} from network (sender: {})",

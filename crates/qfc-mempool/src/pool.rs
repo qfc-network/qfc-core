@@ -9,6 +9,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 use tracing::{debug, trace};
 
+/// Trait for looking up the current on-chain nonce for an address.
+/// Implemented by StateDB to allow nonce validation without tight coupling.
+pub trait NonceLookup {
+    fn get_nonce(&self, address: &Address) -> std::result::Result<u64, String>;
+}
+
 /// Mempool configuration
 #[derive(Clone, Debug)]
 pub struct MempoolConfig {
@@ -92,8 +98,14 @@ impl Mempool {
         Self::new(MempoolConfig::default())
     }
 
-    /// Add a transaction to the pool
-    pub fn add(&self, tx: Transaction, sender: Address) -> Result<Hash> {
+    /// Add a transaction to the pool with nonce validation against on-chain state.
+    /// If `nonce_lookup` is None, nonce validation is skipped (backward compatible).
+    pub fn add_with_nonce_check(
+        &self,
+        tx: Transaction,
+        sender: Address,
+        nonce_lookup: Option<&dyn NonceLookup>,
+    ) -> Result<Hash> {
         let hash = blake3_hash(&tx.to_bytes_without_signature());
 
         // Check if already known
@@ -107,6 +119,17 @@ impl Mempool {
                 minimum: self.config.min_gas_price.to_string(),
                 provided: tx.gas_price.to_string(),
             });
+        }
+
+        // Validate nonce against on-chain state
+        if let Some(lookup) = nonce_lookup {
+            let on_chain_nonce = lookup.get_nonce(&sender).map_err(MempoolError::State)?;
+            if tx.nonce < on_chain_nonce {
+                return Err(MempoolError::InvalidNonce {
+                    expected: on_chain_nonce,
+                    actual: tx.nonce,
+                });
+            }
         }
 
         // Check pool capacity
@@ -144,6 +167,11 @@ impl Mempool {
         );
 
         Ok(hash)
+    }
+
+    /// Add a transaction to the pool (without nonce validation, backward compatible)
+    pub fn add(&self, tx: Transaction, sender: Address) -> Result<Hash> {
+        self.add_with_nonce_check(tx, sender, None)
     }
 
     /// Get a transaction by hash
@@ -214,11 +242,17 @@ impl Mempool {
         }
     }
 
-    /// Select transactions for a block
-    pub fn select(&self, max_gas: u64, max_count: usize) -> Vec<Transaction> {
+    /// Select transactions for a block with nonce ordering.
+    /// If `nonce_lookup` is provided, only include transactions with valid nonce sequences.
+    pub fn select_with_nonce(
+        &self,
+        max_gas: u64,
+        max_count: usize,
+        nonce_lookup: Option<&dyn NonceLookup>,
+    ) -> Vec<Transaction> {
         let mut selected = Vec::new();
         let mut gas_used = 0u64;
-        let mut seen_senders: HashMap<Address, u64> = HashMap::new();
+        let mut next_nonce: HashMap<Address, u64> = HashMap::new();
 
         // Iterate by gas price (highest first)
         let by_price = self.by_price.read();
@@ -240,12 +274,21 @@ impl Mempool {
                     continue;
                 }
 
-                // Check nonce ordering
-                let _expected_nonce = seen_senders.get(&pooled.sender).map(|n| n + 1).unwrap_or(0); // TODO: Get from state
+                // If nonce provider is available, enforce sequential nonces
+                if nonce_lookup.is_some() {
+                    let expected = *next_nonce.entry(pooled.sender).or_insert_with(|| {
+                        nonce_lookup
+                            .and_then(|l| l.get_nonce(&pooled.sender).ok())
+                            .unwrap_or(0)
+                    });
 
-                // For now, just accept any nonce (simplified)
-                // In production, we'd check against state
-                seen_senders.insert(pooled.sender, tx.nonce);
+                    if tx.nonce != expected {
+                        // Skip transactions with non-sequential nonces
+                        continue;
+                    }
+
+                    next_nonce.insert(pooled.sender, expected + 1);
+                }
 
                 selected.push(tx.clone());
                 gas_used += tx.gas_limit;
@@ -253,6 +296,11 @@ impl Mempool {
         }
 
         selected
+    }
+
+    /// Select transactions for a block (backward compatible, no nonce validation)
+    pub fn select(&self, max_gas: u64, max_count: usize) -> Vec<Transaction> {
+        self.select_with_nonce(max_gas, max_count, None)
     }
 
     /// Evict the lowest gas price transaction

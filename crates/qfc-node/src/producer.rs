@@ -394,14 +394,15 @@ impl BlockProducer {
         }
     }
 
-    /// Select transactions from mempool
+    /// Select transactions from mempool with nonce validation against on-chain state
     fn select_transactions(&self) -> Vec<Transaction> {
         let mempool = self.mempool.read();
+        let state = self.chain.state();
 
-        // Get transactions sorted by gas price
-        mempool.select(
+        mempool.select_with_nonce(
             qfc_types::DEFAULT_BLOCK_GAS_LIMIT,
             self.config.max_txs_per_block,
+            Some(state.as_ref()),
         )
     }
 

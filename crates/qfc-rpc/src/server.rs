@@ -507,10 +507,11 @@ impl EthApiServer for RpcServer {
             // Derive sender from public key (Ed25519)
             let sender = qfc_crypto::address_from_public_key(&tx.public_key);
 
-            // Add to mempool
+            // Add to mempool with nonce validation
+            let state = self.chain.state();
             self.mempool
                 .write()
-                .add(tx.clone(), sender)
+                .add_with_nonce_check(tx.clone(), sender, Some(state.as_ref()))
                 .map_err(|e| RpcError::Execution(e.to_string()))?;
 
             info!("Added QFC transaction {} to mempool from {}", hash, sender);
@@ -579,10 +580,11 @@ impl EthApiServer for RpcServer {
             warn!("Failed to store Ethereum tx hash mapping: {}", e);
         }
 
-        // Add to mempool
+        // Add to mempool with nonce validation
+        let state = self.chain.state();
         self.mempool
             .write()
-            .add(qfc_tx.clone(), sender)
+            .add_with_nonce_check(qfc_tx.clone(), sender, Some(state.as_ref()))
             .map_err(|e| RpcError::Execution(e.to_string()))?;
 
         info!(
