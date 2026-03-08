@@ -27,7 +27,7 @@ impl Default for IpfsConfig {
         Self {
             api_url: "http://127.0.0.1:5001".into(),
             gateway_url: "http://127.0.0.1:8080".into(),
-            size_threshold: 1_048_576, // 1MB
+            size_threshold: 1_048_576,   // 1MB
             pin_ttl_secs: 7 * 24 * 3600, // 7 days
             timeout: Duration::from_secs(30),
         }
@@ -106,14 +106,11 @@ impl IpfsClient {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(IpfsError::UploadFailed(format!(
-                "curl failed: {}",
-                stderr
-            )));
+            return Err(IpfsError::UploadFailed(format!("curl failed: {}", stderr)));
         }
 
-        let response_str = String::from_utf8(output.stdout)
-            .map_err(|e| IpfsError::ParseError(e.to_string()))?;
+        let response_str =
+            String::from_utf8(output.stdout).map_err(|e| IpfsError::ParseError(e.to_string()))?;
 
         // Kubo returns JSON: {"Name":"result","Hash":"Qm...","Size":"123"}
         let parsed: KuboAddResponse = serde_json::from_str(&response_str)

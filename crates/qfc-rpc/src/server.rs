@@ -162,10 +162,7 @@ impl RpcServer {
     }
 
     /// Set the IPFS client for large result storage (B2)
-    pub fn with_ipfs_client(
-        mut self,
-        client: qfc_ai_coordinator::ipfs::IpfsClient,
-    ) -> Self {
+    pub fn with_ipfs_client(mut self, client: qfc_ai_coordinator::ipfs::IpfsClient) -> Self {
         self.ipfs_client = Some(Arc::new(client));
         self
     }
@@ -1875,13 +1872,15 @@ impl QfcApiServer for RpcServer {
     async fn get_inference_result(&self, cid: String) -> RpcResult<String> {
         use base64::Engine;
 
-        let ipfs = self.ipfs_client.as_ref().ok_or_else(|| {
-            RpcError::Internal("IPFS client not configured".to_string())
-        })?;
+        let ipfs = self
+            .ipfs_client
+            .as_ref()
+            .ok_or_else(|| RpcError::Internal("IPFS client not configured".to_string()))?;
 
-        let data = ipfs.fetch(&cid).await.map_err(|e| {
-            RpcError::Internal(format!("Failed to fetch from IPFS: {}", e))
-        })?;
+        let data = ipfs
+            .fetch(&cid)
+            .await
+            .map_err(|e| RpcError::Internal(format!("Failed to fetch from IPFS: {}", e)))?;
 
         Ok(base64::engine::general_purpose::STANDARD.encode(&data))
     }
@@ -1964,7 +1963,16 @@ impl RpcServer {
             .map(|m| format!("{}:{}", m.name, m.version))
             .unwrap_or_default();
 
-        let (status, result, result_size, result_type, result_cid, result_preview, miner_address, execution_time_ms) = match &task.status {
+        let (
+            status,
+            result,
+            result_size,
+            result_type,
+            result_cid,
+            result_preview,
+            miner_address,
+            execution_time_ms,
+        ) = match &task.status {
             qfc_ai_coordinator::task_pool::PublicTaskStatus::Pending => {
                 ("Pending".into(), None, None, None, None, None, None, None)
             }
