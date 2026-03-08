@@ -13,6 +13,7 @@
 pub mod assignment;
 pub mod challenge;
 pub mod governance;
+pub mod ipfs;
 pub mod proof_pool;
 pub mod redundant;
 pub mod registry;

@@ -190,6 +190,12 @@ pub trait QfcApi {
     #[method(name = "getPublicTaskStatus")]
     async fn get_public_task_status(&self, task_id: String) -> RpcResult<RpcPublicTaskStatus>;
 
+    /// Fetch a large inference result from IPFS by CID.
+    /// Returns base64-encoded content. This proxies the request so clients
+    /// do not need their own IPFS node.
+    #[method(name = "getInferenceResult")]
+    async fn get_inference_result(&self, cid: String) -> RpcResult<String>;
+
     /// Subscribe to task status updates (WebSocket only).
     /// Pushes RpcPublicTaskStatus whenever the task transitions state.
     #[subscription(name = "subscribeTaskStatus" => "taskStatus", unsubscribe = "unsubscribeTaskStatus", item = RpcPublicTaskStatus)]
@@ -425,12 +431,21 @@ pub struct RpcPublicTaskStatus {
     pub deadline: u64,
     /// Max fee in wei (hex)
     pub max_fee: String,
-    /// Result payload (base64-encoded bytes), present when status=Completed
+    /// Result payload (base64-encoded bytes), present when status=Completed and result_type="inline"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<String>,
     /// Result size in bytes
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result_size: Option<usize>,
+    /// "inline" or "ipfs" — how result is stored
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_type: Option<String>,
+    /// IPFS CID (only when result_type="ipfs")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_cid: Option<String>,
+    /// Preview of result (base64, first 1KB, only for IPFS results)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_preview: Option<String>,
     /// Miner that completed the task
     #[serde(skip_serializing_if = "Option::is_none")]
     pub miner_address: Option<String>,

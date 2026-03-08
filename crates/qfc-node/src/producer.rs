@@ -340,7 +340,9 @@ impl BlockProducer {
                     // Mark task completed
                     task_pool.complete_public_task_by_input_hash(
                         &proof.input_hash,
-                        proof.output_hash.as_bytes().to_vec(),
+                        qfc_ai_coordinator::task_pool::ResultStorage::Inline(
+                            proof.output_hash.as_bytes().to_vec(),
+                        ),
                         proof.validator,
                         proof.execution_time_ms,
                     );

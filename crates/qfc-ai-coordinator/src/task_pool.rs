@@ -7,13 +7,27 @@ use qfc_types::{Address, Hash};
 
 use crate::task_types::{synthetic_task_for_tier, task_requirements};
 
+/// How the result data is stored
+#[derive(Clone, Debug)]
+pub enum ResultStorage {
+    /// Result stored inline (small results)
+    Inline(Vec<u8>),
+    /// Result stored on IPFS (large results)
+    Ipfs {
+        cid: String,
+        size: usize,
+        /// First 1KB preview
+        preview: Vec<u8>,
+    },
+}
+
 /// Status of a publicly submitted inference task
 #[derive(Clone, Debug)]
 pub enum PublicTaskStatus {
     Pending,
     Assigned,
     Completed {
-        result_data: Vec<u8>,
+        result: ResultStorage,
         miner: Address,
         execution_time_ms: u64,
     },
@@ -247,14 +261,14 @@ impl TaskPool {
     pub fn complete_public_task(
         &mut self,
         task_id: &Hash,
-        result_data: Vec<u8>,
+        result: ResultStorage,
         miner: Address,
         execution_time_ms: u64,
     ) -> bool {
         self.assigned.remove(task_id);
         if let Some(task) = self.public_tasks.get_mut(task_id) {
             task.status = PublicTaskStatus::Completed {
-                result_data,
+                result,
                 miner,
                 execution_time_ms,
             };
@@ -268,12 +282,12 @@ impl TaskPool {
     pub fn complete_public_task_by_input_hash(
         &mut self,
         input_hash: &Hash,
-        result_data: Vec<u8>,
+        result: ResultStorage,
         miner: Address,
         execution_time_ms: u64,
     ) -> bool {
         if let Some(task_id) = self.input_hash_index.get(input_hash).copied() {
-            self.complete_public_task(&task_id, result_data, miner, execution_time_ms)
+            self.complete_public_task(&task_id, result, miner, execution_time_ms)
         } else {
             false
         }
@@ -422,7 +436,7 @@ mod tests {
         // Complete by input_hash
         assert!(pool.complete_public_task_by_input_hash(
             &input_hash,
-            vec![1, 2, 3],
+            ResultStorage::Inline(vec![1, 2, 3]),
             Address::ZERO,
             100,
         ));

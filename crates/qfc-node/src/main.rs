@@ -95,6 +95,18 @@ struct Args {
     /// Prometheus metrics listen address
     #[arg(long, default_value = "0.0.0.0:6060")]
     metrics_addr: SocketAddr,
+
+    /// IPFS Kubo API URL for large inference result storage (optional)
+    #[arg(long, env = "QFC_IPFS_API_URL")]
+    ipfs_api_url: Option<String>,
+
+    /// IPFS Gateway URL for fetching results (optional)
+    #[arg(long, env = "QFC_IPFS_GATEWAY_URL")]
+    ipfs_gateway_url: Option<String>,
+
+    /// IPFS size threshold in bytes (default: 1MB, results larger than this go to IPFS)
+    #[arg(long, env = "QFC_IPFS_SIZE_THRESHOLD", default_value_t = 1_048_576)]
+    ipfs_size_threshold: usize,
 }
 
 #[tokio::main]
@@ -324,6 +336,25 @@ async fn main() -> Result<()> {
             .with_challenge_generator(challenge_generator.clone())
             .with_redundant_verifier(redundant_verifier.clone())
             .with_task_router(task_router.clone());
+
+        // B2: IPFS client for large inference result storage
+        if let Some(ref api_url) = args.ipfs_api_url {
+            let ipfs_config = qfc_ai_coordinator::ipfs::IpfsConfig {
+                api_url: api_url.clone(),
+                gateway_url: args
+                    .ipfs_gateway_url
+                    .clone()
+                    .unwrap_or_else(|| "http://127.0.0.1:8080".into()),
+                size_threshold: args.ipfs_size_threshold,
+                ..Default::default()
+            };
+            rpc_server =
+                rpc_server.with_ipfs_client(qfc_ai_coordinator::ipfs::IpfsClient::new(ipfs_config));
+            info!(
+                "IPFS client configured: api={}, threshold={}",
+                api_url, args.ipfs_size_threshold
+            );
+        }
 
         let handle = rpc_server
             .start(rpc_config)

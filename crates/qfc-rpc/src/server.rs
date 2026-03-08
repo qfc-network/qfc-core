@@ -79,6 +79,8 @@ pub struct RpcServer {
     redundant_verifier: Option<Arc<RwLock<qfc_ai_coordinator::redundant::RedundantVerifier>>>,
     /// v2.0 P2: Task router for model-aware miner selection
     task_router: Option<Arc<RwLock<qfc_ai_coordinator::router::TaskRouter>>>,
+    /// B2: IPFS client for large result storage (optional)
+    ipfs_client: Option<Arc<qfc_ai_coordinator::ipfs::IpfsClient>>,
 }
 
 impl Clone for RpcServer {
@@ -97,6 +99,7 @@ impl Clone for RpcServer {
             challenge_generator: self.challenge_generator.clone(),
             redundant_verifier: self.redundant_verifier.clone(),
             task_router: self.task_router.clone(),
+            ipfs_client: self.ipfs_client.clone(),
         }
     }
 }
@@ -126,6 +129,7 @@ impl RpcServer {
             challenge_generator: None,
             redundant_verifier: None,
             task_router: None,
+            ipfs_client: None,
         }
     }
 
@@ -153,6 +157,15 @@ impl RpcServer {
         router: Arc<RwLock<qfc_ai_coordinator::router::TaskRouter>>,
     ) -> Self {
         self.task_router = Some(router);
+        self
+    }
+
+    /// Set the IPFS client for large result storage (B2)
+    pub fn with_ipfs_client(
+        mut self,
+        client: qfc_ai_coordinator::ipfs::IpfsClient,
+    ) -> Self {
+        self.ipfs_client = Some(Arc::new(client));
         self
     }
 
@@ -1483,18 +1496,67 @@ impl QfcApiServer for RpcServer {
             pool.write().add(types_proof);
         }
 
-        // 10. Check if this proof completes a public task (v2.0)
+        // 10. Check if this proof completes a public task (v2.0, B2: IPFS for large results)
         {
-            let mut task_pool = self.task_pool.write();
-            if task_pool.get_public_task(&proof.input_hash).is_some() {
+            use qfc_ai_coordinator::task_pool::ResultStorage;
+
+            let has_public_task = {
+                let pool = self.task_pool.read();
+                pool.get_public_task(&proof.input_hash).is_some()
+            };
+
+            if has_public_task {
                 let result_data = submission
                     .result_data
                     .as_ref()
                     .and_then(|s| hex::decode(s.strip_prefix("0x").unwrap_or(s)).ok())
                     .unwrap_or_else(|| proof.output_hash.as_bytes().to_vec());
+
+                // B2: If result is large and IPFS client is available, upload to IPFS
+                let result_storage = if let Some(ref ipfs) = self.ipfs_client {
+                    if ipfs.should_upload(&result_data) {
+                        // Upload to IPFS (no lock held during async call)
+                        match ipfs.upload(&result_data).await {
+                            Ok(upload_result) => {
+                                let preview_len = std::cmp::min(1024, result_data.len());
+                                let preview = result_data[..preview_len].to_vec();
+                                info!(
+                                    "Uploaded large result ({} bytes) to IPFS: {}",
+                                    result_data.len(),
+                                    upload_result.cid
+                                );
+                                ResultStorage::Ipfs {
+                                    cid: upload_result.cid,
+                                    size: upload_result.size,
+                                    preview,
+                                }
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "IPFS upload failed for large result ({} bytes), storing inline: {}",
+                                    result_data.len(),
+                                    e
+                                );
+                                ResultStorage::Inline(result_data)
+                            }
+                        }
+                    } else {
+                        ResultStorage::Inline(result_data)
+                    }
+                } else {
+                    if result_data.len() > 1_048_576 {
+                        warn!(
+                            "Large result ({} bytes) stored inline because no IPFS client is configured",
+                            result_data.len()
+                        );
+                    }
+                    ResultStorage::Inline(result_data)
+                };
+
+                let mut task_pool = self.task_pool.write();
                 task_pool.complete_public_task(
                     &proof.input_hash,
-                    result_data,
+                    result_storage,
                     proof.validator,
                     proof.execution_time_ms,
                 );
@@ -1750,6 +1812,20 @@ impl QfcApiServer for RpcServer {
         }
     }
 
+    async fn get_inference_result(&self, cid: String) -> RpcResult<String> {
+        use base64::Engine;
+
+        let ipfs = self.ipfs_client.as_ref().ok_or_else(|| {
+            RpcError::Internal("IPFS client not configured".to_string())
+        })?;
+
+        let data = ipfs.fetch(&cid).await.map_err(|e| {
+            RpcError::Internal(format!("Failed to fetch from IPFS: {}", e))
+        })?;
+
+        Ok(base64::engine::general_purpose::STANDARD.encode(&data))
+    }
+
     async fn subscribe_task_status(
         &self,
         pending: jsonrpsee::PendingSubscriptionSink,
@@ -1816,9 +1892,10 @@ impl QfcApiServer for RpcServer {
 
 // Helper methods
 impl RpcServer {
-    /// Build RpcPublicTaskStatus from a PublicTask (B1: structured envelope)
+    /// Build RpcPublicTaskStatus from a PublicTask (B1: structured envelope, B2: IPFS support)
     fn build_task_status(task: &qfc_ai_coordinator::task_pool::PublicTask) -> RpcPublicTaskStatus {
         use base64::Engine;
+        use qfc_ai_coordinator::task_pool::ResultStorage;
 
         let model_id = task
             .inner_task
@@ -1827,29 +1904,44 @@ impl RpcServer {
             .map(|m| format!("{}:{}", m.name, m.version))
             .unwrap_or_default();
 
-        let (status, result, result_size, miner_address, execution_time_ms) = match &task.status {
+        let (status, result, result_size, result_type, result_cid, result_preview, miner_address, execution_time_ms) = match &task.status {
             qfc_ai_coordinator::task_pool::PublicTaskStatus::Pending => {
-                ("Pending".into(), None, None, None, None)
+                ("Pending".into(), None, None, None, None, None, None, None)
             }
             qfc_ai_coordinator::task_pool::PublicTaskStatus::Assigned => {
-                ("Assigned".into(), None, None, None, None)
+                ("Assigned".into(), None, None, None, None, None, None, None)
             }
             qfc_ai_coordinator::task_pool::PublicTaskStatus::Completed {
-                result_data,
+                result,
                 miner,
                 execution_time_ms,
-            } => (
-                "Completed".into(),
-                Some(base64::engine::general_purpose::STANDARD.encode(result_data)),
-                Some(result_data.len()),
-                Some(miner.to_string()),
-                Some(*execution_time_ms),
-            ),
+            } => match result {
+                ResultStorage::Inline(data) => (
+                    "Completed".into(),
+                    Some(base64::engine::general_purpose::STANDARD.encode(data)),
+                    Some(data.len()),
+                    Some("inline".to_string()),
+                    None,
+                    None,
+                    Some(miner.to_string()),
+                    Some(*execution_time_ms),
+                ),
+                ResultStorage::Ipfs { cid, size, preview } => (
+                    "Completed".into(),
+                    None,
+                    Some(*size),
+                    Some("ipfs".to_string()),
+                    Some(cid.clone()),
+                    Some(base64::engine::general_purpose::STANDARD.encode(preview)),
+                    Some(miner.to_string()),
+                    Some(*execution_time_ms),
+                ),
+            },
             qfc_ai_coordinator::task_pool::PublicTaskStatus::Failed => {
-                ("Failed".into(), None, None, None, None)
+                ("Failed".into(), None, None, None, None, None, None, None)
             }
             qfc_ai_coordinator::task_pool::PublicTaskStatus::Expired => {
-                ("Expired".into(), None, None, None, None)
+                ("Expired".into(), None, None, None, None, None, None, None)
             }
         };
 
@@ -1864,6 +1956,9 @@ impl RpcServer {
             max_fee: format!("0x{:x}", task.max_fee),
             result,
             result_size,
+            result_type,
+            result_cid,
+            result_preview,
             miner_address,
             execution_time_ms,
         }
