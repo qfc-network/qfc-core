@@ -9,9 +9,9 @@ use crate::qfc::{
     RpcModel, RpcModelProposal, RpcNodeInfo, RpcParameterOverride, RpcParameterProposal,
     RpcProofResult, RpcProposeModelRequest, RpcProposeParameterRequest, RpcProposeSpendRequest,
     RpcPublicTaskStatus, RpcRegisterMinerRequest, RpcRegisterMinerResult, RpcSpendProposal,
-    RpcSubmitPublicTask, RpcTaskRequest, RpcTreasuryInfo, RpcUndelegation, RpcValidator,
-    RpcValidatorMetrics, RpcValidatorScoreBreakdown, RpcVoteModelRequest, RpcVoteParameterRequest,
-    RpcVoteSpendRequest,
+    RpcSubmitPublicTask, RpcTaskRequest, RpcTreasuryInfo, RpcUndelegation, RpcUserOperation,
+    RpcUserOperationStatus, RpcValidator, RpcValidatorMetrics, RpcValidatorScoreBreakdown,
+    RpcVoteModelRequest, RpcVoteParameterRequest, RpcVoteSpendRequest,
 };
 use crate::txpool::{TxPoolApiServer, TxPoolContent, TxPoolStatus};
 use crate::types::{BlockNumber, BlockTag, CallRequest, RpcBlock, RpcReceipt, RpcTransaction};
@@ -100,6 +100,10 @@ pub struct RpcServer {
     total_inference_time_ms: Arc<std::sync::atomic::AtomicU64>,
     /// v2.0: Inference stats — total verified proof count (for averaging)
     verified_proof_count: Arc<std::sync::atomic::AtomicU64>,
+    /// v2.0: EIP-4337 EntryPoint for account abstraction
+    entry_point: Arc<RwLock<qfc_executor::account_abstraction::EntryPoint>>,
+    /// v2.0: UserOperation mempool
+    user_op_pool: Arc<RwLock<qfc_executor::account_abstraction::UserOpPool>>,
 }
 
 impl Clone for RpcServer {
@@ -126,6 +130,8 @@ impl Clone for RpcServer {
             total_flops: self.total_flops.clone(),
             total_inference_time_ms: self.total_inference_time_ms.clone(),
             verified_proof_count: self.verified_proof_count.clone(),
+            entry_point: self.entry_point.clone(),
+            user_op_pool: self.user_op_pool.clone(),
         }
     }
 }
@@ -165,6 +171,12 @@ impl RpcServer {
             total_flops: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             total_inference_time_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             verified_proof_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            entry_point: Arc::new(RwLock::new(
+                qfc_executor::account_abstraction::EntryPoint::new(chain_id),
+            )),
+            user_op_pool: Arc::new(RwLock::new(
+                qfc_executor::account_abstraction::UserOpPool::new(1000, 16),
+            )),
         }
     }
 
@@ -2324,6 +2336,81 @@ impl QfcApiServer for RpcServer {
             current_epoch,
             reactivation_fee: qfc_types::REACTIVATION_FEE.to_string(),
         })
+    }
+
+    // ---- v2.0: Account abstraction (EIP-4337) endpoints ----
+
+    async fn send_user_operation(&self, user_op: RpcUserOperation) -> RpcResult<String> {
+        let sender = Self::parse_address(&user_op.sender)?;
+
+        let parse_hex = |s: &str| -> Vec<u8> {
+            hex::decode(s.strip_prefix("0x").unwrap_or(s)).unwrap_or_default()
+        };
+        let parse_u64 = |s: &str| -> u64 {
+            s.strip_prefix("0x")
+                .map(|h| u64::from_str_radix(h, 16).unwrap_or(0))
+                .unwrap_or_else(|| s.parse().unwrap_or(0))
+        };
+        let parse_u128 = |s: &str| -> u128 {
+            s.strip_prefix("0x")
+                .map(|h| u128::from_str_radix(h, 16).unwrap_or(0))
+                .unwrap_or_else(|| s.parse().unwrap_or(0))
+        };
+
+        let op = qfc_executor::account_abstraction::UserOperation {
+            sender,
+            nonce: parse_u64(&user_op.nonce),
+            init_code: parse_hex(&user_op.init_code),
+            call_data: parse_hex(&user_op.call_data),
+            call_gas_limit: parse_u64(&user_op.call_gas_limit),
+            verification_gas_limit: parse_u64(&user_op.verification_gas_limit),
+            pre_verification_gas: parse_u64(&user_op.pre_verification_gas),
+            max_fee_per_gas: parse_u128(&user_op.max_fee_per_gas),
+            max_priority_fee_per_gas: parse_u128(&user_op.max_priority_fee_per_gas),
+            paymaster_and_data: parse_hex(&user_op.paymaster_and_data),
+            signature: parse_hex(&user_op.signature),
+        };
+
+        // Validate via EntryPoint
+        {
+            let ep = self.entry_point.read();
+            ep.validate_user_op(&op, 0)
+                .map_err(|e| RpcError::Execution(e.to_string()))?;
+        }
+
+        // Add to UserOp pool
+        let ep_addr = {
+            let ep = self.entry_point.read();
+            *ep.address()
+        };
+        let hash = self
+            .user_op_pool
+            .write()
+            .add(op, &ep_addr, self.chain_id, 0)
+            .map_err(|e| RpcError::Execution(e.to_string()))?;
+
+        Ok(hex::encode(hash.as_bytes()))
+    }
+
+    async fn get_user_operation_by_hash(
+        &self,
+        hash: String,
+    ) -> RpcResult<Option<RpcUserOperationStatus>> {
+        let op_hash = Self::parse_hash(&hash)?;
+        let pool = self.user_op_pool.read();
+
+        Ok(pool.get(&op_hash).map(|pooled| RpcUserOperationStatus {
+            user_op_hash: hex::encode(pooled.hash.as_bytes()),
+            sender: pooled.user_op.sender.to_string(),
+            nonce: pooled.user_op.nonce,
+            status: "pending".to_string(),
+            paymaster: pooled.user_op.paymaster().map(|p| p.to_string()),
+        }))
+    }
+
+    async fn supported_entry_points(&self) -> RpcResult<Vec<String>> {
+        let ep = self.entry_point.read();
+        Ok(vec![ep.address().to_string()])
     }
 
     // ---- v2.0: Public Inference API endpoints ----

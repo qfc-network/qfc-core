@@ -268,6 +268,21 @@ pub trait QfcApi {
     /// Get rent info for an account (storage deposit, dormancy status, rent owed)
     #[method(name = "getAccountRentInfo")]
     async fn get_account_rent_info(&self, address: String) -> RpcResult<RpcAccountRentInfo>;
+
+    /// Send a UserOperation (EIP-4337 account abstraction)
+    #[method(name = "sendUserOperation")]
+    async fn send_user_operation(&self, user_op: RpcUserOperation) -> RpcResult<String>;
+
+    /// Get a UserOperation by hash
+    #[method(name = "getUserOperationByHash")]
+    async fn get_user_operation_by_hash(
+        &self,
+        hash: String,
+    ) -> RpcResult<Option<RpcUserOperationStatus>>;
+
+    /// Get the EntryPoint supported by this node
+    #[method(name = "supportedEntryPoints")]
+    async fn supported_entry_points(&self) -> RpcResult<Vec<String>>;
 }
 
 /// Faucet response
@@ -805,4 +820,32 @@ pub struct RpcAccountRentInfo {
     pub rent_owed: String,
     pub current_epoch: u64,
     pub reactivation_fee: String,
+}
+
+/// UserOperation request (EIP-4337)
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcUserOperation {
+    pub sender: String,
+    pub nonce: String,
+    pub init_code: String,
+    pub call_data: String,
+    pub call_gas_limit: String,
+    pub verification_gas_limit: String,
+    pub pre_verification_gas: String,
+    pub max_fee_per_gas: String,
+    pub max_priority_fee_per_gas: String,
+    pub paymaster_and_data: String,
+    pub signature: String,
+}
+
+/// UserOperation status response
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcUserOperationStatus {
+    pub user_op_hash: String,
+    pub sender: String,
+    pub nonce: u64,
+    pub status: String,
+    pub paymaster: Option<String>,
 }
