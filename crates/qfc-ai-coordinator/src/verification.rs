@@ -1,15 +1,39 @@
 //! Spot-check verification logic for inference proofs
+//!
+//! Follows the industry pattern (Bittensor, Ritual, Gensyn) of using
+//! task-scoped deadlines instead of global epoch checks. Epochs are
+//! retained for reward attribution only — not for rejecting proofs.
 
 use qfc_inference::proof::InferenceProof;
 use qfc_inference::{InferenceEngine, InferenceTask};
 use qfc_types::Hash;
 use thiserror::Error;
 
+/// Maximum age of a proof in seconds (2 minutes).
+/// Proofs older than this are rejected to prevent replay attacks.
+/// This is deliberately generous — inference can take a while on slow hardware.
+const MAX_PROOF_AGE_SECS: u64 = 120;
+
+/// Maximum clock skew tolerance in seconds (10 seconds into the future)
+const MAX_FUTURE_SECS: u64 = 10;
+
 /// Verification errors
 #[derive(Debug, Error)]
 pub enum VerificationError {
-    #[error("Epoch mismatch: expected {expected}, got {got}")]
-    EpochMismatch { expected: u64, got: u64 },
+    #[error("Proof expired: submitted at {submitted}, but current time is {now} ({age_secs}s old, max {max_age_secs}s)")]
+    ProofExpired {
+        submitted: u64,
+        now: u64,
+        age_secs: u64,
+        max_age_secs: u64,
+    },
+
+    #[error("Proof timestamp is in the future: {submitted} > {now} + {tolerance}s")]
+    ProofFromFuture {
+        submitted: u64,
+        now: u64,
+        tolerance: u64,
+    },
 
     #[error("Model not in approved registry: {0}")]
     UnapprovedModel(String),
@@ -38,23 +62,35 @@ pub struct VerificationResult {
 /// Spot-check percentage (5% of proofs are re-executed)
 const SPOT_CHECK_RATE: f64 = 0.05;
 
-/// Verify an inference proof (basic checks, no re-execution)
+/// Verify an inference proof (basic checks, no re-execution).
+///
+/// Uses timestamp-based validation instead of epoch matching:
+/// - Proof must not be older than MAX_PROOF_AGE_SECS (prevents replay)
+/// - Proof must not be from the future (prevents clock manipulation)
+/// - Epoch is NOT checked here — it's only used for reward attribution
 pub fn verify_basic(
     proof: &InferenceProof,
-    expected_epoch: u64,
+    now_secs: u64,
     approved_models: &qfc_inference::model::ModelRegistry,
 ) -> Result<VerificationResult, VerificationError> {
-    // 1. Check epoch matches (allow ±5 tolerance — inference tasks take time to complete)
-    let diff = if proof.epoch >= expected_epoch {
-        proof.epoch - expected_epoch
-    } else {
-        expected_epoch - proof.epoch
-    };
-    if diff > 5 {
-        return Err(VerificationError::EpochMismatch {
-            expected: expected_epoch,
-            got: proof.epoch,
+    // 1. Check proof timestamp freshness (replaces epoch check)
+    if proof.timestamp > now_secs + MAX_FUTURE_SECS {
+        return Err(VerificationError::ProofFromFuture {
+            submitted: proof.timestamp,
+            now: now_secs,
+            tolerance: MAX_FUTURE_SECS,
         });
+    }
+    if now_secs > proof.timestamp {
+        let age = now_secs - proof.timestamp;
+        if age > MAX_PROOF_AGE_SECS {
+            return Err(VerificationError::ProofExpired {
+                submitted: proof.timestamp,
+                now: now_secs,
+                age_secs: age,
+                max_age_secs: MAX_PROOF_AGE_SECS,
+            });
+        }
     }
 
     // 2. Verify model is approved
@@ -125,9 +161,17 @@ mod tests {
     use qfc_inference::{BackendType, ComputeTaskType, InferenceTask, ModelId};
     use qfc_types::Address;
 
+    fn now_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
     #[test]
     fn test_verify_basic_pass() {
         let registry = ModelRegistry::default_v2();
+        let now = now_secs();
         let proof = InferenceProof::new(
             Address::default(),
             1,
@@ -140,20 +184,23 @@ mod tests {
             150,
             1_000_000_000, // 1 GFLOPS — reasonable for embedding
             BackendType::Cpu,
-            1234567890,
+            now,
         );
 
-        let result = verify_basic(&proof, 1, &registry).unwrap();
+        let result = verify_basic(&proof, now, &registry).unwrap();
         assert!(result.passed);
         assert!(!result.spot_checked);
     }
 
     #[test]
-    fn test_verify_basic_wrong_epoch() {
+    fn test_verify_basic_expired_proof() {
         let registry = ModelRegistry::default_v2();
+        let now = now_secs();
+        let old_timestamp = now - 200; // 200 seconds ago, > MAX_PROOF_AGE_SECS (120)
+
         let proof = InferenceProof::new(
             Address::default(),
-            10, // wrong epoch (>5 difference from expected)
+            1,
             ComputeTaskType::Embedding {
                 model_id: ModelId::new("qfc-embed-small", "v1.0"),
                 input_hash: Hash::ZERO,
@@ -163,20 +210,19 @@ mod tests {
             150,
             1_000_000_000,
             BackendType::Cpu,
-            1234567890,
+            old_timestamp,
         );
 
-        // Epoch 10 vs expected 1 → diff > 5 → error
-        let result = verify_basic(&proof, 1, &registry);
+        let result = verify_basic(&proof, now, &registry);
         assert!(matches!(
             result,
-            Err(VerificationError::EpochMismatch { .. })
+            Err(VerificationError::ProofExpired { .. })
         ));
 
-        // Epoch 6 vs expected 1 → diff = 5 → OK (±5 tolerance)
-        let proof_close = InferenceProof::new(
+        // 60 seconds ago — within 120s window — should pass
+        let recent_proof = InferenceProof::new(
             Address::default(),
-            6,
+            1,
             ComputeTaskType::Embedding {
                 model_id: ModelId::new("qfc-embed-small", "v1.0"),
                 input_hash: Hash::ZERO,
@@ -186,15 +232,44 @@ mod tests {
             150,
             1_000_000_000,
             BackendType::Cpu,
-            1234567890,
+            now - 60,
         );
-        let result_close = verify_basic(&proof_close, 1, &registry);
-        assert!(result_close.is_ok());
+        let result_recent = verify_basic(&recent_proof, now, &registry);
+        assert!(result_recent.is_ok());
+    }
+
+    #[test]
+    fn test_verify_basic_future_proof() {
+        let registry = ModelRegistry::default_v2();
+        let now = now_secs();
+        let future_timestamp = now + 30; // 30 seconds in the future, > MAX_FUTURE_SECS (10)
+
+        let proof = InferenceProof::new(
+            Address::default(),
+            1,
+            ComputeTaskType::Embedding {
+                model_id: ModelId::new("qfc-embed-small", "v1.0"),
+                input_hash: Hash::ZERO,
+            },
+            Hash::ZERO,
+            Hash::new([0xab; 32]),
+            150,
+            1_000_000_000,
+            BackendType::Cpu,
+            future_timestamp,
+        );
+
+        let result = verify_basic(&proof, now, &registry);
+        assert!(matches!(
+            result,
+            Err(VerificationError::ProofFromFuture { .. })
+        ));
     }
 
     #[test]
     fn test_verify_basic_unapproved_model() {
         let registry = ModelRegistry::default_v2();
+        let now = now_secs();
         let proof = InferenceProof::new(
             Address::default(),
             1,
@@ -207,15 +282,16 @@ mod tests {
             150,
             1_000_000_000,
             BackendType::Cpu,
-            1234567890,
+            now,
         );
 
-        let result = verify_basic(&proof, 1, &registry);
+        let result = verify_basic(&proof, now, &registry);
         assert!(matches!(result, Err(VerificationError::UnapprovedModel(_))));
     }
 
     #[test]
     fn test_spot_check_determinism() {
+        let now = now_secs();
         // The same proof should always get the same spot-check decision
         let proof = InferenceProof::new(
             Address::default(),
@@ -229,7 +305,7 @@ mod tests {
             150,
             1_000_000_000,
             BackendType::Cpu,
-            1234567890,
+            now,
         );
 
         let decision1 = should_spot_check(&proof);
@@ -262,6 +338,7 @@ mod tests {
 
         // Run inference to get the correct output hash
         let result = engine.run_inference(&task).await.unwrap();
+        let now = now_secs();
 
         // Build a proof with the correct output hash
         let proof = InferenceProof::new(
@@ -276,7 +353,7 @@ mod tests {
             150,
             1_000_000_000,
             BackendType::Cpu,
-            1234567890,
+            now,
         );
 
         // Spot-check should pass
@@ -308,6 +385,8 @@ mod tests {
             1234597890,
         );
 
+        let now = now_secs();
+
         // Build a proof with a TAMPERED output hash
         let proof = InferenceProof::new(
             Address::default(),
@@ -321,7 +400,7 @@ mod tests {
             150,
             1_000_000_000,
             BackendType::Cpu,
-            1234567890,
+            now,
         );
 
         // Spot-check should detect mismatch
