@@ -35,6 +35,9 @@ pub struct HfModelRepo {
     /// Tokenizer repo ID (if different from weights repo, e.g. GGUF models
     /// use a separate repo for the GGUF file but tokenizer comes from the base repo)
     pub tokenizer_repo_id: Option<&'static str>,
+    /// Pinned HuggingFace git revision (commit hash) for reproducible downloads.
+    /// If None, uses the latest version (main branch).
+    pub revision: Option<&'static str>,
 }
 
 /// Get HuggingFace repo info for a QFC model name
@@ -48,6 +51,7 @@ pub fn get_hf_repo(model_name: &str) -> Option<HfModelRepo> {
             config_file: "config.json",
             format: ModelFormat::Safetensors,
             tokenizer_repo_id: None,
+            revision: None,
         }),
         "qfc-embed-medium" => Some(HfModelRepo {
             repo_id: "sentence-transformers/all-MiniLM-L12-v2",
@@ -56,6 +60,7 @@ pub fn get_hf_repo(model_name: &str) -> Option<HfModelRepo> {
             config_file: "config.json",
             format: ModelFormat::Safetensors,
             tokenizer_repo_id: None,
+            revision: None,
         }),
         "qfc-classify-small" => Some(HfModelRepo {
             repo_id: "google-bert/bert-base-uncased",
@@ -64,6 +69,7 @@ pub fn get_hf_repo(model_name: &str) -> Option<HfModelRepo> {
             config_file: "config.json",
             format: ModelFormat::Safetensors,
             tokenizer_repo_id: None,
+            revision: None,
         }),
         "qfc-llm-0.5b" => Some(HfModelRepo {
             repo_id: "Qwen/Qwen2.5-0.5B-Instruct",
@@ -72,6 +78,7 @@ pub fn get_hf_repo(model_name: &str) -> Option<HfModelRepo> {
             config_file: "config.json",
             format: ModelFormat::Safetensors,
             tokenizer_repo_id: None,
+            revision: None,
         }),
         "qfc-llm-3b" => Some(HfModelRepo {
             repo_id: "Qwen/Qwen2.5-3B-Instruct-GGUF",
@@ -80,6 +87,7 @@ pub fn get_hf_repo(model_name: &str) -> Option<HfModelRepo> {
             config_file: "config.json",
             format: ModelFormat::Gguf,
             tokenizer_repo_id: Some("Qwen/Qwen2.5-3B-Instruct"),
+            revision: None,
         }),
         "qfc-llm-7b" => Some(HfModelRepo {
             repo_id: "Qwen/Qwen2.5-7B-Instruct-GGUF",
@@ -88,6 +96,7 @@ pub fn get_hf_repo(model_name: &str) -> Option<HfModelRepo> {
             config_file: "config.json",
             format: ModelFormat::Gguf,
             tokenizer_repo_id: Some("Qwen/Qwen2.5-7B-Instruct"),
+            revision: None,
         }),
         _ => None,
     }
@@ -173,7 +182,17 @@ pub fn download_model(model_name: &str) -> Result<DownloadedModel, InferenceErro
         InferenceError::ExecutionFailed(format!("Failed to create HuggingFace API client: {}", e))
     })?;
 
-    let repo = api.model(repo_info.repo_id.to_string());
+    // Pin to specific revision if available (ensures reproducible downloads)
+    let repo = if let Some(rev) = repo_info.revision {
+        tracing::info!("Pinning to HuggingFace revision: {}", rev);
+        api.repo(hf_hub::Repo::with_revision(
+            repo_info.repo_id.to_string(),
+            hf_hub::RepoType::Model,
+            rev.to_string(),
+        ))
+    } else {
+        api.model(repo_info.repo_id.to_string())
+    };
 
     // Cache dir for curl fallback
     let cache_dir = std::env::var("HOME")
@@ -209,4 +228,38 @@ pub fn download_model(model_name: &str) -> Result<DownloadedModel, InferenceErro
         tokenizer_path,
         config_path,
     })
+}
+
+/// Verify that a downloaded weight file matches the expected Blake3 hash.
+///
+/// Returns Ok(computed_hash) if the hash matches or no expected hash is provided.
+/// Returns Err if the hash doesn't match (possible supply-chain attack or version mismatch).
+#[cfg(feature = "candle")]
+pub fn verify_weights_hash(
+    weights_path: &std::path::Path,
+    expected_hash: Option<qfc_types::Hash>,
+) -> Result<qfc_types::Hash, InferenceError> {
+    let data = std::fs::read(weights_path).map_err(|e| {
+        InferenceError::ExecutionFailed(format!("Failed to read weights file: {}", e))
+    })?;
+
+    let computed = qfc_crypto::blake3_hash(&data);
+
+    if let Some(expected) = expected_hash {
+        if computed != expected {
+            return Err(InferenceError::ExecutionFailed(format!(
+                "Weight hash mismatch for {:?}: expected {}, got {}. \
+                 This may indicate a corrupted download or tampered model weights.",
+                weights_path, expected, computed
+            )));
+        }
+        tracing::info!("Weight hash verified: {}", computed);
+    } else {
+        tracing::warn!(
+            "No expected weight hash configured — skipping verification (hash: {})",
+            computed
+        );
+    }
+
+    Ok(computed)
 }
