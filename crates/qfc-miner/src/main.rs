@@ -26,8 +26,41 @@ async fn main() -> anyhow::Result<()> {
 
     info!("QFC AI Inference Miner v{}", env!("CARGO_PKG_VERSION"));
 
+    // Generate wallet mode
+    if cli.generate_wallet {
+        let keypair = qfc_crypto::Keypair::generate();
+        let address = qfc_crypto::address_from_keypair(&keypair);
+        let secret = keypair.secret_bytes();
+        println!("=== New QFC Miner Wallet (Ed25519) ===");
+        println!("Address:     0x{}", hex::encode(address.as_bytes()));
+        println!("Private Key: 0x{}", hex::encode(secret));
+        println!();
+        println!("Save these! Then fund the address with test QFC:");
+        println!("  curl https://faucet.testnet.qfc.network/api/faucet -X POST \\");
+        println!(
+            "    -H 'Content-Type: application/json' \\",
+        );
+        println!(
+            "    -d '{{\"address\":\"0x{}\"}}'",
+            hex::encode(address.as_bytes())
+        );
+        println!();
+        println!("Start mining with:");
+        println!(
+            "  qfc-miner --wallet 0x{} --private-key 0x{} --backend metal",
+            hex::encode(address.as_bytes()),
+            hex::encode(secret)
+        );
+        return Ok(());
+    }
+
     // Detect hardware
     let hw = gpu::detect_and_log();
+
+    // Validate required args
+    if cli.wallet.is_empty() || cli.private_key.is_empty() {
+        anyhow::bail!("--wallet and --private-key are required. Use --generate-wallet to create a new wallet.");
+    }
 
     // Parse wallet address
     let wallet_hex = cli.wallet.strip_prefix("0x").unwrap_or(&cli.wallet);

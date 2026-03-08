@@ -13,8 +13,8 @@ pub struct MinerCli {
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     pub validator_rpc: String,
 
-    /// Miner wallet address (hex)
-    #[arg(long)]
+    /// Miner wallet address (hex, required unless --generate-wallet)
+    #[arg(long, default_value = "")]
     pub wallet: String,
 
     /// Inference backend: auto, cuda, metal, cpu
@@ -29,8 +29,8 @@ pub struct MinerCli {
     #[arg(long, default_value = "0")]
     pub max_memory: u64,
 
-    /// Miner private key (hex, must match --wallet address)
-    #[arg(long)]
+    /// Miner private key (hex, must match --wallet address, required unless --generate-wallet)
+    #[arg(long, default_value = "")]
     pub private_key: String,
 
     /// Comma-separated list of models to keep hot in VRAM
@@ -48,6 +48,10 @@ pub struct MinerCli {
     /// Enable verbose logging
     #[arg(short, long)]
     pub verbose: bool,
+
+    /// Generate a new Ed25519 miner wallet and exit
+    #[arg(long)]
+    pub generate_wallet: bool,
 }
 
 impl MinerCli {
