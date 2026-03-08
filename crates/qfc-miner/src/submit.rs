@@ -216,6 +216,7 @@ pub async fn submit_proof(
 #[serde(rename_all = "camelCase")]
 struct RegisterMinerReq {
     miner_address: String,
+    public_key: String,
     gpu_model: String,
     vram_mb: u64,
     benchmark_score: u32,
@@ -248,6 +249,7 @@ pub async fn register_miner(
 
     let req = RegisterMinerReq {
         miner_address: miner_address.to_string(),
+        public_key: hex::encode(keypair.public_key().as_bytes()),
         gpu_model: gpu_model.to_string(),
         vram_mb,
         benchmark_score,
