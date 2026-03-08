@@ -2730,6 +2730,15 @@ impl QfcApiServer for RpcServer {
                 audio_hash: qfc_types::Hash::ZERO,
                 language: String::new(),
             },
+            "ImageGeneration" => ComputeTaskType::ImageGeneration {
+                model_id,
+                prompt_hash: qfc_types::Hash::ZERO,
+                negative_prompt_hash: qfc_types::Hash::ZERO,
+                width: 512,
+                height: 512,
+                steps: 20,
+                seed: 0,
+            },
             "OnnxInference" => ComputeTaskType::OnnxInference {
                 model_hash: qfc_types::Hash::ZERO,
                 input_hash: qfc_types::Hash::ZERO,

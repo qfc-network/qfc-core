@@ -126,6 +126,16 @@ pub fn get_hf_repo(model_name: &str) -> Option<HfModelRepo> {
             revision: None,
             extra_files: &["mel_filters.npz"],
         }),
+        "qfc-sd-1.5" => Some(HfModelRepo {
+            repo_id: "stable-diffusion-v1-5/stable-diffusion-v1-5",
+            weights_file: "unet/diffusion_pytorch_model.safetensors",
+            tokenizer_file: "tokenizer/tokenizer.json",
+            config_file: "unet/config.json",
+            format: ModelFormat::Safetensors,
+            tokenizer_repo_id: None,
+            revision: None,
+            extra_files: &[],
+        }),
         _ => None,
     }
 }

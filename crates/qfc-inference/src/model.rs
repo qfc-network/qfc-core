@@ -340,6 +340,18 @@ impl ModelRegistry {
                 canonical_format: CanonicalFormat::SafetensorsFp32,
                 weights_hash: None,
             },
+            ModelInfo {
+                id: ModelId::new("qfc-sd-1.5", "v1.0"),
+                description:
+                    "Stable Diffusion 1.5 image generation model (~4GB, Warm tier, GPU required)"
+                        .to_string(),
+                min_memory_mb: 6144,
+                min_tier: GpuTier::Warm,
+                size_mb: 4000,
+                approved: true,
+                canonical_format: CanonicalFormat::SafetensorsFp32,
+                weights_hash: None,
+            },
         ];
 
         Self { models }
@@ -461,17 +473,17 @@ mod tests {
         let unknown = ModelId::new("unknown-model", "v1.0");
         assert!(!registry.is_approved(&unknown));
 
-        // Cold tier can run small/medium embedding + Qwen 0.5B + Whisper base
+        // Cold tier: embed-small, embed-medium, llm-0.5b, whisper-base
         let cold_models = registry.models_for_tier(GpuTier::Cold);
         assert_eq!(cold_models.len(), 4);
 
-        // Warm tier can run Cold models + 3B
+        // Warm tier: Cold + classify-small, llm-3b, whisper-large, sd-1.5
         let warm_models = registry.models_for_tier(GpuTier::Warm);
-        assert_eq!(warm_models.len(), 5);
+        assert_eq!(warm_models.len(), 8);
 
-        // Hot tier can run all models
+        // Hot tier: all models (Warm + llm-7b)
         let hot_models = registry.models_for_tier(GpuTier::Hot);
-        assert_eq!(hot_models.len(), 6);
+        assert_eq!(hot_models.len(), 9);
     }
 
     #[test]

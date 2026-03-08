@@ -355,6 +355,10 @@ fn estimate_flops(task_type: &ComputeTaskType, _elapsed_ms: u64) -> u64 {
                 4_000_000_000u64
             }
         }
+        ComputeTaskType::ImageGeneration { steps, .. } => {
+            // ~2 GFLOPS per step for SD 1.5 U-Net + text encoder + VAE
+            2_000_000_000u64 * (*steps as u64) + 5_000_000_000u64
+        }
         ComputeTaskType::OnnxInference { .. } => 2_000_000_000u64,
     }
 }

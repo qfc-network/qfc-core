@@ -76,6 +76,18 @@ pub fn task_requirements(task_type: &ComputeTaskType) -> TaskRequirements {
                 timeout_ms: 120_000, // 2 minutes for audio processing
             }
         }
+        ComputeTaskType::ImageGeneration {
+            model_id, steps, ..
+        } => {
+            let estimated_flops = 2_000_000_000u64 * (*steps as u64) + 5_000_000_000;
+            TaskRequirements {
+                min_tier: GpuTier::Warm, // SD requires GPU for reasonable speed
+                min_memory_mb: 6_000,
+                model_id: Some(model_id.clone()),
+                estimated_flops,
+                timeout_ms: 300_000, // 5 minutes for image generation
+            }
+        }
         ComputeTaskType::OnnxInference { .. } => TaskRequirements {
             min_tier: GpuTier::Cold,
             min_memory_mb: 1024,
@@ -144,6 +156,10 @@ pub fn estimate_base_fee(task_type: &ComputeTaskType) -> u128 {
     // Task type multiplier (audio/image processing costs more)
     if matches!(task_type, ComputeTaskType::SpeechToText { .. }) {
         fee *= 2; // 2x for speech-to-text per design doc
+    }
+    // Task type multiplier (image generation is compute-intensive)
+    if matches!(task_type, ComputeTaskType::ImageGeneration { .. }) {
+        fee *= 5; // 5x for image generation per design doc
     }
 
     // Minimum fee: 0.0001 QFC
