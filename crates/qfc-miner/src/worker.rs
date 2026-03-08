@@ -191,6 +191,15 @@ impl InferenceWorker {
                 .unwrap_or_default()
                 .as_secs();
 
+            // Determine canonical format from model registry
+            let canonical_format = task
+                .task_type
+                .model_id()
+                .and_then(|mid| {
+                    qfc_inference::model::ModelRegistry::default_v2().canonical_format(mid)
+                })
+                .unwrap_or(qfc_inference::CanonicalFormat::SafetensorsFp32);
+
             let mut proof = InferenceProof::new(
                 self.config.wallet_address,
                 task_response.epoch,
@@ -200,6 +209,7 @@ impl InferenceWorker {
                 result.execution_time_ms,
                 result.flops_estimated,
                 self.engine.backend_type(),
+                canonical_format,
                 now,
             );
 
