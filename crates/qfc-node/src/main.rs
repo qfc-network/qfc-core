@@ -33,15 +33,15 @@ use tracing_subscriber::FmtSubscriber;
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Data directory
-    #[arg(short, long, default_value = "./data")]
+    #[arg(short, long, default_value = "./data", env = "QFC_DATA_DIR")]
     datadir: PathBuf,
 
     /// Chain ID
-    #[arg(long, default_value_t = DEFAULT_CHAIN_ID)]
+    #[arg(long, default_value_t = DEFAULT_CHAIN_ID, env = "QFC_CHAIN_ID")]
     chain_id: u64,
 
     /// RPC HTTP listen address
-    #[arg(long, default_value = "127.0.0.1:8545")]
+    #[arg(long, default_value = "127.0.0.1:8545", env = "QFC_RPC_ADDR")]
     rpc_addr: SocketAddr,
 
     /// Enable RPC
@@ -49,51 +49,51 @@ struct Args {
     rpc: bool,
 
     /// Run in development mode
-    #[arg(long)]
+    #[arg(long, env = "QFC_DEV_MODE")]
     dev: bool,
 
     /// Validator mode (provide secret key hex)
-    #[arg(long)]
+    #[arg(long, env = "QFC_VALIDATOR_KEY")]
     validator: Option<String>,
 
     /// Log level
-    #[arg(long, default_value = "info")]
+    #[arg(long, default_value = "info", env = "QFC_LOG_LEVEL")]
     log_level: String,
 
     /// P2P listen port
-    #[arg(long, default_value_t = 30303)]
+    #[arg(long, default_value_t = 30303, env = "QFC_P2P_PORT")]
     p2p_port: u16,
 
     /// Disable P2P networking
-    #[arg(long)]
+    #[arg(long, env = "QFC_NO_NETWORK")]
     no_network: bool,
 
-    /// Bootnode addresses (multiaddr format)
-    #[arg(long)]
+    /// Bootnode addresses (multiaddr format, comma-separated via env)
+    #[arg(long, env = "QFC_BOOTNODES", value_delimiter = ',')]
     bootnodes: Vec<String>,
 
     /// Enable mining for compute contribution (20% weight in PoC)
-    #[arg(long)]
+    #[arg(long, env = "QFC_MINING_ENABLED")]
     mine: bool,
 
     /// Number of mining threads (default: number of CPUs)
-    #[arg(long)]
+    #[arg(long, env = "QFC_MINING_THREADS")]
     threads: Option<usize>,
 
     /// Compute mode: pow (v1 Blake3 PoW) or inference (v2 AI inference)
-    #[arg(long, default_value = "pow")]
+    #[arg(long, default_value = "pow", env = "QFC_COMPUTE_MODE")]
     compute_mode: String,
 
     /// Inference backend: auto, cuda, metal, cpu (for inference mode)
-    #[arg(long, default_value = "auto")]
+    #[arg(long, default_value = "auto", env = "QFC_INFERENCE_BACKEND")]
     inference_backend: String,
 
     /// Model cache directory (for inference mode)
-    #[arg(long)]
+    #[arg(long, env = "QFC_MODEL_DIR")]
     model_dir: Option<PathBuf>,
 
     /// Prometheus metrics listen address
-    #[arg(long, default_value = "0.0.0.0:6060")]
+    #[arg(long, default_value = "0.0.0.0:6060", env = "QFC_METRICS_ADDR")]
     metrics_addr: SocketAddr,
 
     /// IPFS Kubo API URL for large inference result storage (optional)
