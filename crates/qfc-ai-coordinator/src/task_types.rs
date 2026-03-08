@@ -36,8 +36,10 @@ pub fn task_requirements(task_type: &ComputeTaskType) -> TaskRequirements {
                 estimated_flops: 2 * params * (*max_tokens as u64),
                 timeout_ms: if params < 1_000_000_000 {
                     60_000
-                } else {
+                } else if params <= 3_000_000_000 {
                     120_000
+                } else {
+                    180_000
                 },
             }
         }
@@ -55,6 +57,37 @@ pub fn task_requirements(task_type: &ComputeTaskType) -> TaskRequirements {
             estimated_flops: 1_000_000_000,
             timeout_ms: 10_000,
         },
+        ComputeTaskType::SpeechToText { model_id, .. } => {
+            let (tier, memory) = if model_id.name.contains("large") {
+                (GpuTier::Warm, 3_072)
+            } else {
+                (GpuTier::Cold, 512)
+            };
+            let estimated_flops = if model_id.name.contains("large") {
+                30_000_000_000
+            } else {
+                4_000_000_000
+            };
+            TaskRequirements {
+                min_tier: tier,
+                min_memory_mb: memory,
+                model_id: Some(model_id.clone()),
+                estimated_flops,
+                timeout_ms: 120_000, // 2 minutes for audio processing
+            }
+        }
+        ComputeTaskType::ImageGeneration {
+            model_id, steps, ..
+        } => {
+            let estimated_flops = 2_000_000_000u64 * (*steps as u64) + 5_000_000_000;
+            TaskRequirements {
+                min_tier: GpuTier::Warm, // SD requires GPU for reasonable speed
+                min_memory_mb: 6_000,
+                model_id: Some(model_id.clone()),
+                estimated_flops,
+                timeout_ms: 300_000, // 5 minutes for image generation
+            }
+        }
         ComputeTaskType::OnnxInference { .. } => TaskRequirements {
             min_tier: GpuTier::Cold,
             min_memory_mb: 1024,
@@ -74,7 +107,7 @@ fn model_tier_and_memory(model_name: &str) -> (GpuTier, u64) {
     } else if model_name.contains("7b") || model_name.contains("7B") {
         (GpuTier::Warm, 6_000)
     } else if model_name.contains("3b") || model_name.contains("3B") {
-        (GpuTier::Cold, 3_000)
+        (GpuTier::Warm, 4_096)
     } else if model_name.contains("0.5b") || model_name.contains("0.5B") {
         (GpuTier::Cold, 1_024)
     } else {
@@ -114,11 +147,20 @@ pub fn estimate_base_fee(task_type: &ComputeTaskType) -> u128 {
     let base = gflops as u128 * 1_000_000_000_000u128;
 
     // Tier multiplier
-    let fee = match reqs.min_tier {
+    let mut fee = match reqs.min_tier {
         GpuTier::Hot => base * 2,
         GpuTier::Warm => base * 3 / 2,
         GpuTier::Cold => base,
     };
+
+    // Task type multiplier (audio/image processing costs more)
+    if matches!(task_type, ComputeTaskType::SpeechToText { .. }) {
+        fee *= 2; // 2x for speech-to-text per design doc
+    }
+    // Task type multiplier (image generation is compute-intensive)
+    if matches!(task_type, ComputeTaskType::ImageGeneration { .. }) {
+        fee *= 5; // 5x for image generation per design doc
+    }
 
     // Minimum fee: 0.0001 QFC
     fee.max(100_000_000_000_000u128)

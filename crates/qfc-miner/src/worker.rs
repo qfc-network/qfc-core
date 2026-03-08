@@ -14,6 +14,7 @@ use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
 use crate::config::MinerConfig;
+use crate::dashboard::tui::SharedStats;
 use crate::submit::{self, InferenceTaskResponse};
 
 /// Inference worker that fetches tasks and submits proofs
@@ -22,6 +23,7 @@ pub struct InferenceWorker {
     engine: Box<dyn InferenceEngine>,
     scheduler: ModelScheduler,
     stop_flag: Arc<AtomicBool>,
+    stats: SharedStats,
 }
 
 impl InferenceWorker {
@@ -29,12 +31,14 @@ impl InferenceWorker {
         config: MinerConfig,
         engine: Box<dyn InferenceEngine>,
         scheduler: ModelScheduler,
+        stats: SharedStats,
     ) -> Self {
         Self {
             config,
             engine,
             scheduler,
             stop_flag: Arc::new(AtomicBool::new(false)),
+            stats,
         }
     }
 
@@ -53,6 +57,13 @@ impl InferenceWorker {
         let mut tasks_completed: u64 = 0;
         let mut tasks_failed: u64 = 0;
         let mut total_earnings_wei: u128 = 0;
+        let mut total_flops: u64 = 0;
+        let _session_earnings_wei: u128 = 0;
+
+        // Update dashboard status
+        if let Ok(mut s) = self.stats.lock() {
+            s.status = "Waiting for tasks...".to_string();
+        }
 
         loop {
             tokio::select! {
@@ -81,6 +92,15 @@ impl InferenceWorker {
                     continue;
                 }
             };
+
+            // Update dashboard status
+            if let Ok(mut s) = self.stats.lock() {
+                s.status = format!(
+                    "Processing task {} ({})",
+                    &task_response.task_id[..8.min(task_response.task_id.len())],
+                    task_response.model_name
+                );
+            }
 
             info!(
                 "Received task {} (epoch {}, model: {})",
@@ -178,10 +198,14 @@ impl InferenceWorker {
                 }
             };
 
+            let task_flops = result.flops_estimated;
+            let task_duration_ms = result.execution_time_ms;
+            total_flops += task_flops;
+
             info!(
                 "Inference complete: {} ms, {} FLOPS, output hash: {}",
-                result.execution_time_ms,
-                result.flops_estimated,
+                task_duration_ms,
+                task_flops,
                 hex::encode(&result.output_hash.as_bytes()[..8])
             );
 
@@ -190,6 +214,15 @@ impl InferenceWorker {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
+
+            // Determine canonical format from model registry
+            let canonical_format = task
+                .task_type
+                .model_id()
+                .and_then(|mid| {
+                    qfc_inference::model::ModelRegistry::default_v2().canonical_format(mid)
+                })
+                .unwrap_or(qfc_inference::CanonicalFormat::SafetensorsFp32);
 
             let mut proof = InferenceProof::new(
                 self.config.wallet_address,
@@ -200,6 +233,7 @@ impl InferenceWorker {
                 result.execution_time_ms,
                 result.flops_estimated,
                 self.engine.backend_type(),
+                canonical_format,
                 now,
             );
 
@@ -213,6 +247,9 @@ impl InferenceWorker {
             // 6. Submit proof to validator
             let rpc_url = &self.config.validator_rpc;
             let miner_addr = hex::encode(self.config.wallet_address.as_bytes());
+            let task_type_name = task_response.task_type.clone();
+            let model_name = task_response.model_name.clone();
+
             match submit::submit_proof(rpc_url, &miner_addr, &proof).await {
                 Ok(result) => {
                     tasks_completed += 1;
@@ -253,13 +290,54 @@ impl InferenceWorker {
                             info!("║  🔍 Spot-check: PASSED                              ║");
                         }
                         info!("╚══════════════════════════════════════════════════════╝");
+
+                        // Update dashboard stats
+                        if let Ok(mut s) = self.stats.lock() {
+                            s.tasks_completed = tasks_completed;
+                            s.tasks_failed = tasks_failed;
+                            s.total_flops = total_flops;
+                            s.status = "Waiting for tasks...".to_string();
+
+                            // Add task log entry
+                            let now = chrono_now_hms();
+                            let reward_str = "accepted".to_string();
+                            s.task_log.insert(
+                                0,
+                                crate::dashboard::tui::TaskLogEntry {
+                                    timestamp: now,
+                                    task_type: task_type_name,
+                                    model: model_name,
+                                    duration_ms: task_duration_ms,
+                                    reward_qfc: reward_str,
+                                    accepted: true,
+                                },
+                            );
+                            if s.task_log.len() > 20 {
+                                s.task_log.truncate(20);
+                            }
+
+                            // Add to earning sparkline (micro-QFC units)
+                            // For now use FLOPS as proxy since reward_estimate
+                            // may not be present on staging
+                            s.earning_history.push((task_flops / 1_000_000).max(1));
+                            if s.earning_history.len() > 60 {
+                                s.earning_history.remove(0);
+                            }
+                        }
                     } else {
                         warn!("Proof rejected: {}", result.message);
+                        if let Ok(mut s) = self.stats.lock() {
+                            s.status = format!("Proof rejected: {}", result.message);
+                        }
                     }
                 }
                 Err(e) => {
                     error!("Failed to submit proof: {}", e);
                     tasks_failed += 1;
+                    if let Ok(mut s) = self.stats.lock() {
+                        s.tasks_failed = tasks_failed;
+                        s.status = format!("Submit failed: {}", e);
+                    }
                 }
             }
         }
@@ -310,6 +388,20 @@ impl InferenceWorker {
                 prompt_hash: input_hash,
                 max_tokens: 128,
                 temperature_fp: 0,
+                seed: resp.epoch,
+            },
+            "speech_to_text" => ComputeTaskType::SpeechToText {
+                model_id,
+                audio_hash: input_hash,
+                language: resp.language.clone().unwrap_or_default(),
+            },
+            "image_generation" => ComputeTaskType::ImageGeneration {
+                model_id,
+                prompt_hash: input_hash,
+                negative_prompt_hash: qfc_types::Hash::ZERO,
+                width: 512,
+                height: 512,
+                steps: 20,
                 seed: resp.epoch,
             },
             other => return Err(format!("Unknown task type: {}", other)),
@@ -377,4 +469,16 @@ fn format_wei_as_qfc(wei: u128) -> String {
     let whole = wei / 1_000_000_000_000_000_000;
     let frac = wei % 1_000_000_000_000_000_000;
     format!("{}.{:06}", whole, frac / 1_000_000_000_000)
+}
+
+/// Get current time as HH:MM:SS string
+fn chrono_now_hms() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let h = (secs % 86400) / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    format!("{:02}:{:02}:{:02}", h, m, s)
 }

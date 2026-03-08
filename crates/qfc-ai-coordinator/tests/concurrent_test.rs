@@ -51,6 +51,7 @@ fn make_proof(miner: Address, epoch: u64, flops: u64, output_byte: u8) -> Infere
         100,
         flops,
         BackendType::Cpu,
+        qfc_inference::CanonicalFormat::SafetensorsFp32,
         now_ms() / 1000,
     )
 }
@@ -547,6 +548,7 @@ async fn test_concurrent_spot_check_verification() {
         100,
         1_000_000_000,
         BackendType::Cpu,
+        qfc_inference::CanonicalFormat::SafetensorsFp32,
         now_ms() / 1000,
     );
 

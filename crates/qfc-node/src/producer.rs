@@ -225,7 +225,41 @@ impl BlockProducer {
         // Settle inference fees for proofs matched to public tasks (v2.0)
         self.settle_inference_fees(&inference_proofs, &our_address);
 
-        // Commit state to get new state root
+        // Calculate fees from receipts (needed for reward distribution)
+        let total_fees = self.calculate_total_fees(&transactions, &receipts);
+
+        // Get voters for reward distribution (empty for newly produced block)
+        let voters = self.get_block_voters(&qfc_types::Hash::ZERO);
+
+        // Distribute ALL rewards BEFORE committing state so they are included
+        // in the block's state root. Previously rewards were distributed after
+        // commit, causing miner/voter/producer rewards to be lost.
+        let block_number = parent_block.number() + 1;
+        match self.distribute_rewards(
+            block_number,
+            &our_address,
+            total_fees,
+            &voters,
+            &inference_proofs,
+        ) {
+            Ok(distribution) => {
+                debug!(
+                    "Pre-commit rewards for block #{}: producer={}, voters={}, burned={}",
+                    block_number,
+                    distribution.producer_reward,
+                    distribution.voter_reward,
+                    distribution.fee_burned
+                );
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to distribute rewards for block #{}: {}",
+                    block_number, e
+                );
+            }
+        }
+
+        // Commit state to get new state root (now includes all rewards)
         let state_root = state.commit()?;
 
         // Produce the block
@@ -273,40 +307,6 @@ impl BlockProducer {
         for tx in &transactions {
             let tx_hash = blake3_hash(&tx.to_bytes_without_signature());
             self.mempool.write().remove(&tx_hash);
-        }
-
-        // Calculate total fees from receipts
-        let total_fees = self.calculate_total_fees(&transactions, &receipts);
-
-        // Get voters for this block (for reward distribution)
-        let voters = self.get_block_voters(&block_hash);
-
-        // Distribute rewards (including inference miner rewards)
-        // Note: inference_proofs were moved into produce_block, so we collect
-        // miner addresses and FLOPS from the block's stored proofs
-        let block_proofs: Vec<InferenceProof> = block.inference_proofs.clone();
-        match self.distribute_rewards(
-            block_number,
-            &our_address,
-            total_fees,
-            &voters,
-            &block_proofs,
-        ) {
-            Ok(distribution) => {
-                debug!(
-                    "Distributed rewards for block #{}: producer={}, voters={}, burned={}",
-                    block_number,
-                    distribution.producer_reward,
-                    distribution.voter_reward,
-                    distribution.fee_burned
-                );
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to distribute rewards for block #{}: {}",
-                    block_number, e
-                );
-            }
         }
 
         info!(
@@ -470,7 +470,7 @@ impl BlockProducer {
 
         // Distribute to inference miners proportional to FLOPS, or redistribute if none
         let miner_reward = if !inference_proofs.is_empty() {
-            self.distribute_miner_rewards(&miner_pool, inference_proofs)?
+            self.distribute_miner_rewards(&miner_pool, inference_proofs, block_height, now)?
         } else {
             U256::ZERO
         };
@@ -582,6 +582,8 @@ impl BlockProducer {
         &self,
         total_reward: &U256,
         proofs: &[InferenceProof],
+        block_height: u64,
+        timestamp: u64,
     ) -> anyhow::Result<U256> {
         if proofs.is_empty() || total_reward.is_zero() {
             return Ok(U256::ZERO);
@@ -595,21 +597,42 @@ impl BlockProducer {
 
         let mut distributed = U256::ZERO;
 
-        // Aggregate FLOPS per miner (a miner may have multiple proofs)
+        // Aggregate FLOPS and task count per miner (a miner may have multiple proofs)
         let mut miner_flops: std::collections::HashMap<qfc_types::Address, u64> =
+            std::collections::HashMap::new();
+        let mut miner_task_count: std::collections::HashMap<qfc_types::Address, u32> =
             std::collections::HashMap::new();
         for proof in proofs {
             *miner_flops.entry(proof.validator).or_default() += proof.flops_estimated;
+            *miner_task_count.entry(proof.validator).or_default() += 1;
         }
+
+        let db = self.chain.db();
 
         for (miner, flops) in &miner_flops {
             let reward = *total_reward * U256::from_u64(*flops) / U256::from_u64(total_flops);
             if !reward.is_zero() {
                 state.add_balance(miner, reward)?;
                 distributed = distributed + reward;
+
+                // Store per-miner earning record
+                let task_count = miner_task_count.get(miner).copied().unwrap_or(1);
+                let earning = qfc_types::MinerEarning::new(
+                    *miner,
+                    block_height,
+                    reward,
+                    *flops,
+                    task_count,
+                    timestamp,
+                );
+                let key = qfc_types::encode_miner_earning_key(miner, block_height);
+                if let Err(e) = db.put(qfc_storage::cf::MINER_EARNINGS, &key, &earning.to_bytes()) {
+                    tracing::warn!("Failed to store miner earning record: {}", e);
+                }
+
                 debug!(
-                    "Miner {} inference reward: {} ({} FLOPS / {} total)",
-                    miner, reward, flops, total_flops
+                    "Miner {} inference reward: {} ({} FLOPS / {} total, {} tasks)",
+                    miner, reward, flops, total_flops, task_count
                 );
             }
         }

@@ -710,6 +710,71 @@ impl RewardDistribution {
     }
 }
 
+// ============ Miner Earnings Ledger ============
+
+/// Per-miner earning record for a single block
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+pub struct MinerEarning {
+    /// Miner address
+    pub miner: Address,
+    /// Block height where reward was earned
+    pub block_height: u64,
+    /// Reward amount in wei
+    pub reward: U256,
+    /// FLOPS contributed in this block
+    pub flops: u64,
+    /// Number of tasks completed in this block
+    pub task_count: u32,
+    /// Timestamp of the block
+    pub timestamp: u64,
+}
+
+impl MinerEarning {
+    pub fn new(
+        miner: Address,
+        block_height: u64,
+        reward: U256,
+        flops: u64,
+        task_count: u32,
+        timestamp: u64,
+    ) -> Self {
+        Self {
+            miner,
+            block_height,
+            reward,
+            flops,
+            task_count,
+            timestamp,
+        }
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        borsh::to_vec(self).expect("serialization should not fail")
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, borsh::io::Error> {
+        borsh::from_slice(bytes)
+    }
+}
+
+/// Encode a miner earnings key: miner_address (20 bytes) + block_height (u64 BE)
+pub fn encode_miner_earning_key(miner: &Address, block_height: u64) -> [u8; 28] {
+    let mut key = [0u8; 28];
+    key[0..20].copy_from_slice(miner.as_bytes());
+    key[20..28].copy_from_slice(&block_height.to_be_bytes());
+    key
+}
+
+/// Decode a miner earnings key
+pub fn decode_miner_earning_key(bytes: &[u8]) -> Option<(Address, u64)> {
+    if bytes.len() != 28 {
+        return None;
+    }
+    let address = Address::from_slice(&bytes[0..20])?;
+    let height = u64::from_be_bytes(bytes[20..28].try_into().ok()?);
+    Some((address, height))
+}
+
 // ============ Delegation System ============
 
 /// Delegation record: a delegator's stake in a validator
@@ -1093,5 +1158,44 @@ mod tests {
         assert_eq!(slashing.offense, SlashableOffense::DoubleSign);
         assert_eq!(slashing.block_height, evidence.height);
         assert_eq!(slashing.reporter, reporter);
+    }
+
+    #[test]
+    fn test_miner_earning_serialization() {
+        let miner = Address::from_slice(&[1u8; 20]).unwrap();
+        let earning = MinerEarning::new(
+            miner,
+            42,
+            U256::from_u64(1_000_000_000_000_000_000), // 1 QFC
+            50_000_000,
+            3,
+            1700000000000,
+        );
+        let bytes = earning.to_bytes();
+        let decoded = MinerEarning::from_bytes(&bytes).unwrap();
+        assert_eq!(earning, decoded);
+    }
+
+    #[test]
+    fn test_miner_earning_key_encoding() {
+        let miner = Address::from_slice(&[0xAB; 20]).unwrap();
+        let key = encode_miner_earning_key(&miner, 12345);
+        let (decoded_addr, decoded_height) = decode_miner_earning_key(&key).unwrap();
+        assert_eq!(decoded_addr, miner);
+        assert_eq!(decoded_height, 12345);
+    }
+
+    #[test]
+    fn test_miner_earning_key_ordering() {
+        let miner = Address::from_slice(&[1u8; 20]).unwrap();
+        let key1 = encode_miner_earning_key(&miner, 100);
+        let key2 = encode_miner_earning_key(&miner, 200);
+        // Same miner, higher block should sort after
+        assert!(key1 < key2);
+
+        // Different miner should have different prefix
+        let miner2 = Address::from_slice(&[2u8; 20]).unwrap();
+        let key3 = encode_miner_earning_key(&miner2, 100);
+        assert_ne!(&key1[0..20], &key3[0..20]);
     }
 }

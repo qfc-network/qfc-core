@@ -4,6 +4,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use qfc_types::{Address, Hash, Signature};
 use serde::{Deserialize, Serialize};
 
+use crate::model::CanonicalFormat;
 use crate::runtime::BackendType;
 use crate::task::ComputeTaskType;
 
@@ -52,6 +53,10 @@ pub struct InferenceProof {
     pub flops_estimated: u64,
     /// Backend used (CUDA / Metal / CPU)
     pub backend: BackendType,
+    /// Canonical model format used for this inference.
+    /// Must match the registry's canonical_format for the model.
+    /// This ensures all nodes produce identical output for verification.
+    pub canonical_format: CanonicalFormat,
     /// Timestamp
     pub timestamp: u64,
     /// Signature over the proof
@@ -69,6 +74,7 @@ impl InferenceProof {
         execution_time_ms: u64,
         flops_estimated: u64,
         backend: BackendType,
+        canonical_format: CanonicalFormat,
         timestamp: u64,
     ) -> Self {
         Self {
@@ -80,6 +86,7 @@ impl InferenceProof {
             execution_time_ms,
             flops_estimated,
             backend,
+            canonical_format,
             timestamp,
             signature: Signature::default(),
         }
@@ -101,6 +108,7 @@ impl InferenceProof {
             execution_time_ms: self.execution_time_ms,
             flops_estimated: self.flops_estimated,
             backend: self.backend,
+            canonical_format: self.canonical_format,
             timestamp: self.timestamp,
         };
         borsh::to_vec(&unsigned).expect("InferenceProof serialization should not fail")
@@ -127,6 +135,7 @@ struct UnsignedInferenceProof {
     pub execution_time_ms: u64,
     pub flops_estimated: u64,
     pub backend: BackendType,
+    pub canonical_format: CanonicalFormat,
     pub timestamp: u64,
 }
 
@@ -178,6 +187,7 @@ mod tests {
             150,
             5000,
             BackendType::Cpu,
+            CanonicalFormat::SafetensorsFp32,
             1234567890,
         );
 
@@ -200,6 +210,7 @@ mod tests {
             150,
             5000,
             BackendType::Cpu,
+            CanonicalFormat::SafetensorsFp32,
             1234567890,
         );
 
@@ -227,6 +238,7 @@ mod tests {
             150,
             5000,
             BackendType::Cpu,
+            CanonicalFormat::SafetensorsFp32,
             1234567890,
         );
         let compute = ComputeProof::InferenceV2(inf_proof);

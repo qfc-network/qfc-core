@@ -51,6 +51,10 @@ pub mod cf {
     /// Used to look up transactions/receipts by Ethereum-computed hash
     pub const ETH_TX_INDEX: &str = "eth_tx_index";
 
+    /// Miner earnings: miner_address (20 bytes) + block_height (u64 BE) -> MinerEarning
+    /// Indexed by miner address for efficient per-miner queries
+    pub const MINER_EARNINGS: &str = "miner_earnings";
+
     /// All column families
     pub const ALL: &[&str] = &[
         BLOCK_HEADERS,
@@ -69,6 +73,7 @@ pub mod cf {
         CHECKPOINTS,
         WORK_PROOFS,
         ETH_TX_INDEX,
+        MINER_EARNINGS,
     ];
 }
 

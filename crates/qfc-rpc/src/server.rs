@@ -4,14 +4,15 @@ use crate::error::RpcError;
 use crate::eth::EthApiServer;
 use crate::qfc::{
     QfcApiServer, RpcAccountRentInfo, RpcBridgeDeposit, RpcBridgeStatus, RpcBridgeWithdrawal,
-    RpcComputeInfo, RpcEpoch, RpcEstimateInferenceFee, RpcFaucetResponse, RpcInferenceFeeEstimate,
-    RpcInferenceProofSubmission, RpcInferenceStats, RpcInferenceTask, RpcMinerStatusReport,
-    RpcMinerVesting, RpcModel, RpcModelProposal, RpcNodeInfo, RpcParameterOverride,
-    RpcParameterProposal, RpcProofResult, RpcProposeModelRequest, RpcProposeParameterRequest,
-    RpcProposeSpendRequest, RpcPublicTaskStatus, RpcRegisterMinerRequest, RpcRegisterMinerResult,
-    RpcSpendProposal, RpcSubmitPublicTask, RpcTaskRequest, RpcTreasuryInfo, RpcUndelegation,
-    RpcUserOperation, RpcUserOperationStatus, RpcValidator, RpcValidatorMetrics,
-    RpcValidatorScoreBreakdown, RpcVoteModelRequest, RpcVoteParameterRequest, RpcVoteSpendRequest,
+    RpcComputeInfo, RpcEarningRecord, RpcEpoch, RpcEstimateInferenceFee, RpcFaucetResponse,
+    RpcInferenceFeeEstimate, RpcInferenceProofSubmission, RpcInferenceStats, RpcInferenceTask,
+    RpcMinerEarnings, RpcMinerEvent, RpcMinerStatusReport, RpcMinerVesting, RpcModel,
+    RpcModelProposal, RpcNodeInfo, RpcParameterOverride, RpcParameterProposal, RpcProofResult,
+    RpcProposeModelRequest, RpcProposeParameterRequest, RpcProposeSpendRequest,
+    RpcPublicTaskStatus, RpcRegisterMinerRequest, RpcRegisterMinerResult, RpcSpendProposal,
+    RpcSubmitPublicTask, RpcTaskRequest, RpcTreasuryInfo, RpcUndelegation, RpcUserOperation,
+    RpcUserOperationStatus, RpcValidator, RpcValidatorMetrics, RpcValidatorScoreBreakdown,
+    RpcVoteModelRequest, RpcVoteParameterRequest, RpcVoteSpendRequest,
 };
 use crate::txpool::{TxPoolApiServer, TxPoolContent, TxPoolStatus};
 use crate::types::{BlockNumber, BlockTag, CallRequest, RpcBlock, RpcReceipt, RpcTransaction};
@@ -1970,6 +1971,8 @@ impl QfcApiServer for RpcServer {
             min_tier,
             size_mb: request.size_mb,
             approved: false,
+            canonical_format: qfc_inference::CanonicalFormat::SafetensorsFp32,
+            weights_hash: None,
         };
 
         let now = std::time::SystemTime::now()
@@ -2390,6 +2393,98 @@ impl QfcApiServer for RpcServer {
         })
     }
 
+    // ---- v2.0: Miner Earnings ----
+
+    async fn get_miner_earnings(
+        &self,
+        address: String,
+        period: String,
+    ) -> RpcResult<RpcMinerEarnings> {
+        let addr_hex = address.strip_prefix("0x").unwrap_or(&address);
+        let addr_bytes = hex::decode(addr_hex).map_err(|e| {
+            jsonrpsee::types::ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid address: {}", e),
+                None::<()>,
+            )
+        })?;
+        let miner_address = qfc_types::Address::from_slice(&addr_bytes).ok_or_else(|| {
+            jsonrpsee::types::ErrorObjectOwned::owned(
+                -32602,
+                "Address must be 20 bytes",
+                None::<()>,
+            )
+        })?;
+
+        // Determine time cutoff based on period
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let cutoff_ms = match period.as_str() {
+            "day" => now_ms.saturating_sub(24 * 3600 * 1000),
+            "week" => now_ms.saturating_sub(7 * 24 * 3600 * 1000),
+            "month" => now_ms.saturating_sub(30 * 24 * 3600 * 1000),
+            "all" | _ => 0,
+        };
+
+        // Scan MINER_EARNINGS CF for this address
+        let db = self.chain.db();
+        let start_key = qfc_types::encode_miner_earning_key(&miner_address, 0);
+
+        let mut records = Vec::new();
+        let mut total_earnings = qfc_types::U256::ZERO;
+        let mut total_flops: u64 = 0;
+        let mut total_tasks: u64 = 0;
+
+        if let Ok(iter) = db.iter_from("miner_earnings", &start_key) {
+            for (key, value) in iter {
+                // Stop when we leave this miner's prefix
+                if key.len() != 28 || &key[0..20] != miner_address.as_bytes() {
+                    break;
+                }
+
+                if let Ok(earning) = qfc_types::MinerEarning::from_bytes(&value) {
+                    // Skip records before cutoff
+                    if earning.timestamp < cutoff_ms {
+                        continue;
+                    }
+
+                    total_earnings = total_earnings + earning.reward;
+                    total_flops += earning.flops;
+                    total_tasks += earning.task_count as u64;
+
+                    records.push(RpcEarningRecord {
+                        block_height: format!("0x{:x}", earning.block_height),
+                        reward: format!("0x{:x}", earning.reward.0),
+                        flops: format!("0x{:x}", earning.flops),
+                        task_count: earning.task_count,
+                        timestamp: format!("{}", earning.timestamp),
+                    });
+                }
+            }
+        }
+
+        // Reverse so newest records come first
+        records.reverse();
+
+        // Current balance
+        let balance = self
+            .chain
+            .state()
+            .get_balance(&miner_address)
+            .unwrap_or_default();
+
+        Ok(RpcMinerEarnings {
+            address: format!("0x{}", addr_hex),
+            total_earnings: format!("0x{:x}", total_earnings.0),
+            total_flops: format!("0x{:x}", total_flops),
+            total_tasks: format!("0x{:x}", total_tasks),
+            balance: format!("0x{:x}", balance.0),
+            records,
+        })
+    }
+
     // ---- v2.0: Cross-chain bridge endpoints ----
 
     async fn get_bridge_status(&self) -> RpcResult<RpcBridgeStatus> {
@@ -2657,14 +2752,20 @@ impl QfcApiServer for RpcServer {
             .unwrap()
             .as_millis() as u64;
 
+        let input_hash = qfc_crypto::blake3_hash(&input_data);
         let task_type = match request.task_type.as_str() {
             "embedding" => qfc_inference::task::ComputeTaskType::Embedding {
                 model_id,
-                input_hash: qfc_crypto::blake3_hash(&input_data),
+                input_hash,
+            },
+            "speech_to_text" => qfc_inference::task::ComputeTaskType::SpeechToText {
+                model_id,
+                audio_hash: input_hash,
+                language: request.language.clone().unwrap_or_default(),
             },
             _ => qfc_inference::task::ComputeTaskType::Embedding {
                 model_id,
-                input_hash: qfc_crypto::blake3_hash(&input_data),
+                input_hash,
             },
         };
 
@@ -2745,6 +2846,20 @@ impl QfcApiServer for RpcServer {
             "ImageClassification" => ComputeTaskType::ImageClassification {
                 model_id,
                 input_hash: qfc_types::Hash::ZERO,
+            },
+            "SpeechToText" => ComputeTaskType::SpeechToText {
+                model_id,
+                audio_hash: qfc_types::Hash::ZERO,
+                language: String::new(),
+            },
+            "ImageGeneration" => ComputeTaskType::ImageGeneration {
+                model_id,
+                prompt_hash: qfc_types::Hash::ZERO,
+                negative_prompt_hash: qfc_types::Hash::ZERO,
+                width: 512,
+                height: 512,
+                steps: 20,
+                seed: 0,
             },
             "OnnxInference" => ComputeTaskType::OnnxInference {
                 model_hash: qfc_types::Hash::ZERO,
@@ -2850,6 +2965,123 @@ impl QfcApiServer for RpcServer {
             } else {
                 break; // Task pruned
             }
+        }
+        Ok(())
+    }
+
+    async fn subscribe_miner_events(
+        &self,
+        pending: jsonrpsee::PendingSubscriptionSink,
+        address: String,
+    ) -> SubscriptionResult {
+        use jsonrpsee::SubscriptionMessage;
+
+        let miner_address = match Self::parse_address(&address) {
+            Ok(addr) => addr,
+            Err(e) => {
+                pending.reject(e).await;
+                return Ok(());
+            }
+        };
+
+        let sink = pending.accept().await?;
+        let chain = self.chain.clone();
+        let miner_hex = hex::encode(miner_address.as_bytes());
+
+        // Track last seen block height
+        let mut last_block = chain.block_number();
+
+        // Poll every 1s for new blocks containing this miner's proofs
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            if sink.is_closed() {
+                break;
+            }
+
+            let current_block = chain.block_number();
+            if current_block <= last_block {
+                continue;
+            }
+
+            for height in (last_block + 1)..=current_block {
+                if sink.is_closed() {
+                    break;
+                }
+                let block = match chain.get_block_by_number(height) {
+                    Ok(Some(b)) => b,
+                    _ => continue,
+                };
+
+                // Count this miner's proofs in the block for reward estimation
+                let miner_proofs: Vec<_> = block
+                    .inference_proofs
+                    .iter()
+                    .filter(|p| p.validator == miner_address)
+                    .collect();
+
+                if miner_proofs.is_empty() {
+                    continue;
+                }
+
+                let total_flops_in_block: u64 = block
+                    .inference_proofs
+                    .iter()
+                    .map(|p| p.flops_estimated)
+                    .sum();
+                let miner_flops: u64 = miner_proofs.iter().map(|p| p.flops_estimated).sum();
+
+                for proof in &miner_proofs {
+                    let event = RpcMinerEvent {
+                        event_type: "proof_accepted".to_string(),
+                        miner: format!("0x{}", miner_hex),
+                        block_height: Some(format!("0x{:x}", height)),
+                        task_type: Some(format!("{:?}", proof.task_type)),
+                        flops: Some(proof.flops_estimated.to_string()),
+                        reward: None,
+                        spot_checked: None,
+                        timestamp: format!("{}", block.header.timestamp),
+                        message: format!(
+                            "Proof included in block {} ({} FLOPS)",
+                            height, proof.flops_estimated
+                        ),
+                    };
+                    let msg = SubscriptionMessage::from_json(&event)?;
+                    if sink.send(msg).await.is_err() {
+                        return Ok(());
+                    }
+                }
+
+                // Emit a reward_settled event summarizing this miner's block reward
+                if total_flops_in_block > 0 {
+                    // 15% of block reward goes to miner pool, proportional to FLOPS
+                    let block_reward = U256::from_u128(qfc_types::BLOCK_REWARD);
+                    let miner_pool = block_reward * U256::from_u128(15) / U256::from_u128(100);
+                    let miner_reward = miner_pool * U256::from_u128(miner_flops as u128)
+                        / U256::from_u128(total_flops_in_block as u128);
+
+                    let event = RpcMinerEvent {
+                        event_type: "reward_settled".to_string(),
+                        miner: format!("0x{}", miner_hex),
+                        block_height: Some(format!("0x{:x}", height)),
+                        task_type: None,
+                        flops: Some(miner_flops.to_string()),
+                        reward: Some(format!("0x{:x}", miner_reward.0)),
+                        spot_checked: None,
+                        timestamp: format!("{}", block.header.timestamp),
+                        message: format!(
+                            "Reward settled: {} proofs, {} FLOPS in block {}",
+                            miner_proofs.len(),
+                            miner_flops,
+                            height,
+                        ),
+                    };
+                    let msg = SubscriptionMessage::from_json(&event)?;
+                    if sink.send(msg).await.is_err() {
+                        return Ok(());
+                    }
+                }
+            }
+            last_block = current_block;
         }
         Ok(())
     }

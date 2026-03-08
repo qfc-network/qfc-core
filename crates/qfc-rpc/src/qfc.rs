@@ -253,6 +253,20 @@ pub trait QfcApi {
     #[method(name = "getMinerVesting")]
     async fn get_miner_vesting(&self, address: String) -> RpcResult<RpcMinerVesting>;
 
+    /// Get miner earnings history.
+    /// Returns per-block earning records for a miner address.
+    /// `period` can be: "day" (last 24h), "week", "month", or "all".
+    #[method(name = "getMinerEarnings")]
+    async fn get_miner_earnings(
+        &self,
+        address: String,
+        period: String,
+    ) -> RpcResult<RpcMinerEarnings>;
+    /// Subscribe to miner earning events (WebSocket only).
+    /// Pushes RpcMinerEvent whenever the miner earns a reward or completes a task.
+    #[subscription(name = "subscribeMinerEvents" => "minerEvent", unsubscribe = "unsubscribeMinerEvents", item = RpcMinerEvent)]
+    async fn subscribe_miner_events(&self, address: String) -> SubscriptionResult;
+
     // ---- v2.0: Bridge endpoints ----
 
     /// Get bridge status (validators, TVL, pending operations)
@@ -458,6 +472,68 @@ pub struct RpcProofResult {
     pub reward_estimate: Option<String>,
 }
 
+// ============ v2.0: Miner Earnings RPC Types ============
+
+/// Miner earnings summary and history
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcMinerEarnings {
+    /// Miner address
+    pub address: String,
+    /// Total earnings in wei (hex string)
+    pub total_earnings: String,
+    /// Total FLOPS contributed
+    pub total_flops: String,
+    /// Total tasks completed
+    pub total_tasks: String,
+    /// Current balance in wei (hex string)
+    pub balance: String,
+    /// Earning records (newest first)
+    pub records: Vec<RpcEarningRecord>,
+}
+
+/// A single earning record for one block
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcEarningRecord {
+    /// Block height
+    pub block_height: String,
+    /// Reward earned in wei (hex string)
+    pub reward: String,
+    /// FLOPS contributed
+    pub flops: String,
+    /// Number of tasks in this block
+    pub task_count: u32,
+    /// Block timestamp (ms since epoch)
+    pub timestamp: String,
+}
+
+// ============ v2.0: Miner Event Subscription Types ============
+
+/// Real-time miner event pushed via WebSocket subscription
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcMinerEvent {
+    /// Event type: "proof_accepted", "proof_rejected", "task_assigned", "reward_settled"
+    pub event_type: String,
+    /// Miner address
+    pub miner: String,
+    /// Block height (if applicable)
+    pub block_height: Option<String>,
+    /// Task type (e.g. "embedding", "text_generation")
+    pub task_type: Option<String>,
+    /// FLOPS contributed
+    pub flops: Option<String>,
+    /// Reward amount in wei (hex)
+    pub reward: Option<String>,
+    /// Whether spot-checked
+    pub spot_checked: Option<bool>,
+    /// Timestamp (ms since epoch)
+    pub timestamp: String,
+    /// Human-readable message
+    pub message: String,
+}
+
 // ============ v2.0: Model Governance RPC Types ============
 
 /// Model proposal information
@@ -515,6 +591,9 @@ pub struct RpcSubmitPublicTask {
     pub submitter: String,
     /// Ed25519 signature over (task_type || model_id || input_data || max_fee) hex
     pub signature: String,
+    /// Language code for speech_to_text tasks (e.g. "en", "zh")
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 /// Status of a public inference task (B1: structured result envelope)

@@ -299,6 +299,16 @@ fn estimate_flops(task_type: &ComputeTaskType, _elapsed_ms: u64) -> u64 {
         }
         ComputeTaskType::ImageClassification { .. } => 4_000_000_000u64,
         ComputeTaskType::Embedding { .. } => 1_000_000_000u64,
+        ComputeTaskType::SpeechToText { model_id, .. } => {
+            if model_id.name.contains("large") {
+                30_000_000_000u64
+            } else {
+                4_000_000_000u64
+            }
+        }
+        ComputeTaskType::ImageGeneration { steps, .. } => {
+            2_000_000_000u64 * (*steps as u64) + 5_000_000_000u64
+        }
         ComputeTaskType::OnnxInference { .. } => 2_000_000_000u64,
     }
 }

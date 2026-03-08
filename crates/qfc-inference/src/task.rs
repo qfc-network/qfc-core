@@ -49,6 +49,30 @@ pub enum ComputeTaskType {
     ImageClassification { model_id: ModelId, input_hash: Hash },
     /// Embedding generation
     Embedding { model_id: ModelId, input_hash: Hash },
+    /// Speech-to-text transcription (Whisper)
+    SpeechToText {
+        model_id: ModelId,
+        /// Hash of audio data (PCM f32 16kHz mono)
+        audio_hash: Hash,
+        /// Language code (e.g. "en", "zh") or empty for auto-detect
+        language: String,
+    },
+    /// Image generation (Stable Diffusion / FLUX)
+    ImageGeneration {
+        model_id: ModelId,
+        /// Hash of the text prompt
+        prompt_hash: Hash,
+        /// Hash of negative prompt (or ZERO if none)
+        negative_prompt_hash: Hash,
+        /// Output image width in pixels
+        width: u32,
+        /// Output image height in pixels
+        height: u32,
+        /// Number of diffusion steps
+        steps: u32,
+        /// Deterministic seed for reproducibility
+        seed: u64,
+    },
     /// Generic ONNX model execution
     OnnxInference {
         /// Hash of ONNX model file
@@ -64,6 +88,8 @@ impl ComputeTaskType {
             Self::TextGeneration { prompt_hash, .. } => *prompt_hash,
             Self::ImageClassification { input_hash, .. } => *input_hash,
             Self::Embedding { input_hash, .. } => *input_hash,
+            Self::SpeechToText { audio_hash, .. } => *audio_hash,
+            Self::ImageGeneration { prompt_hash, .. } => *prompt_hash,
             Self::OnnxInference { input_hash, .. } => *input_hash,
         }
     }
@@ -74,6 +100,8 @@ impl ComputeTaskType {
             Self::TextGeneration { model_id, .. } => Some(model_id),
             Self::ImageClassification { model_id, .. } => Some(model_id),
             Self::Embedding { model_id, .. } => Some(model_id),
+            Self::SpeechToText { model_id, .. } => Some(model_id),
+            Self::ImageGeneration { model_id, .. } => Some(model_id),
             Self::OnnxInference { .. } => None,
         }
     }
@@ -84,6 +112,8 @@ impl ComputeTaskType {
             Self::TextGeneration { .. } => "text_generation",
             Self::ImageClassification { .. } => "image_classification",
             Self::Embedding { .. } => "embedding",
+            Self::SpeechToText { .. } => "speech_to_text",
+            Self::ImageGeneration { .. } => "image_generation",
             Self::OnnxInference { .. } => "onnx_inference",
         }
     }
@@ -140,6 +170,8 @@ impl InferenceTask {
             ComputeTaskType::Embedding { model_id, .. } => {
                 estimate_model_memory(&model_id.name).min(4096)
             }
+            ComputeTaskType::SpeechToText { model_id, .. } => estimate_model_memory(&model_id.name),
+            ComputeTaskType::ImageGeneration { .. } => 6_000, // SD 1.5 needs ~6GB
             ComputeTaskType::OnnxInference { .. } => 1024,
         }
     }
@@ -155,6 +187,10 @@ fn estimate_model_memory(model_name: &str) -> u64 {
         6_000
     } else if model_name.contains("3b") || model_name.contains("3B") {
         3_000
+    } else if model_name.contains("whisper-large") {
+        2_048
+    } else if model_name.contains("whisper-base") {
+        512
     } else if model_name.contains("1b") || model_name.contains("1B") {
         2_000
     } else if model_name.contains("0.5b") || model_name.contains("0.5B") {

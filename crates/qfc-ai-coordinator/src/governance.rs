@@ -215,6 +215,8 @@ mod tests {
             min_tier: GpuTier::Warm,
             size_mb: 200,
             approved: false,
+            canonical_format: qfc_inference::CanonicalFormat::SafetensorsFp32,
+            weights_hash: None,
         }
     }
 

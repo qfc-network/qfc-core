@@ -7,6 +7,7 @@
 //!   qfc-miner --wallet 0x... --backend auto --model-dir ./models
 
 mod config;
+pub mod dashboard;
 mod gpu;
 mod submit;
 mod worker;
@@ -179,11 +180,48 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Initialize shared stats for dashboard
+    let stats = dashboard::tui::new_shared_stats();
+    {
+        let tier_str = bench_score
+            .map(|(_, t)| format!("{}", t))
+            .unwrap_or_else(|| "?".to_string());
+        let mut s = stats.lock().unwrap();
+        s.address = format!("0x{}", wallet_hex);
+        s.backend = format!("{}", backend);
+        s.tier = tier_str;
+        s.rpc_url = validator_rpc.clone();
+        s.session_start = Some(std::time::Instant::now());
+        s.status = "Starting...".to_string();
+    }
+
     // Start worker
-    let mut worker = worker::InferenceWorker::new(config, engine, scheduler);
+    let mut worker = worker::InferenceWorker::new(config, engine, scheduler, stats.clone());
 
     info!("Connecting to validator at {}...", validator_rpc);
-    worker.run().await;
+
+    // Launch TUI dashboard if enabled
+    #[cfg(feature = "tui")]
+    if cli.dashboard {
+        let dashboard_stats = stats.clone();
+        let dashboard_handle =
+            std::thread::spawn(move || dashboard::tui::run_dashboard(dashboard_stats));
+
+        worker.run().await;
+
+        // Wait for dashboard thread
+        let _ = dashboard_handle.join();
+    } else {
+        worker.run().await;
+    }
+
+    #[cfg(not(feature = "tui"))]
+    {
+        if cli.dashboard {
+            tracing::warn!("TUI dashboard requires --features tui. Running without dashboard.");
+        }
+        worker.run().await;
+    }
 
     Ok(())
 }

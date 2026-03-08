@@ -1,0 +1,482 @@
+//! Real-time TUI dashboard for QFC inference miner
+//!
+//! Shows mining stats, earnings, task history, and GPU health in a terminal UI.
+
+#[cfg(feature = "tui")]
+pub mod tui {
+    use crossterm::{
+        event::{self, Event, KeyCode, KeyEventKind},
+        terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+        ExecutableCommand,
+    };
+    use ratatui::{
+        layout::{Constraint, Direction, Layout, Rect},
+        style::{Color, Modifier, Style},
+        text::{Line, Span},
+        widgets::{Block, Borders, Cell, Paragraph, Row, Sparkline, Table},
+        Frame, Terminal,
+    };
+    use std::io::stdout;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    /// Snapshot of mining stats shared between worker and dashboard
+    #[derive(Clone, Debug, Default)]
+    pub struct MinerStats {
+        /// Miner wallet address
+        pub address: String,
+        /// Backend name
+        pub backend: String,
+        /// GPU tier
+        pub tier: String,
+        /// Validator RPC URL
+        pub rpc_url: String,
+
+        /// Tasks completed this session
+        pub tasks_completed: u64,
+        /// Tasks failed this session
+        pub tasks_failed: u64,
+        /// Total FLOPS this session
+        pub total_flops: u64,
+
+        /// Session earnings in wei
+        pub session_earnings_wei: u128,
+        /// Current balance in wei (from last RPC query)
+        pub balance_wei: u128,
+
+        /// Recent earning amounts in micro-QFC for sparkline
+        pub earning_history: Vec<u64>,
+
+        /// Recent task log entries (newest first, max 20)
+        pub task_log: Vec<TaskLogEntry>,
+
+        /// Current status line
+        pub status: String,
+        /// Session start time
+        pub session_start: Option<Instant>,
+
+        /// GPU temperature (Celsius, 0 if unavailable)
+        pub gpu_temp_c: u32,
+        /// GPU utilization percentage (0-100, 0 if unavailable)
+        pub gpu_util_pct: u32,
+        /// GPU memory usage MB
+        pub gpu_mem_used_mb: u64,
+        /// GPU memory total MB
+        pub gpu_mem_total_mb: u64,
+    }
+
+    /// A single task log entry
+    #[derive(Clone, Debug)]
+    pub struct TaskLogEntry {
+        pub timestamp: String,
+        pub task_type: String,
+        pub model: String,
+        pub duration_ms: u64,
+        pub reward_qfc: String,
+        pub accepted: bool,
+    }
+
+    impl MinerStats {
+        fn session_duration(&self) -> Duration {
+            self.session_start.map(|s| s.elapsed()).unwrap_or_default()
+        }
+
+        fn earnings_per_hour(&self) -> f64 {
+            let secs = self.session_duration().as_secs_f64();
+            if secs < 1.0 {
+                return 0.0;
+            }
+            let qfc = self.session_earnings_wei as f64 / 1e18;
+            qfc / secs * 3600.0
+        }
+    }
+
+    /// Shared stats handle for worker to update
+    pub type SharedStats = Arc<Mutex<MinerStats>>;
+
+    /// Create a new shared stats handle
+    pub fn new_shared_stats() -> SharedStats {
+        Arc::new(Mutex::new(MinerStats::default()))
+    }
+
+    /// Run the TUI dashboard (blocking). Call from a spawned task.
+    /// Returns when user presses 'q' or Ctrl+C.
+    pub fn run_dashboard(stats: SharedStats) -> std::io::Result<()> {
+        enable_raw_mode()?;
+        stdout().execute(EnterAlternateScreen)?;
+        let backend = ratatui::backend::CrosstermBackend::new(stdout());
+        let mut terminal = Terminal::new(backend)?;
+
+        let tick_rate = Duration::from_millis(250);
+        let mut last_tick = Instant::now();
+
+        loop {
+            terminal.draw(|f| {
+                let s = stats.lock().unwrap();
+                draw_ui(f, &s);
+            })?;
+
+            let timeout = tick_rate.saturating_sub(last_tick.elapsed());
+            if event::poll(timeout)? {
+                if let Event::Key(key) = event::read()? {
+                    if key.kind == KeyEventKind::Press {
+                        match key.code {
+                            KeyCode::Char('q') | KeyCode::Char('Q') => break,
+                            KeyCode::Esc => break,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+
+            if last_tick.elapsed() >= tick_rate {
+                last_tick = Instant::now();
+            }
+        }
+
+        disable_raw_mode()?;
+        stdout().execute(LeaveAlternateScreen)?;
+        Ok(())
+    }
+
+    fn draw_ui(f: &mut Frame, stats: &MinerStats) {
+        let size = f.area();
+
+        // Main layout: header, body, footer
+        let main_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3), // Header
+                Constraint::Min(10),   // Body
+                Constraint::Length(3), // Footer
+            ])
+            .split(size);
+
+        draw_header(f, main_chunks[0], stats);
+        draw_body(f, main_chunks[1], stats);
+        draw_footer(f, main_chunks[2], stats);
+    }
+
+    fn draw_header(f: &mut Frame, area: Rect, stats: &MinerStats) {
+        let duration = stats.session_duration();
+        let hours = duration.as_secs() / 3600;
+        let mins = (duration.as_secs() % 3600) / 60;
+        let secs = duration.as_secs() % 60;
+
+        let header_text = Line::from(vec![
+            Span::styled(
+                " QFC INFERENCE MINER ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                format!("{}", stats.address),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                format!("{}  T{}", stats.backend, stats.tier),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                format!("{:02}:{:02}:{:02}", hours, mins, secs),
+                Style::default().fg(Color::White),
+            ),
+        ]);
+
+        let header = Paragraph::new(header_text).block(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        );
+        f.render_widget(header, area);
+    }
+
+    fn draw_body(f: &mut Frame, area: Rect, stats: &MinerStats) {
+        // Body: left (stats + earnings) | right (task log)
+        let body_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+            .split(area);
+
+        // Left: stats panels stacked
+        let left_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(7), // Earnings
+                Constraint::Length(6), // Performance
+                Constraint::Min(4),    // GPU / Sparkline
+            ])
+            .split(body_chunks[0]);
+
+        draw_earnings_panel(f, left_chunks[0], stats);
+        draw_performance_panel(f, left_chunks[1], stats);
+        draw_gpu_panel(f, left_chunks[2], stats);
+
+        // Right: task log
+        draw_task_log(f, body_chunks[1], stats);
+    }
+
+    fn draw_earnings_panel(f: &mut Frame, area: Rect, stats: &MinerStats) {
+        let session_qfc = stats.session_earnings_wei as f64 / 1e18;
+        let balance_qfc = stats.balance_wei as f64 / 1e18;
+        let per_hour = stats.earnings_per_hour();
+
+        let text = vec![
+            Line::from(vec![
+                Span::styled("  Session:  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{:.6} QFC", session_qfc),
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("  Rate:     ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{:.6} QFC/hr", per_hour),
+                    Style::default().fg(Color::Yellow),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("  Balance:  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{:.6} QFC", balance_qfc),
+                    Style::default().fg(Color::Cyan),
+                ),
+            ]),
+            Line::from(""),
+        ];
+
+        let block = Block::default()
+            .title(Span::styled(
+                " Earnings ",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray));
+
+        let paragraph = Paragraph::new(text).block(block);
+        f.render_widget(paragraph, area);
+    }
+
+    fn draw_performance_panel(f: &mut Frame, area: Rect, stats: &MinerStats) {
+        let total = stats.tasks_completed + stats.tasks_failed;
+        let success_rate = if total > 0 {
+            stats.tasks_completed as f64 / total as f64 * 100.0
+        } else {
+            0.0
+        };
+
+        let text = vec![
+            Line::from(vec![
+                Span::styled("  Completed: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{}", stats.tasks_completed),
+                    Style::default().fg(Color::Green),
+                ),
+                Span::styled("  Failed: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{}", stats.tasks_failed),
+                    Style::default().fg(if stats.tasks_failed > 0 {
+                        Color::Red
+                    } else {
+                        Color::DarkGray
+                    }),
+                ),
+                Span::styled(
+                    format!("  ({:.0}%)", success_rate),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("  FLOPS:     ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format_flops(stats.total_flops),
+                    Style::default().fg(Color::White),
+                ),
+            ]),
+        ];
+
+        let block = Block::default()
+            .title(Span::styled(
+                " Performance ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray));
+
+        let paragraph = Paragraph::new(text).block(block);
+        f.render_widget(paragraph, area);
+    }
+
+    fn draw_gpu_panel(f: &mut Frame, area: Rect, stats: &MinerStats) {
+        // Sparkline of recent earnings
+        let block = Block::default()
+            .title(Span::styled(
+                " Earnings History ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray));
+
+        if !stats.earning_history.is_empty() {
+            let sparkline = Sparkline::default()
+                .block(block)
+                .data(&stats.earning_history)
+                .style(Style::default().fg(Color::Green));
+            f.render_widget(sparkline, area);
+        } else {
+            let paragraph = Paragraph::new("  Waiting for tasks...")
+                .block(block)
+                .style(Style::default().fg(Color::DarkGray));
+            f.render_widget(paragraph, area);
+        }
+    }
+
+    fn draw_task_log(f: &mut Frame, area: Rect, stats: &MinerStats) {
+        let header_cells = ["Time", "Type", "Model", "Duration", "Reward"]
+            .iter()
+            .map(|h| {
+                Cell::from(*h).style(
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                )
+            });
+        let header = Row::new(header_cells).height(1);
+
+        let rows = stats.task_log.iter().map(|entry| {
+            let color = if entry.accepted {
+                Color::Green
+            } else {
+                Color::Red
+            };
+            let cells = vec![
+                Cell::from(entry.timestamp.clone()).style(Style::default().fg(Color::DarkGray)),
+                Cell::from(entry.task_type.clone()).style(Style::default().fg(Color::White)),
+                Cell::from(truncate_str(&entry.model, 16)).style(Style::default().fg(Color::Cyan)),
+                Cell::from(format!("{}ms", entry.duration_ms))
+                    .style(Style::default().fg(Color::Yellow)),
+                Cell::from(format!("+{}", entry.reward_qfc)).style(Style::default().fg(color)),
+            ];
+            Row::new(cells)
+        });
+
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Length(8),
+                Constraint::Length(10),
+                Constraint::Length(16),
+                Constraint::Length(8),
+                Constraint::Min(12),
+            ],
+        )
+        .header(header)
+        .block(
+            Block::default()
+                .title(Span::styled(
+                    " Task Log ",
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
+                ))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        );
+
+        f.render_widget(table, area);
+    }
+
+    fn draw_footer(f: &mut Frame, area: Rect, stats: &MinerStats) {
+        let footer_text = Line::from(vec![
+            Span::styled(" Status: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(&stats.status, Style::default().fg(Color::White)),
+            Span::raw("  "),
+            Span::styled("Press 'q' to quit", Style::default().fg(Color::DarkGray)),
+        ]);
+
+        let footer = Paragraph::new(footer_text).block(
+            Block::default()
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        );
+        f.render_widget(footer, area);
+    }
+
+    fn format_flops(flops: u64) -> String {
+        if flops >= 1_000_000_000 {
+            format!("{:.2} GFLOPS", flops as f64 / 1e9)
+        } else if flops >= 1_000_000 {
+            format!("{:.2} MFLOPS", flops as f64 / 1e6)
+        } else if flops >= 1_000 {
+            format!("{:.1} KFLOPS", flops as f64 / 1e3)
+        } else {
+            format!("{} FLOPS", flops)
+        }
+    }
+
+    fn truncate_str(s: &str, max_len: usize) -> String {
+        if s.len() > max_len {
+            format!("{}...", &s[..max_len - 3])
+        } else {
+            s.to_string()
+        }
+    }
+}
+
+// Non-TUI fallback: stats are still tracked but no UI
+#[cfg(not(feature = "tui"))]
+pub mod tui {
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+
+    #[derive(Clone, Debug, Default)]
+    pub struct MinerStats {
+        pub address: String,
+        pub backend: String,
+        pub tier: String,
+        pub rpc_url: String,
+        pub tasks_completed: u64,
+        pub tasks_failed: u64,
+        pub total_flops: u64,
+        pub session_earnings_wei: u128,
+        pub balance_wei: u128,
+        pub earning_history: Vec<u64>,
+        pub task_log: Vec<TaskLogEntry>,
+        pub status: String,
+        pub session_start: Option<Instant>,
+        pub gpu_temp_c: u32,
+        pub gpu_util_pct: u32,
+        pub gpu_mem_used_mb: u64,
+        pub gpu_mem_total_mb: u64,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct TaskLogEntry {
+        pub timestamp: String,
+        pub task_type: String,
+        pub model: String,
+        pub duration_ms: u64,
+        pub reward_qfc: String,
+        pub accepted: bool,
+    }
+
+    pub type SharedStats = Arc<Mutex<MinerStats>>;
+
+    pub fn new_shared_stats() -> SharedStats {
+        Arc::new(Mutex::new(MinerStats::default()))
+    }
+}

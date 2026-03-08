@@ -28,10 +28,13 @@ clap.workspace = true
 blake3.workspace = true
 hex.workspace = true
 anyhow.workspace = true
+ratatui = { workspace = true, optional = true }
+crossterm = { workspace = true, optional = true }
 
 [features]
 default = ["cpu"]
 cpu = ["qfc-inference/cpu"]
+tui = ["ratatui", "crossterm"]
 candle = ["qfc-inference/candle"]
 cuda = ["qfc-inference/cuda"]
 metal = ["qfc-inference/metal"]
