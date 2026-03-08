@@ -95,7 +95,7 @@ impl InferenceWorker {
                 } else {
                     current_epoch - task_response.epoch
                 };
-                if diff > 1 {
+                if diff > 5 {
                     warn!(
                         "Task epoch {} is stale (validator at {}), skipping",
                         task_response.epoch, current_epoch
@@ -220,7 +220,7 @@ impl InferenceWorker {
                 } else {
                     current_epoch - task_response.epoch
                 };
-                if diff > 1 {
+                if diff > 5 {
                     warn!(
                         "Epoch drifted during inference: task epoch {} → validator epoch {} (skipping submit)",
                         task_response.epoch, current_epoch
