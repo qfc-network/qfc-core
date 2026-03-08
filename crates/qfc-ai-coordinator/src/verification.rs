@@ -241,14 +241,18 @@ mod tests {
     async fn test_verify_spot_check_pass() {
         use qfc_inference::backend::cpu::CpuEngine;
 
-        let engine = CpuEngine::new();
+        let mut engine = CpuEngine::new();
+
+        // Load model first so inference doesn't reject with ModelNotLoaded
+        let model_id = ModelId::new("qfc-embed-small", "v1.0");
+        engine.load_model(&model_id).await.unwrap();
 
         // Build a task
         let task = InferenceTask::new(
             Hash::new([0x42; 32]),
             1,
             ComputeTaskType::Embedding {
-                model_id: ModelId::new("qfc-embed-small", "v1.0"),
+                model_id: model_id.clone(),
                 input_hash: Hash::ZERO,
             },
             vec![],
@@ -285,14 +289,18 @@ mod tests {
     async fn test_verify_spot_check_mismatch() {
         use qfc_inference::backend::cpu::CpuEngine;
 
-        let engine = CpuEngine::new();
+        let mut engine = CpuEngine::new();
+
+        // Load model first
+        let model_id = ModelId::new("qfc-embed-small", "v1.0");
+        engine.load_model(&model_id).await.unwrap();
 
         // Build a task
         let task = InferenceTask::new(
             Hash::new([0x42; 32]),
             1,
             ComputeTaskType::Embedding {
-                model_id: ModelId::new("qfc-embed-small", "v1.0"),
+                model_id: model_id.clone(),
                 input_hash: Hash::ZERO,
             },
             vec![],
