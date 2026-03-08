@@ -308,6 +308,22 @@ impl Mempool {
         *self.size.write() = 0;
     }
 
+    /// Get all pending transactions grouped by sender → nonce → PooledTransaction
+    pub fn get_all_by_sender(&self) -> Vec<(Address, Vec<PooledTransaction>)> {
+        self.by_sender
+            .iter()
+            .map(|entry| {
+                let sender = *entry.key();
+                let txs: Vec<PooledTransaction> = entry
+                    .value()
+                    .values()
+                    .filter_map(|hash| self.by_hash.get(hash).map(|r| r.clone()))
+                    .collect();
+                (sender, txs)
+            })
+            .collect()
+    }
+
     /// Get pool statistics
     pub fn stats(&self) -> MempoolStats {
         MempoolStats {
