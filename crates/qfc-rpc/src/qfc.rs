@@ -103,6 +103,10 @@ pub trait QfcApi {
     #[method(name = "getStake")]
     async fn get_stake(&self, address: String) -> RpcResult<String>;
 
+    /// Get pending undelegations for an address
+    #[method(name = "getPendingUndelegations")]
+    async fn get_pending_undelegations(&self, address: String) -> RpcResult<Vec<RpcUndelegation>>;
+
     /// Get current epoch info
     #[method(name = "getEpoch")]
     async fn get_epoch(&self) -> RpcResult<RpcEpoch>;
@@ -216,6 +220,17 @@ pub struct RpcFaucetResponse {
     pub tx_hash: String,
     pub amount: String,
     pub to: String,
+}
+
+/// Pending undelegation record
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcUndelegation {
+    pub delegator: String,
+    pub validator: String,
+    pub amount: String,
+    pub unlock_at: u64,
+    pub is_unlocked: bool,
 }
 
 /// Epoch information

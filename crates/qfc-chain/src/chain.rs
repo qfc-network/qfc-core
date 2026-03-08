@@ -430,6 +430,9 @@ impl Chain {
         // Validate block
         self.consensus.validate_block(&block, &parent)?;
 
+        // Process mature undelegations before executing transactions
+        self.executor.process_mature_undelegations(&self.state);
+
         // Execute transactions
         let producer = block.producer();
         let (receipts, gas_used) =

@@ -7,7 +7,7 @@ use crate::qfc::{
     RpcInferenceFeeEstimate, RpcInferenceProofSubmission, RpcInferenceStats, RpcInferenceTask,
     RpcMinerStatusReport, RpcModel, RpcModelProposal, RpcNodeInfo, RpcProofResult,
     RpcProposeModelRequest, RpcPublicTaskStatus, RpcRegisterMinerRequest, RpcRegisterMinerResult,
-    RpcSubmitPublicTask, RpcTaskRequest, RpcValidator, RpcValidatorMetrics,
+    RpcSubmitPublicTask, RpcTaskRequest, RpcUndelegation, RpcValidator, RpcValidatorMetrics,
     RpcValidatorScoreBreakdown, RpcVoteModelRequest,
 };
 use crate::txpool::{TxPoolApiServer, TxPoolContent, TxPoolStatus};
@@ -902,6 +902,29 @@ impl QfcApiServer for RpcServer {
             .get_stake(&address)
             .map_err(|e| RpcError::Internal(e.to_string()))?;
         Ok(format!("0x{:x}", stake.0))
+    }
+
+    async fn get_pending_undelegations(&self, address: String) -> RpcResult<Vec<RpcUndelegation>> {
+        let address = Self::parse_address(&address)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let undelegations = self
+            .chain
+            .state()
+            .get_undelegations(&address)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(undelegations
+            .into_iter()
+            .map(|u| RpcUndelegation {
+                delegator: format!("0x{}", hex::encode(u.delegator.as_bytes())),
+                validator: format!("0x{}", hex::encode(u.validator.as_bytes())),
+                amount: format!("0x{:x}", u.amount.0),
+                unlock_at: u.unlock_at,
+                is_unlocked: u.is_unlocked(now),
+            })
+            .collect())
     }
 
     async fn get_epoch(&self) -> RpcResult<RpcEpoch> {

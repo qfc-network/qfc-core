@@ -214,6 +214,9 @@ impl BlockProducer {
         // Take snapshot before execution (for potential rollback)
         let _snapshot = state.snapshot();
 
+        // Process mature undelegations before executing transactions
+        self.executor.process_mature_undelegations(&state);
+
         let (receipts, gas_used) =
             self.executor
                 .execute_transactions(&transactions, &state, &our_address);
