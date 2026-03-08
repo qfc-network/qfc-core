@@ -21,6 +21,7 @@ pub mod registry;
 pub mod router;
 pub mod task_pool;
 pub mod task_types;
+pub mod treasury;
 pub mod verification;
 
 pub use assignment::{MinerCapability, MinerRegistry};
@@ -35,6 +36,7 @@ pub use param_governance::{
 pub use proof_pool::ProofPool;
 pub use task_pool::TaskPool;
 pub use task_types::estimate_base_fee;
+pub use treasury::{SpendProposal, SpendStatus, Treasury, TreasuryError};
 pub use verification::{
     should_spot_check, verify_basic, verify_spot_check, VerificationError, VerificationResult,
 };

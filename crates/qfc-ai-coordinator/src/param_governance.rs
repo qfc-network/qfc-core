@@ -41,6 +41,8 @@ pub enum ParameterKey {
     FeeVotersPercent,
     /// Fee distribution: burn percent
     FeeBurnPercent,
+    /// Fee distribution: treasury percent
+    FeeTreasuryPercent,
     /// Block reward distribution: producer percent
     ProducerRewardPercent,
     /// Block reward distribution: voters percent
@@ -75,6 +77,7 @@ impl std::fmt::Display for ParameterKey {
             Self::FeeProducerPercent => write!(f, "fee_producer_percent"),
             Self::FeeVotersPercent => write!(f, "fee_voters_percent"),
             Self::FeeBurnPercent => write!(f, "fee_burn_percent"),
+            Self::FeeTreasuryPercent => write!(f, "fee_treasury_percent"),
             Self::ProducerRewardPercent => write!(f, "producer_reward_percent"),
             Self::VotersRewardPercent => write!(f, "voters_reward_percent"),
             Self::InferenceMinersRewardPercent => write!(f, "inference_miners_reward_percent"),

@@ -7,9 +7,10 @@ use crate::qfc::{
     RpcInferenceFeeEstimate, RpcInferenceProofSubmission, RpcInferenceStats, RpcInferenceTask,
     RpcMinerStatusReport, RpcModel, RpcModelProposal, RpcNodeInfo, RpcParameterOverride,
     RpcParameterProposal, RpcProofResult, RpcProposeModelRequest, RpcProposeParameterRequest,
-    RpcPublicTaskStatus, RpcRegisterMinerRequest, RpcRegisterMinerResult, RpcSubmitPublicTask,
-    RpcTaskRequest, RpcUndelegation, RpcValidator, RpcValidatorMetrics, RpcValidatorScoreBreakdown,
-    RpcVoteModelRequest, RpcVoteParameterRequest,
+    RpcProposeSpendRequest, RpcPublicTaskStatus, RpcRegisterMinerRequest, RpcRegisterMinerResult,
+    RpcSpendProposal, RpcSubmitPublicTask, RpcTaskRequest, RpcTreasuryInfo, RpcUndelegation,
+    RpcValidator, RpcValidatorMetrics, RpcValidatorScoreBreakdown, RpcVoteModelRequest,
+    RpcVoteParameterRequest, RpcVoteSpendRequest,
 };
 use crate::txpool::{TxPoolApiServer, TxPoolContent, TxPoolStatus};
 use crate::types::{BlockNumber, BlockTag, CallRequest, RpcBlock, RpcReceipt, RpcTransaction};
@@ -74,6 +75,8 @@ pub struct RpcServer {
     governance: Arc<RwLock<qfc_ai_coordinator::ModelGovernance>>,
     /// v2.0: Parameter governance (stake-weighted voting on protocol params)
     param_governance: Arc<RwLock<qfc_ai_coordinator::ParameterGovernance>>,
+    /// v2.0: Treasury — community fund with governance-controlled spending
+    treasury: Arc<RwLock<qfc_ai_coordinator::Treasury>>,
     /// v2.0: Inference engine for spot-check re-execution
     inference_engine: Option<Arc<tokio::sync::RwLock<Box<dyn qfc_inference::InferenceEngine>>>>,
     /// v2.0: Pool of verified inference proofs awaiting block inclusion
@@ -108,6 +111,7 @@ impl Clone for RpcServer {
             model_registry: self.model_registry.clone(),
             governance: self.governance.clone(),
             param_governance: self.param_governance.clone(),
+            treasury: self.treasury.clone(),
             inference_engine: self.inference_engine.clone(),
             proof_pool: self.proof_pool.clone(),
             challenge_generator: self.challenge_generator.clone(),
@@ -143,6 +147,7 @@ impl RpcServer {
             model_registry: Arc::new(qfc_inference::model::ModelRegistry::default_v2()),
             governance: Arc::new(RwLock::new(qfc_ai_coordinator::ModelGovernance::new())),
             param_governance: Arc::new(RwLock::new(qfc_ai_coordinator::ParameterGovernance::new())),
+            treasury: Arc::new(RwLock::new(qfc_ai_coordinator::Treasury::new())),
             inference_engine: None,
             proof_pool: None,
             challenge_generator: None,
@@ -297,6 +302,7 @@ impl RpcServer {
             "fee_producer_percent" => Ok(ParameterKey::FeeProducerPercent),
             "fee_voters_percent" => Ok(ParameterKey::FeeVotersPercent),
             "fee_burn_percent" => Ok(ParameterKey::FeeBurnPercent),
+            "fee_treasury_percent" => Ok(ParameterKey::FeeTreasuryPercent),
             "producer_reward_percent" => Ok(ParameterKey::ProducerRewardPercent),
             "voters_reward_percent" => Ok(ParameterKey::VotersRewardPercent),
             "inference_miners_reward_percent" => Ok(ParameterKey::InferenceMinersRewardPercent),
@@ -331,6 +337,7 @@ impl RpcServer {
             ParameterKey::FeeProducerPercent => qfc_types::FEE_PRODUCER_PERCENT as u128,
             ParameterKey::FeeVotersPercent => qfc_types::FEE_VOTERS_PERCENT as u128,
             ParameterKey::FeeBurnPercent => qfc_types::FEE_BURN_PERCENT as u128,
+            ParameterKey::FeeTreasuryPercent => qfc_types::FEE_TREASURY_PERCENT as u128,
             ParameterKey::ProducerRewardPercent => qfc_types::PRODUCER_REWARD_PERCENT as u128,
             ParameterKey::VotersRewardPercent => qfc_types::VOTERS_REWARD_PERCENT as u128,
             ParameterKey::InferenceMinersRewardPercent => {
@@ -1914,6 +1921,122 @@ impl QfcApiServer for RpcServer {
                     votes_for: p.votes_for.len() as u64,
                     votes_against: p.votes_against.len() as u64,
                     status: status.to_string(),
+                    created_at: p.created_at,
+                    voting_deadline: p.voting_deadline,
+                }
+            })
+            .collect())
+    }
+
+    // ---- v2.0: Treasury endpoints ----
+
+    async fn get_treasury_info(&self) -> RpcResult<RpcTreasuryInfo> {
+        let treasury_addr = qfc_types::Address::new(qfc_types::TREASURY_ADDRESS_BYTES);
+        let state = self.chain.state();
+        let balance = state.get_balance(&treasury_addr).unwrap_or_default();
+        let treasury = self.treasury.read();
+
+        Ok(RpcTreasuryInfo {
+            address: treasury_addr.to_string(),
+            balance: balance.to_string(),
+            total_disbursed: treasury.total_disbursed().to_string(),
+            active_proposals: treasury.active_proposals().len() as u64,
+        })
+    }
+
+    async fn propose_spend(&self, request: RpcProposeSpendRequest) -> RpcResult<String> {
+        let proposer = Self::parse_address(&request.proposer)?;
+        let recipient = Self::parse_address(&request.recipient)?;
+        let amount: u128 = request
+            .amount
+            .parse()
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid amount: {}", e)))?;
+
+        let state = self.chain.state();
+        let proposer_stake = state.get_stake(&proposer).unwrap_or_default().0.as_u128();
+
+        let treasury_addr = qfc_types::Address::new(qfc_types::TREASURY_ADDRESS_BYTES);
+        let treasury_balance = state
+            .get_balance(&treasury_addr)
+            .unwrap_or_default()
+            .0
+            .as_u128();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        let id = self
+            .treasury
+            .write()
+            .propose_spend(
+                proposer,
+                recipient,
+                amount,
+                request.description,
+                proposer_stake,
+                treasury_balance,
+                now,
+            )
+            .map_err(|e| RpcError::Execution(e.to_string()))?;
+
+        Ok(hex::encode(id.as_bytes()))
+    }
+
+    async fn vote_spend(&self, request: RpcVoteSpendRequest) -> RpcResult<bool> {
+        let proposal_id = Self::parse_hash(&request.proposal_id)?;
+        let voter = Self::parse_address(&request.voter)?;
+
+        let state = self.chain.state();
+        let voter_stake = state.get_stake(&voter).unwrap_or_default().0.as_u128();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        self.treasury
+            .write()
+            .vote(proposal_id, voter, request.approve, voter_stake, now)
+            .map_err(|e| RpcError::Execution(e.to_string()))?;
+
+        // Tally after each vote
+        let consensus = self.chain.consensus();
+        let validators = consensus.get_validators();
+        let total_stake: u128 = validators.iter().map(|v| v.stake.0.as_u128()).sum();
+        self.treasury.write().tally(total_stake, now);
+
+        Ok(true)
+    }
+
+    async fn get_spend_proposals(&self) -> RpcResult<Vec<RpcSpendProposal>> {
+        let treasury = self.treasury.read();
+        let proposals = treasury.all_proposals();
+
+        Ok(proposals
+            .into_iter()
+            .map(|p| {
+                let status = match &p.status {
+                    qfc_ai_coordinator::SpendStatus::Active => "Active".to_string(),
+                    qfc_ai_coordinator::SpendStatus::Queued { execute_after } => {
+                        format!("Queued(execute_after={})", execute_after)
+                    }
+                    qfc_ai_coordinator::SpendStatus::Executed => "Executed".to_string(),
+                    qfc_ai_coordinator::SpendStatus::Rejected => "Rejected".to_string(),
+                    qfc_ai_coordinator::SpendStatus::Expired => "Expired".to_string(),
+                    qfc_ai_coordinator::SpendStatus::Cancelled => "Cancelled".to_string(),
+                };
+
+                RpcSpendProposal {
+                    proposal_id: hex::encode(p.proposal_id.as_bytes()),
+                    proposer: p.proposer.to_string(),
+                    recipient: p.recipient.to_string(),
+                    amount: p.amount.to_string(),
+                    description: p.description.clone(),
+                    stake_for: p.stake_for().to_string(),
+                    stake_against: p.stake_against().to_string(),
+                    status,
                     created_at: p.created_at,
                     voting_deadline: p.voting_deadline,
                 }

@@ -12,8 +12,9 @@ use qfc_storage;
 use qfc_types::{
     block_reward_for_year, DoubleSignEvidence, Heartbeat, InferenceProof, RewardDistribution,
     Transaction, ValidatorMessage, BLOCK_TIME_MS, FEE_BURN_PERCENT, FEE_PRODUCER_PERCENT,
-    FEE_VOTERS_PERCENT, INFERENCE_FEE_MINER_PERCENT, INFERENCE_FEE_VALIDATORS_PERCENT,
-    MAX_INFERENCE_PROOFS_PER_BLOCK, PRODUCER_REWARD_PERCENT, U256, VOTERS_REWARD_PERCENT,
+    FEE_TREASURY_PERCENT, FEE_VOTERS_PERCENT, INFERENCE_FEE_MINER_PERCENT,
+    INFERENCE_FEE_VALIDATORS_PERCENT, MAX_INFERENCE_PROOFS_PER_BLOCK, PRODUCER_REWARD_PERCENT,
+    U256, VOTERS_REWARD_PERCENT,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -484,9 +485,16 @@ impl BlockProducer {
         // Fee burned (20%)
         let fee_burned = total_fees * U256::from_u64(FEE_BURN_PERCENT) / U256::from_u64(100);
 
+        // Treasury fee (5%)
+        let treasury_fee = total_fees * U256::from_u64(FEE_TREASURY_PERCENT) / U256::from_u64(100);
+        if !treasury_fee.is_zero() {
+            let treasury_addr = qfc_types::Address::new(qfc_types::TREASURY_ADDRESS_BYTES);
+            state.add_balance(&treasury_addr, treasury_fee)?;
+        }
+
         debug!(
-            "Block #{} rewards: producer={}, voters={}, miners={}, burned={}",
-            block_height, producer_reward, voter_reward, miner_reward, fee_burned
+            "Block #{} rewards: producer={}, voters={}, miners={}, treasury={}, burned={}",
+            block_height, producer_reward, voter_reward, miner_reward, treasury_fee, fee_burned
         );
 
         // Create reward distribution record

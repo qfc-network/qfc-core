@@ -85,14 +85,17 @@ pub const VOTERS_REWARD_PERCENT: u64 = 25;
 /// If no inference proofs, this share goes back to producer + voters at 70/30 ratio.
 pub const INFERENCE_MINERS_REWARD_PERCENT: u64 = 15;
 
-/// Fee distribution: producer (50%)
-pub const FEE_PRODUCER_PERCENT: u64 = 50;
+/// Fee distribution: producer (47%)
+pub const FEE_PRODUCER_PERCENT: u64 = 47;
 
-/// Fee distribution: voters (30%)
-pub const FEE_VOTERS_PERCENT: u64 = 30;
+/// Fee distribution: voters (28%)
+pub const FEE_VOTERS_PERCENT: u64 = 28;
 
 /// Fee distribution: burn (20%)
 pub const FEE_BURN_PERCENT: u64 = 20;
+
+/// Fee distribution: treasury (5%)
+pub const FEE_TREASURY_PERCENT: u64 = 5;
 
 /// Contribution weight: stake (30%)
 pub const WEIGHT_STAKE: f64 = 0.30;
@@ -135,6 +138,16 @@ pub const ONE_QFC: u128 = 1_000_000_000_000_000_000;
 
 /// One Gwei in wei (10^9)
 pub const ONE_GWEI: u64 = 1_000_000_000;
+
+// ============ Treasury ============
+
+/// Treasury address — deterministic address derived from "qfc-treasury"
+/// keccak256("qfc-treasury")[12..] = 0x5146...
+/// This is a contract-like address with no private key.
+pub const TREASURY_ADDRESS_BYTES: [u8; 20] = [
+    0x51, 0x46, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x01,
+];
 
 // ============ Tokenomics ============
 

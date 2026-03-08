@@ -184,6 +184,24 @@ pub trait QfcApi {
     #[method(name = "getModelProposals")]
     async fn get_model_proposals(&self) -> RpcResult<Vec<RpcModelProposal>>;
 
+    // ---- v2.0: Treasury endpoints ----
+
+    /// Get treasury balance and stats
+    #[method(name = "getTreasuryInfo")]
+    async fn get_treasury_info(&self) -> RpcResult<RpcTreasuryInfo>;
+
+    /// Submit a treasury spend proposal
+    #[method(name = "proposeSpend")]
+    async fn propose_spend(&self, request: RpcProposeSpendRequest) -> RpcResult<String>;
+
+    /// Vote on a treasury spend proposal
+    #[method(name = "voteSpend")]
+    async fn vote_spend(&self, request: RpcVoteSpendRequest) -> RpcResult<bool>;
+
+    /// Get all treasury spend proposals
+    #[method(name = "getSpendProposals")]
+    async fn get_spend_proposals(&self) -> RpcResult<Vec<RpcSpendProposal>>;
+
     // ---- v2.0: Parameter Governance endpoints ----
 
     /// Submit a parameter change proposal
@@ -645,4 +663,62 @@ pub struct RpcParameterProposal {
 pub struct RpcParameterOverride {
     pub parameter: String,
     pub value: String,
+}
+
+// ============ v2.0: Treasury RPC Types ============
+
+/// Treasury info (balance, stats)
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcTreasuryInfo {
+    /// Treasury address (hex)
+    pub address: String,
+    /// Current balance in wei (decimal string)
+    pub balance: String,
+    /// Total amount disbursed via governance
+    pub total_disbursed: String,
+    /// Number of active spend proposals
+    pub active_proposals: u64,
+}
+
+/// Request to propose a treasury spend
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcProposeSpendRequest {
+    /// Proposer address (hex)
+    pub proposer: String,
+    /// Recipient address (hex)
+    pub recipient: String,
+    /// Amount in wei (decimal string)
+    pub amount: String,
+    /// Description of the spend
+    pub description: String,
+}
+
+/// Request to vote on a treasury spend proposal
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcVoteSpendRequest {
+    /// Proposal ID (hex)
+    pub proposal_id: String,
+    /// Voter address (hex)
+    pub voter: String,
+    /// Whether to approve
+    pub approve: bool,
+}
+
+/// Treasury spend proposal information
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcSpendProposal {
+    pub proposal_id: String,
+    pub proposer: String,
+    pub recipient: String,
+    pub amount: String,
+    pub description: String,
+    pub stake_for: String,
+    pub stake_against: String,
+    pub status: String,
+    pub created_at: u64,
+    pub voting_deadline: u64,
 }
