@@ -2532,9 +2532,10 @@ impl QfcApiServer for RpcServer {
             qfc_crypto::blake3_hash(&data)
         };
 
+        let current_epoch = self.chain.get_epoch();
         let task = qfc_inference::InferenceTask::new(
             task_id,
-            now / 10_000,
+            current_epoch.number,
             task_type,
             input_data,
             now,
