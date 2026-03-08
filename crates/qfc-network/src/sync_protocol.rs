@@ -24,6 +24,13 @@ pub enum SyncRequest {
     GetBlockRange { start: u64, end: u64 },
     /// Request the current head block info
     GetStatus,
+    /// Request block headers only (for light client sync)
+    GetHeaderRange { start: u64, end: u64 },
+    /// Request a state proof for an account at a given block
+    GetStateProof {
+        address: [u8; 20],
+        block_number: u64,
+    },
 }
 
 /// Sync response types
@@ -46,6 +53,15 @@ pub enum SyncResponse {
     },
     /// Error response
     Error(String),
+    /// Block headers only (serialized BlockHeader list)
+    Headers(Vec<Vec<u8>>),
+    /// State proof (serialized MerkleProof + account data)
+    StateProof {
+        /// Serialized MerkleProof
+        proof: Vec<u8>,
+        /// Serialized Account
+        account: Vec<u8>,
+    },
 }
 
 /// Codec for sync protocol

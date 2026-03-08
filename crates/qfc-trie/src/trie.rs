@@ -125,6 +125,73 @@ impl Trie {
         }
     }
 
+    /// Generate a Merkle proof for a key.
+    /// Collects all trie nodes along the lookup path.
+    pub fn get_proof(&self, key: &[u8]) -> Result<crate::proof::MerkleProof> {
+        let nibbles = NibbleSlice::from_bytes(key);
+        let mut builder = crate::proof::ProofBuilder::new();
+        let value = self.collect_proof(&self.root, &nibbles, &mut builder)?;
+        Ok(builder.build(key.to_vec(), value))
+    }
+
+    fn collect_proof(
+        &self,
+        node_hash: &Hash,
+        key: &NibbleSlice,
+        builder: &mut crate::proof::ProofBuilder,
+    ) -> Result<Option<Vec<u8>>> {
+        if *node_hash == Hash::ZERO {
+            return Ok(None);
+        }
+
+        let node = self.get_node(node_hash)?;
+        builder.add_node(&node);
+
+        match &node {
+            TrieNode::Empty => Ok(None),
+
+            TrieNode::Leaf {
+                key: leaf_key,
+                value,
+            } => {
+                let leaf_nibbles = NibbleSlice::from_nibbles(leaf_key);
+                if key.to_nibbles() == leaf_nibbles.to_nibbles() {
+                    Ok(Some(value.clone()))
+                } else {
+                    Ok(None)
+                }
+            }
+
+            TrieNode::Extension {
+                key: ext_key,
+                child,
+            } => {
+                let ext_nibbles = NibbleSlice::from_nibbles(ext_key);
+                if key.starts_with(&ext_nibbles) {
+                    let remaining = key.offset(ext_nibbles.len());
+                    self.collect_proof(child, &remaining, builder)
+                } else {
+                    Ok(None)
+                }
+            }
+
+            TrieNode::Branch { children, value } => {
+                if key.is_empty() {
+                    Ok(value.clone())
+                } else {
+                    let index = key.at(0) as usize;
+                    match children[index] {
+                        Some(child_hash) => {
+                            let remaining = key.offset(1);
+                            self.collect_proof(&child_hash, &remaining, builder)
+                        }
+                        None => Ok(None),
+                    }
+                }
+            }
+        }
+    }
+
     /// Insert a value into the trie
     pub fn insert(&mut self, key: &[u8], value: Vec<u8>) -> Result<()> {
         let nibbles = NibbleSlice::from_bytes(key);

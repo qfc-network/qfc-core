@@ -844,6 +844,61 @@ impl EthApiServer for RpcServer {
         Ok(format!("0x{:064x}", value.0))
     }
 
+    async fn get_proof(
+        &self,
+        address: String,
+        storage_keys: Vec<String>,
+        block: Option<BlockNumber>,
+    ) -> RpcResult<crate::eth::RpcAccountProof> {
+        let address = Self::parse_address(&address)?;
+        let block_num = self.resolve_block_number(block);
+
+        let state = self
+            .chain
+            .state_at(block_num)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        // Generate account proof
+        let (account_proof, account) = state
+            .get_account_proof(&address)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        // Convert proof nodes to hex
+        let proof_nodes: Vec<String> = account_proof
+            .nodes
+            .iter()
+            .map(|n| format!("0x{}", hex::encode(n)))
+            .collect();
+
+        // Generate storage proofs for requested keys
+        let mut storage_proofs = Vec::new();
+        for key_str in &storage_keys {
+            let slot = Self::parse_u256(key_str)?;
+            let value = state
+                .get_storage(&address, &slot)
+                .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+            storage_proofs.push(crate::eth::RpcStorageProof {
+                key: key_str.clone(),
+                value: format!("0x{:064x}", value.0),
+                proof: vec![], // storage trie proofs not yet implemented
+            });
+        }
+
+        Ok(crate::eth::RpcAccountProof {
+            address: address.to_string(),
+            account_proof: proof_nodes,
+            balance: format!("0x{:x}", account.balance.0),
+            code_hash: account
+                .code_hash
+                .map(|h| format!("0x{}", hex::encode(h.as_bytes())))
+                .unwrap_or_else(|| "0x".to_string()),
+            nonce: format!("0x{:x}", account.nonce),
+            storage_hash: format!("0x{}", hex::encode(state.root().as_bytes())),
+            storage_proof: storage_proofs,
+        })
+    }
+
     async fn eth_subscribe(
         &self,
         pending: jsonrpsee::PendingSubscriptionSink,

@@ -108,6 +108,10 @@ struct Args {
     /// IPFS size threshold in bytes (default: 1MB, results larger than this go to IPFS)
     #[arg(long, env = "QFC_IPFS_SIZE_THRESHOLD", default_value_t = 1_048_576)]
     ipfs_size_threshold: usize,
+
+    /// Run in light client mode (header-only sync, no state storage)
+    #[arg(long, env = "QFC_LIGHT")]
+    light: bool,
 }
 
 #[tokio::main]
@@ -134,9 +138,17 @@ async fn main() -> Result<()> {
 
     tracing::subscriber::set_global_default(subscriber)?;
 
-    info!("Starting QFC Node v{}", env!("CARGO_PKG_VERSION"));
+    let mode = if args.light { "light" } else { "full" };
+    info!(
+        "Starting QFC Node v{} ({})",
+        env!("CARGO_PKG_VERSION"),
+        mode
+    );
     info!("Data directory: {:?}", args.datadir);
     info!("Chain ID: {}", args.chain_id);
+    if args.light {
+        info!("Light client mode: header-only sync, no block execution");
+    }
 
     // Create data directory
     std::fs::create_dir_all(&args.datadir)?;

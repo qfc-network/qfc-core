@@ -238,6 +238,44 @@ impl SyncManager {
                     genesis_hash,
                 }
             }
+
+            SyncRequest::GetHeaderRange { start, end } => {
+                let mut headers = Vec::new();
+                let end = end.min(start + MAX_BLOCKS_PER_REQUEST);
+
+                for num in start..=end {
+                    match self.chain.get_block_by_number(num) {
+                        Ok(Some(block)) => {
+                            headers.push(borsh::to_vec(&block.header).unwrap());
+                        }
+                        Ok(None) => break,
+                        Err(_) => break,
+                    }
+                }
+
+                if headers.is_empty() {
+                    SyncResponse::NotFound
+                } else {
+                    SyncResponse::Headers(headers)
+                }
+            }
+
+            SyncRequest::GetStateProof {
+                address,
+                block_number,
+            } => {
+                let addr = qfc_types::Address::new(address);
+                match self.chain.state_at(block_number) {
+                    Ok(state) => match state.get_account_proof(&addr) {
+                        Ok((proof, account)) => SyncResponse::StateProof {
+                            proof: proof.to_bytes(),
+                            account: borsh::to_vec(&account).unwrap(),
+                        },
+                        Err(e) => SyncResponse::Error(e.to_string()),
+                    },
+                    Err(e) => SyncResponse::Error(e.to_string()),
+                }
+            }
         }
     }
 

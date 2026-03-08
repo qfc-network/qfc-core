@@ -306,6 +306,18 @@ impl StateDB {
         Ok(self.get_account(address)?.get_stake())
     }
 
+    /// Generate a Merkle proof for an account against the current state root.
+    /// Returns the proof and the account data (if it exists).
+    pub fn get_account_proof(&self, address: &Address) -> Result<(qfc_trie::MerkleProof, Account)> {
+        let key = address.as_bytes();
+        let trie = self.trie.read();
+        let proof = trie
+            .get_proof(key)
+            .map_err(|e| StateError::Storage(format!("Failed to generate proof: {}", e)))?;
+        let account = self.get_account(address)?;
+        Ok((proof, account))
+    }
+
     /// Set stake amount for a validator
     pub fn set_stake(&self, address: &Address, stake: U256) -> Result<()> {
         let mut account = self.get_account(address)?;
