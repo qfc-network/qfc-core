@@ -2,6 +2,7 @@
 //!
 //! Main entry point for running a QFC node.
 
+mod dynamic_rewards;
 mod metrics;
 mod miner;
 mod producer;
@@ -33,15 +34,15 @@ use tracing_subscriber::FmtSubscriber;
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Data directory
-    #[arg(short, long, default_value = "./data")]
+    #[arg(short, long, default_value = "./data", env = "QFC_DATA_DIR")]
     datadir: PathBuf,
 
     /// Chain ID
-    #[arg(long, default_value_t = DEFAULT_CHAIN_ID)]
+    #[arg(long, default_value_t = DEFAULT_CHAIN_ID, env = "QFC_CHAIN_ID")]
     chain_id: u64,
 
     /// RPC HTTP listen address
-    #[arg(long, default_value = "127.0.0.1:8545")]
+    #[arg(long, default_value = "127.0.0.1:8545", env = "QFC_RPC_ADDR")]
     rpc_addr: SocketAddr,
 
     /// Enable RPC
@@ -49,52 +50,68 @@ struct Args {
     rpc: bool,
 
     /// Run in development mode
-    #[arg(long)]
+    #[arg(long, env = "QFC_DEV_MODE")]
     dev: bool,
 
     /// Validator mode (provide secret key hex)
-    #[arg(long)]
+    #[arg(long, env = "QFC_VALIDATOR_KEY")]
     validator: Option<String>,
 
     /// Log level
-    #[arg(long, default_value = "info")]
+    #[arg(long, default_value = "info", env = "QFC_LOG_LEVEL")]
     log_level: String,
 
     /// P2P listen port
-    #[arg(long, default_value_t = 30303)]
+    #[arg(long, default_value_t = 30303, env = "QFC_P2P_PORT")]
     p2p_port: u16,
 
     /// Disable P2P networking
-    #[arg(long)]
+    #[arg(long, env = "QFC_NO_NETWORK")]
     no_network: bool,
 
-    /// Bootnode addresses (multiaddr format)
-    #[arg(long)]
+    /// Bootnode addresses (multiaddr format, comma-separated via env)
+    #[arg(long, env = "QFC_BOOTNODES", value_delimiter = ',')]
     bootnodes: Vec<String>,
 
     /// Enable mining for compute contribution (20% weight in PoC)
-    #[arg(long)]
+    #[arg(long, env = "QFC_MINING_ENABLED")]
     mine: bool,
 
     /// Number of mining threads (default: number of CPUs)
-    #[arg(long)]
+    #[arg(long, env = "QFC_MINING_THREADS")]
     threads: Option<usize>,
 
     /// Compute mode: pow (v1 Blake3 PoW) or inference (v2 AI inference)
-    #[arg(long, default_value = "pow")]
+    #[arg(long, default_value = "pow", env = "QFC_COMPUTE_MODE")]
     compute_mode: String,
 
     /// Inference backend: auto, cuda, metal, cpu (for inference mode)
-    #[arg(long, default_value = "auto")]
+    #[arg(long, default_value = "auto", env = "QFC_INFERENCE_BACKEND")]
     inference_backend: String,
 
     /// Model cache directory (for inference mode)
-    #[arg(long)]
+    #[arg(long, env = "QFC_MODEL_DIR")]
     model_dir: Option<PathBuf>,
 
     /// Prometheus metrics listen address
-    #[arg(long, default_value = "0.0.0.0:6060")]
+    #[arg(long, default_value = "0.0.0.0:6060", env = "QFC_METRICS_ADDR")]
     metrics_addr: SocketAddr,
+
+    /// IPFS Kubo API URL for large inference result storage (optional)
+    #[arg(long, env = "QFC_IPFS_API_URL")]
+    ipfs_api_url: Option<String>,
+
+    /// IPFS Gateway URL for fetching results (optional)
+    #[arg(long, env = "QFC_IPFS_GATEWAY_URL")]
+    ipfs_gateway_url: Option<String>,
+
+    /// IPFS size threshold in bytes (default: 1MB, results larger than this go to IPFS)
+    #[arg(long, env = "QFC_IPFS_SIZE_THRESHOLD", default_value_t = 1_048_576)]
+    ipfs_size_threshold: usize,
+
+    /// Run in light client mode (header-only sync, no state storage)
+    #[arg(long, env = "QFC_LIGHT")]
+    light: bool,
 }
 
 #[tokio::main]
@@ -121,9 +138,17 @@ async fn main() -> Result<()> {
 
     tracing::subscriber::set_global_default(subscriber)?;
 
-    info!("Starting QFC Node v{}", env!("CARGO_PKG_VERSION"));
+    let mode = if args.light { "light" } else { "full" };
+    info!(
+        "Starting QFC Node v{} ({})",
+        env!("CARGO_PKG_VERSION"),
+        mode
+    );
     info!("Data directory: {:?}", args.datadir);
     info!("Chain ID: {}", args.chain_id);
+    if args.light {
+        info!("Light client mode: header-only sync, no block execution");
+    }
 
     // Create data directory
     std::fs::create_dir_all(&args.datadir)?;
@@ -324,6 +349,25 @@ async fn main() -> Result<()> {
             .with_challenge_generator(challenge_generator.clone())
             .with_redundant_verifier(redundant_verifier.clone())
             .with_task_router(task_router.clone());
+
+        // B2: IPFS client for large inference result storage
+        if let Some(ref api_url) = args.ipfs_api_url {
+            let ipfs_config = qfc_ai_coordinator::ipfs::IpfsConfig {
+                api_url: api_url.clone(),
+                gateway_url: args
+                    .ipfs_gateway_url
+                    .clone()
+                    .unwrap_or_else(|| "http://127.0.0.1:8080".into()),
+                size_threshold: args.ipfs_size_threshold,
+                ..Default::default()
+            };
+            rpc_server =
+                rpc_server.with_ipfs_client(qfc_ai_coordinator::ipfs::IpfsClient::new(ipfs_config));
+            info!(
+                "IPFS client configured: api={}, threshold={}",
+                api_url, args.ipfs_size_threshold
+            );
+        }
 
         let handle = rpc_server
             .start(rpc_config)

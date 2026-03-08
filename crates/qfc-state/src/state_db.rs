@@ -5,7 +5,7 @@ use parking_lot::RwLock;
 use qfc_crypto::blake3_hash;
 use qfc_storage::{cf, Database};
 use qfc_trie::Trie;
-use qfc_types::{Account, Address, Hash, U256};
+use qfc_types::{Account, Address, Hash, Undelegation, U256};
 use std::collections::HashMap;
 use tracing::debug;
 
@@ -306,6 +306,18 @@ impl StateDB {
         Ok(self.get_account(address)?.get_stake())
     }
 
+    /// Generate a Merkle proof for an account against the current state root.
+    /// Returns the proof and the account data (if it exists).
+    pub fn get_account_proof(&self, address: &Address) -> Result<(qfc_trie::MerkleProof, Account)> {
+        let key = address.as_bytes();
+        let trie = self.trie.read();
+        let proof = trie
+            .get_proof(key)
+            .map_err(|e| StateError::Storage(format!("Failed to generate proof: {}", e)))?;
+        let account = self.get_account(address)?;
+        Ok((proof, account))
+    }
+
     /// Set stake amount for a validator
     pub fn set_stake(&self, address: &Address, stake: U256) -> Result<()> {
         let mut account = self.get_account(address)?;
@@ -389,6 +401,69 @@ impl StateDB {
     /// This method only returns the direct stake from account state
     pub fn get_direct_stake(&self, address: &Address) -> Result<U256> {
         self.get_stake(address)
+    }
+
+    // ============ Undelegation Methods ============
+
+    /// Store a pending undelegation record
+    pub fn store_undelegation(&self, undelegation: &Undelegation) -> Result<()> {
+        let key = Undelegation::storage_key(
+            &undelegation.delegator,
+            &undelegation.validator,
+            undelegation.unlock_at,
+        );
+        self.db
+            .put(cf::UNDELEGATIONS, &key, &undelegation.to_bytes())
+            .map_err(|e| StateError::Storage(e.to_string()))
+    }
+
+    /// Get all pending undelegations for a delegator
+    pub fn get_undelegations(&self, delegator: &Address) -> Result<Vec<Undelegation>> {
+        let prefix = delegator.as_bytes();
+        let mut results = Vec::new();
+        let iter = self
+            .db
+            .iter_from(cf::UNDELEGATIONS, prefix)
+            .map_err(|e| StateError::Storage(e.to_string()))?;
+        for (key, value) in iter {
+            if !key.starts_with(prefix) {
+                break;
+            }
+            if let Ok(u) = Undelegation::from_bytes(&value) {
+                results.push(u);
+            }
+        }
+        Ok(results)
+    }
+
+    /// Get all undelegations that have matured (unlock_at <= current_time)
+    pub fn get_mature_undelegations(&self, current_time: u64) -> Result<Vec<Undelegation>> {
+        let mut results = Vec::new();
+        let iter = self
+            .db
+            .iter(cf::UNDELEGATIONS)
+            .map_err(|e| StateError::Storage(e.to_string()))?;
+        for (_key, value) in iter {
+            if let Ok(u) = Undelegation::from_bytes(&value) {
+                if u.is_unlocked(current_time) {
+                    results.push(u);
+                }
+            }
+        }
+        Ok(results)
+    }
+
+    /// Delete a completed undelegation record
+    pub fn delete_undelegation(
+        &self,
+        delegator: &Address,
+        validator: &Address,
+        unlock_at: u64,
+    ) -> Result<()> {
+        let key = Undelegation::storage_key(delegator, validator, unlock_at);
+        self.db
+            .delete(cf::UNDELEGATIONS, &key)
+            .map_err(|e| StateError::Storage(e.to_string()))
     }
 
     /// Commit all changes and return new state root

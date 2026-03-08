@@ -21,6 +21,8 @@ members = [
     "crates/qfc-inference",
     "crates/qfc-ai-coordinator",
     "crates/qfc-miner",
+    # v2.0: Cross-chain bridge
+    "crates/qfc-bridge",
 ]
 
 
@@ -56,7 +58,7 @@ sha3 = "0.10"
 rocksdb = "0.22"
 
 # EVM
-revm = { version = "8.0", default-features = false, features = ["std"] }
+revm = { version = "8.0", default-features = false, features = ["std", "secp256k1"] }
 
 # Networking
 libp2p = { version = "0.56", default-features = false, features = ["dns", "tokio", "tcp", "noise", "yamux", "identify", "ping", "gossipsub", "kad", "request-response", "macros"] }
@@ -71,7 +73,7 @@ futures = "0.3"
 async-trait = "0.1"
 
 # CLI
-clap = { version = "4.4", features = ["derive"] }
+clap = { version = "4.4", features = ["derive", "env"] }
 
 # Logging
 tracing = "0.1"
@@ -90,6 +92,9 @@ candle-nn = "0.9"
 candle-transformers = "0.9"
 hf-hub = { version = "0.5", features = ["tokio"] }
 tokenizers = "0.22"
+
+# AI / ML inference (ONNX Runtime — AMD ROCm, DirectML, CPU)
+ort = "2.0.0-rc.12"
 
 # Utilities
 hex = "0.4"
@@ -124,6 +129,7 @@ qfc-pow = { path = "crates/qfc-pow" }
 qfc-inference = { path = "crates/qfc-inference" }
 qfc-ai-coordinator = { path = "crates/qfc-ai-coordinator" }
 qfc-miner = { path = "crates/qfc-miner" }
+qfc-bridge = { path = "crates/qfc-bridge" }
 
 [profile.release]
 lto = true

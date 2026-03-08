@@ -59,17 +59,18 @@ COPY --from=builder /build/target/release/qfc-miner /usr/local/bin/qfc-miner
 # Create data directory
 RUN mkdir -p /data /config /models
 
-# Environment variables
+# Environment defaults (read directly by clap via env attributes)
 ENV QFC_DATA_DIR=/data
 ENV QFC_RPC_ADDR=0.0.0.0:8545
-ENV QFC_P2P_ADDR=0.0.0.0:30303
+ENV QFC_P2P_PORT=30303
 ENV QFC_LOG_LEVEL=info
 ENV RUST_LOG=info
-# v2.0: Compute mode (pow | inference, default: pow)
 ENV QFC_METRICS_ADDR=0.0.0.0:6060
 ENV QFC_COMPUTE_MODE=pow
 ENV QFC_INFERENCE_BACKEND=auto
 ENV QFC_MODEL_DIR=/models
+# Set QFC_MINER_MODE=true to run qfc-miner instead of qfc-node
+ENV QFC_MINER_MODE=false
 
 # Expose ports
 EXPOSE 8545 8546 30303 6060
@@ -79,62 +80,20 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8545 -X POST -H "Content-Type: application/json" \
         -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' || exit 1
 
-# Entrypoint script
+# Entrypoint: clap reads QFC_* env vars directly, no manual translation needed
 COPY <<'EOF' /entrypoint.sh
 #!/bin/bash
 set -e
 
-# Build command arguments
-ARGS="--datadir ${QFC_DATA_DIR:-/data}"
-ARGS="$ARGS --rpc-addr ${QFC_RPC_ADDR:-0.0.0.0:8545}"
-ARGS="$ARGS --p2p-port ${QFC_P2P_PORT:-30303}"
-ARGS="$ARGS --log-level ${QFC_LOG_LEVEL:-info}"
-ARGS="$ARGS --metrics-addr ${QFC_METRICS_ADDR:-0.0.0.0:6060}"
-
-# Add validator key if provided
-if [ -n "$QFC_VALIDATOR_KEY" ]; then
-    # Remove 0x prefix if present
-    KEY="${QFC_VALIDATOR_KEY#0x}"
-    ARGS="$ARGS --validator $KEY"
+if [ "$QFC_MINER_MODE" = "true" ] || [ "$QFC_MINER_MODE" = "1" ]; then
+    # Miner mode: clap reads QFC_MINER_* env vars directly
+    echo "Starting QFC miner (wallet: ${QFC_MINER_WALLET:-not set})"
+    exec qfc-miner "$@"
+else
+    # Node mode: clap reads QFC_* env vars directly
+    echo "Starting QFC node (validator: ${QFC_VALIDATOR_KEY:+yes}${QFC_VALIDATOR_KEY:-no})"
+    exec qfc-node "$@"
 fi
-
-# Enable mining if requested
-if [ "$QFC_MINING_ENABLED" = "true" ] || [ "$QFC_MINING_ENABLED" = "1" ]; then
-    ARGS="$ARGS --mine"
-    if [ -n "$QFC_MINING_THREADS" ]; then
-        ARGS="$ARGS --threads $QFC_MINING_THREADS"
-    fi
-    # v2.0: Compute mode and inference settings
-    if [ -n "$QFC_COMPUTE_MODE" ]; then
-        ARGS="$ARGS --compute-mode $QFC_COMPUTE_MODE"
-    fi
-    if [ -n "$QFC_INFERENCE_BACKEND" ]; then
-        ARGS="$ARGS --inference-backend $QFC_INFERENCE_BACKEND"
-    fi
-    if [ -n "$QFC_MODEL_DIR" ]; then
-        ARGS="$ARGS --model-dir $QFC_MODEL_DIR"
-    fi
-fi
-
-# Add bootnodes if provided
-if [ -n "$QFC_BOOTNODES" ]; then
-    for node in $(echo $QFC_BOOTNODES | tr ',' ' '); do
-        ARGS="$ARGS --bootnodes $node"
-    done
-fi
-
-# Dev mode
-if [ "$QFC_DEV_MODE" = "true" ] || [ "$QFC_DEV_MODE" = "1" ]; then
-    ARGS="$ARGS --dev"
-fi
-
-# Disable network if requested
-if [ "$QFC_NO_NETWORK" = "true" ] || [ "$QFC_NO_NETWORK" = "1" ]; then
-    ARGS="$ARGS --no-network"
-fi
-
-echo "Starting QFC node with: qfc-node $ARGS"
-exec qfc-node $ARGS
 EOF
 
 RUN chmod +x /entrypoint.sh

@@ -103,6 +103,10 @@ pub trait QfcApi {
     #[method(name = "getStake")]
     async fn get_stake(&self, address: String) -> RpcResult<String>;
 
+    /// Get pending undelegations for an address
+    #[method(name = "getPendingUndelegations")]
+    async fn get_pending_undelegations(&self, address: String) -> RpcResult<Vec<RpcUndelegation>>;
+
     /// Get current epoch info
     #[method(name = "getEpoch")]
     async fn get_epoch(&self) -> RpcResult<RpcEpoch>;
@@ -180,6 +184,42 @@ pub trait QfcApi {
     #[method(name = "getModelProposals")]
     async fn get_model_proposals(&self) -> RpcResult<Vec<RpcModelProposal>>;
 
+    // ---- v2.0: Treasury endpoints ----
+
+    /// Get treasury balance and stats
+    #[method(name = "getTreasuryInfo")]
+    async fn get_treasury_info(&self) -> RpcResult<RpcTreasuryInfo>;
+
+    /// Submit a treasury spend proposal
+    #[method(name = "proposeSpend")]
+    async fn propose_spend(&self, request: RpcProposeSpendRequest) -> RpcResult<String>;
+
+    /// Vote on a treasury spend proposal
+    #[method(name = "voteSpend")]
+    async fn vote_spend(&self, request: RpcVoteSpendRequest) -> RpcResult<bool>;
+
+    /// Get all treasury spend proposals
+    #[method(name = "getSpendProposals")]
+    async fn get_spend_proposals(&self) -> RpcResult<Vec<RpcSpendProposal>>;
+
+    // ---- v2.0: Parameter Governance endpoints ----
+
+    /// Submit a parameter change proposal
+    #[method(name = "proposeParameter")]
+    async fn propose_parameter(&self, request: RpcProposeParameterRequest) -> RpcResult<String>;
+
+    /// Vote on a parameter proposal (stake-weighted)
+    #[method(name = "voteParameter")]
+    async fn vote_parameter(&self, request: RpcVoteParameterRequest) -> RpcResult<bool>;
+
+    /// Get all parameter proposals
+    #[method(name = "getParameterProposals")]
+    async fn get_parameter_proposals(&self) -> RpcResult<Vec<RpcParameterProposal>>;
+
+    /// Get current parameter overrides (values changed by governance)
+    #[method(name = "getParameterOverrides")]
+    async fn get_parameter_overrides(&self) -> RpcResult<Vec<RpcParameterOverride>>;
+
     // ---- v2.0: Public Inference API endpoints ----
 
     /// Submit a public inference task (paid)
@@ -190,10 +230,59 @@ pub trait QfcApi {
     #[method(name = "getPublicTaskStatus")]
     async fn get_public_task_status(&self, task_id: String) -> RpcResult<RpcPublicTaskStatus>;
 
+    /// Estimate the fee for an inference task
+    #[method(name = "estimateInferenceFee")]
+    async fn estimate_inference_fee(
+        &self,
+        request: RpcEstimateInferenceFee,
+    ) -> RpcResult<RpcInferenceFeeEstimate>;
+
+    /// Fetch a large inference result from IPFS by CID.
+    /// Returns base64-encoded content. This proxies the request so clients
+    /// do not need their own IPFS node.
+    #[method(name = "getInferenceResult")]
+    async fn get_inference_result(&self, cid: String) -> RpcResult<String>;
+
     /// Subscribe to task status updates (WebSocket only).
     /// Pushes RpcPublicTaskStatus whenever the task transitions state.
     #[subscription(name = "subscribeTaskStatus" => "taskStatus", unsubscribe = "unsubscribeTaskStatus", item = RpcPublicTaskStatus)]
     async fn subscribe_task_status(&self, task_id: String) -> SubscriptionResult;
+
+    // ---- v2.0: Bridge endpoints ----
+
+    /// Get bridge status (validators, TVL, pending operations)
+    #[method(name = "getBridgeStatus")]
+    async fn get_bridge_status(&self) -> RpcResult<RpcBridgeStatus>;
+
+    /// Get a bridge deposit by ID
+    #[method(name = "getBridgeDeposit")]
+    async fn get_bridge_deposit(&self, deposit_id: String) -> RpcResult<Option<RpcBridgeDeposit>>;
+
+    /// Get a bridge withdrawal by ID
+    #[method(name = "getBridgeWithdrawal")]
+    async fn get_bridge_withdrawal(
+        &self,
+        withdrawal_id: String,
+    ) -> RpcResult<Option<RpcBridgeWithdrawal>>;
+
+    /// Get rent info for an account (storage deposit, dormancy status, rent owed)
+    #[method(name = "getAccountRentInfo")]
+    async fn get_account_rent_info(&self, address: String) -> RpcResult<RpcAccountRentInfo>;
+
+    /// Send a UserOperation (EIP-4337 account abstraction)
+    #[method(name = "sendUserOperation")]
+    async fn send_user_operation(&self, user_op: RpcUserOperation) -> RpcResult<String>;
+
+    /// Get a UserOperation by hash
+    #[method(name = "getUserOperationByHash")]
+    async fn get_user_operation_by_hash(
+        &self,
+        hash: String,
+    ) -> RpcResult<Option<RpcUserOperationStatus>>;
+
+    /// Get the EntryPoint supported by this node
+    #[method(name = "supportedEntryPoints")]
+    async fn supported_entry_points(&self) -> RpcResult<Vec<String>>;
 }
 
 /// Faucet response
@@ -203,6 +292,17 @@ pub struct RpcFaucetResponse {
     pub tx_hash: String,
     pub amount: String,
     pub to: String,
+}
+
+/// Pending undelegation record
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcUndelegation {
+    pub delegator: String,
+    pub validator: String,
+    pub amount: String,
+    pub unlock_at: u64,
+    pub is_unlocked: bool,
 }
 
 /// Epoch information
@@ -346,6 +446,11 @@ pub struct RpcProofResult {
     pub spot_checked: bool,
     /// Detail message
     pub message: String,
+    /// Estimated reward in wei (hex string). This is the miner's estimated
+    /// share based on base fee calculation. Actual reward is determined
+    /// at block production time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reward_estimate: Option<String>,
 }
 
 // ============ v2.0: Model Governance RPC Types ============
@@ -425,18 +530,70 @@ pub struct RpcPublicTaskStatus {
     pub deadline: u64,
     /// Max fee in wei (hex)
     pub max_fee: String,
-    /// Result payload (base64-encoded bytes), present when status=Completed
+    /// Result payload (base64-encoded bytes), present when status=Completed and result_type="inline"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<String>,
     /// Result size in bytes
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result_size: Option<usize>,
+    /// "inline" or "ipfs" — how result is stored
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_type: Option<String>,
+    /// IPFS CID (only when result_type="ipfs")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_cid: Option<String>,
+    /// Preview of result (base64, first 1KB, only for IPFS results)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_preview: Option<String>,
     /// Miner that completed the task
     #[serde(skip_serializing_if = "Option::is_none")]
     pub miner_address: Option<String>,
     /// Execution time in milliseconds
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execution_time_ms: Option<u64>,
+}
+
+/// Request to estimate inference fee
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcEstimateInferenceFee {
+    /// Model ID (e.g. "qfc-embed-small")
+    pub model_id: String,
+    /// Task type: "TextEmbedding", "TextGeneration", "ImageClassification", "OnnxInference"
+    #[serde(default = "default_task_type")]
+    pub task_type: String,
+    /// Input size in bytes (used for future dynamic pricing, currently unused)
+    #[serde(default)]
+    pub input_size: u64,
+    /// Max tokens (for TextGeneration tasks, default 100)
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: u64,
+}
+
+fn default_task_type() -> String {
+    "TextEmbedding".into()
+}
+
+fn default_max_tokens() -> u64 {
+    100
+}
+
+/// Response for inference fee estimation
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcInferenceFeeEstimate {
+    /// Estimated base fee in wei (hex)
+    pub base_fee: String,
+    /// Model ID
+    pub model_id: String,
+    /// GPU tier required: "Hot", "Warm", "Cold"
+    pub gpu_tier: String,
+    /// Estimated execution time in ms
+    pub estimated_time_ms: u64,
+    /// Minimum memory required in MB
+    pub min_memory_mb: u64,
+    /// Estimated FLOPS
+    pub estimated_flops: u64,
 }
 
 // ============ v2.0 P2: Miner Registration & Status Report Types ============
@@ -447,6 +604,8 @@ pub struct RpcPublicTaskStatus {
 pub struct RpcRegisterMinerRequest {
     /// Miner wallet address (hex)
     pub miner_address: String,
+    /// Ed25519 public key (hex) — used to verify signature and derive address
+    pub public_key: String,
     /// GPU model name (e.g. "NVIDIA RTX 4090")
     pub gpu_model: String,
     /// VRAM in MB
@@ -492,4 +651,206 @@ pub struct RpcModelStatus {
     pub model_version: String,
     /// Layer: "hot", "warm", "cold"
     pub layer: String,
+}
+
+// ============ v2.0: Parameter Governance RPC Types ============
+
+/// Request to propose a parameter change
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcProposeParameterRequest {
+    /// Proposer address (hex)
+    pub proposer: String,
+    /// Parameter key (e.g. "block_reward", "min_gas_price")
+    pub parameter: String,
+    /// Proposed new value (decimal string)
+    pub proposed_value: String,
+    /// Description of the change
+    pub description: String,
+}
+
+/// Request to vote on a parameter proposal
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcVoteParameterRequest {
+    /// Proposal ID (hex)
+    pub proposal_id: String,
+    /// Voter address (hex)
+    pub voter: String,
+    /// Whether to approve
+    pub approve: bool,
+}
+
+/// Parameter proposal information
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcParameterProposal {
+    pub proposal_id: String,
+    pub proposer: String,
+    pub parameter: String,
+    pub current_value: String,
+    pub proposed_value: String,
+    pub description: String,
+    pub stake_for: String,
+    pub stake_against: String,
+    pub status: String,
+    pub created_at: u64,
+    pub voting_deadline: u64,
+}
+
+/// A parameter override applied by governance
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcParameterOverride {
+    pub parameter: String,
+    pub value: String,
+}
+
+// ============ v2.0: Treasury RPC Types ============
+
+/// Treasury info (balance, stats)
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcTreasuryInfo {
+    /// Treasury address (hex)
+    pub address: String,
+    /// Current balance in wei (decimal string)
+    pub balance: String,
+    /// Total amount disbursed via governance
+    pub total_disbursed: String,
+    /// Number of active spend proposals
+    pub active_proposals: u64,
+}
+
+/// Request to propose a treasury spend
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcProposeSpendRequest {
+    /// Proposer address (hex)
+    pub proposer: String,
+    /// Recipient address (hex)
+    pub recipient: String,
+    /// Amount in wei (decimal string)
+    pub amount: String,
+    /// Description of the spend
+    pub description: String,
+}
+
+/// Request to vote on a treasury spend proposal
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcVoteSpendRequest {
+    /// Proposal ID (hex)
+    pub proposal_id: String,
+    /// Voter address (hex)
+    pub voter: String,
+    /// Whether to approve
+    pub approve: bool,
+}
+
+/// Treasury spend proposal information
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcSpendProposal {
+    pub proposal_id: String,
+    pub proposer: String,
+    pub recipient: String,
+    pub amount: String,
+    pub description: String,
+    pub stake_for: String,
+    pub stake_against: String,
+    pub status: String,
+    pub created_at: u64,
+    pub voting_deadline: u64,
+}
+
+// ============ v2.0: Bridge RPC Types ============
+
+/// Bridge status
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcBridgeStatus {
+    pub active: bool,
+    pub validator_count: usize,
+    pub threshold: usize,
+    pub total_deposits: u64,
+    pub total_withdrawals: u64,
+    pub pending_deposits: u64,
+    pub pending_withdrawals: u64,
+    pub total_value_locked: String,
+}
+
+/// Bridge deposit info
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcBridgeDeposit {
+    pub deposit_id: String,
+    pub eth_tx_hash: String,
+    pub eth_block_number: u64,
+    pub eth_sender: String,
+    pub qfc_recipient: String,
+    pub token_address: String,
+    pub amount: String,
+    pub status: String,
+    pub signature_count: usize,
+    pub observed_at: u64,
+}
+
+/// Bridge withdrawal info
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcBridgeWithdrawal {
+    pub withdrawal_id: String,
+    pub qfc_tx_hash: String,
+    pub qfc_block_number: u64,
+    pub qfc_sender: String,
+    pub eth_recipient: String,
+    pub token_address: String,
+    pub amount: String,
+    pub status: String,
+    pub signature_count: usize,
+    pub observed_at: u64,
+    pub eth_unlock_tx: Option<String>,
+}
+
+/// Account rent info
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcAccountRentInfo {
+    pub address: String,
+    pub storage_deposit: String,
+    pub storage_slot_count: u64,
+    pub last_active_epoch: u64,
+    pub is_dormant: bool,
+    pub rent_owed: String,
+    pub current_epoch: u64,
+    pub reactivation_fee: String,
+}
+
+/// UserOperation request (EIP-4337)
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcUserOperation {
+    pub sender: String,
+    pub nonce: String,
+    pub init_code: String,
+    pub call_data: String,
+    pub call_gas_limit: String,
+    pub verification_gas_limit: String,
+    pub pre_verification_gas: String,
+    pub max_fee_per_gas: String,
+    pub max_priority_fee_per_gas: String,
+    pub paymaster_and_data: String,
+    pub signature: String,
+}
+
+/// UserOperation status response
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcUserOperationStatus {
+    pub user_op_hash: String,
+    pub sender: String,
+    pub nonce: u64,
+    pub status: String,
+    pub paymaster: Option<String>,
 }

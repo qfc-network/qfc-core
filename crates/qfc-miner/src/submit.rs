@@ -49,6 +49,9 @@ pub struct ProofResult {
     pub accepted: bool,
     pub spot_checked: bool,
     pub message: String,
+    /// Estimated reward in wei (hex string), returned by validator on acceptance
+    #[serde(default)]
+    pub reward_estimate: Option<String>,
 }
 
 /// JSON-RPC request/response types
@@ -216,6 +219,7 @@ pub async fn submit_proof(
 #[serde(rename_all = "camelCase")]
 struct RegisterMinerReq {
     miner_address: String,
+    public_key: String,
     gpu_model: String,
     vram_mb: u64,
     benchmark_score: u32,
@@ -248,6 +252,7 @@ pub async fn register_miner(
 
     let req = RegisterMinerReq {
         miner_address: miner_address.to_string(),
+        public_key: hex::encode(keypair.public_key().as_bytes()),
         gpu_model: gpu_model.to_string(),
         vram_mb,
         benchmark_score,
@@ -391,6 +396,71 @@ pub async fn report_miner_status(
     response
         .result
         .ok_or_else(|| SubmitError::SerializationError("No result in response".to_string()))
+}
+
+/// Epoch response from validator
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EpochResponse {
+    pub number: String, // hex
+}
+
+/// Fetch current epoch number from the validator
+#[allow(dead_code)]
+pub async fn fetch_epoch(rpc_url: &str) -> Result<u64, SubmitError> {
+    let rpc_request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "qfc_getEpoch",
+        "params": [],
+        "id": 1
+    });
+
+    let body = serde_json::to_string(&rpc_request)
+        .map_err(|e| SubmitError::SerializationError(e.to_string()))?;
+
+    let output = tokio::process::Command::new("curl")
+        .args([
+            "-s",
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            &body,
+            rpc_url,
+        ])
+        .output()
+        .await
+        .map_err(|e| SubmitError::ConnectionFailed(e.to_string()))?;
+
+    if !output.status.success() {
+        return Err(SubmitError::ConnectionFailed(
+            "curl request failed".to_string(),
+        ));
+    }
+
+    let response_str = String::from_utf8(output.stdout)
+        .map_err(|e| SubmitError::SerializationError(e.to_string()))?;
+
+    let response: JsonRpcResponse<EpochResponse> = serde_json::from_str(&response_str)
+        .map_err(|e| SubmitError::SerializationError(format!("Parse response: {}", e)))?;
+
+    if let Some(err) = response.error {
+        return Err(SubmitError::ProofRejected(err.message));
+    }
+
+    let epoch_resp = response
+        .result
+        .ok_or_else(|| SubmitError::SerializationError("No result in response".to_string()))?;
+
+    // Parse hex epoch number (strip 0x prefix)
+    let hex_str = epoch_resp
+        .number
+        .strip_prefix("0x")
+        .unwrap_or(&epoch_resp.number);
+    u64::from_str_radix(hex_str, 16)
+        .map_err(|e| SubmitError::SerializationError(format!("Invalid epoch hex: {}", e)))
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -22,6 +22,8 @@ pub enum BackendType {
     Cuda,
     /// Apple Metal GPU (Apple Silicon)
     Metal,
+    /// AMD ROCm GPU (via ONNX Runtime)
+    Rocm,
     /// CPU-only fallback
     Cpu,
 }
@@ -31,6 +33,7 @@ impl fmt::Display for BackendType {
         match self {
             BackendType::Cuda => write!(f, "CUDA"),
             BackendType::Metal => write!(f, "Metal"),
+            BackendType::Rocm => write!(f, "ROCm"),
             BackendType::Cpu => write!(f, "CPU"),
         }
     }
@@ -134,6 +137,8 @@ pub fn detect_backend() -> BackendType {
         BackendType::Cuda
     } else if is_metal_available() {
         BackendType::Metal
+    } else if is_rocm_available() {
+        BackendType::Rocm
     } else {
         BackendType::Cpu
     }
@@ -145,6 +150,7 @@ pub fn detect_hardware() -> HardwareInfo {
     let (memory_mb, compute_cores, device_name) = match backend {
         BackendType::Cuda => detect_cuda_hardware(),
         BackendType::Metal => detect_metal_hardware(),
+        BackendType::Rocm => detect_rocm_hardware(),
         BackendType::Cpu => detect_cpu_hardware(),
     };
     let tier = classify_tier(backend, memory_mb);
@@ -180,6 +186,15 @@ pub fn classify_tier(backend: BackendType, memory_mb: u64) -> GpuTier {
                 GpuTier::Cold // M1/M2/M3 base with 8GB
             }
         }
+        BackendType::Rocm => {
+            if memory_mb >= 24_000 {
+                GpuTier::Hot
+            } else if memory_mb >= 8_000 {
+                GpuTier::Warm
+            } else {
+                GpuTier::Cold
+            }
+        }
         BackendType::Cpu => GpuTier::Cold,
     }
 }
@@ -206,6 +221,81 @@ fn is_metal_available() -> bool {
     }
     #[cfg(not(feature = "metal"))]
     false
+}
+
+/// Check if AMD ROCm is available
+fn is_rocm_available() -> bool {
+    #[cfg(feature = "rocm")]
+    {
+        // Check for rocm-smi or ROCm runtime
+        std::process::Command::new("rocm-smi")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+            || std::path::Path::new("/opt/rocm").exists()
+    }
+    #[cfg(not(feature = "rocm"))]
+    false
+}
+
+/// Detect AMD ROCm GPU hardware info
+fn detect_rocm_hardware() -> (u64, u32, String) {
+    // Try rocm-smi for GPU info
+    let output = std::process::Command::new("rocm-smi")
+        .args(["--showmeminfo", "vram", "--csv"])
+        .output();
+
+    if let Ok(out) = output {
+        if out.status.success() {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            // Parse VRAM from rocm-smi output
+            let vram_mb = stdout
+                .lines()
+                .skip(1) // skip header
+                .filter_map(|line| {
+                    line.split(',')
+                        .nth(1) // total VRAM column
+                        .and_then(|v| v.trim().parse::<u64>().ok())
+                })
+                .next()
+                .unwrap_or(0)
+                / (1024 * 1024); // bytes to MB
+
+            // Get GPU name
+            let name = std::process::Command::new("rocm-smi")
+                .args(["--showproductname", "--csv"])
+                .output()
+                .ok()
+                .and_then(|o| {
+                    String::from_utf8(o.stdout)
+                        .ok()
+                        .and_then(|s| s.lines().nth(1).map(|l| l.trim().to_string()))
+                })
+                .unwrap_or_else(|| "AMD GPU (ROCm)".to_string());
+
+            return (vram_mb, 0, name);
+        }
+    }
+
+    // Fallback: check lspci for AMD GPU
+    let name = std::process::Command::new("lspci")
+        .output()
+        .ok()
+        .and_then(|o| {
+            String::from_utf8(o.stdout).ok().and_then(|s| {
+                s.lines()
+                    .find(|l| {
+                        let lower = l.to_lowercase();
+                        lower.contains("vga") && (lower.contains("amd") || lower.contains("radeon"))
+                    })
+                    .map(|l| l.to_string())
+            })
+        })
+        .unwrap_or_else(|| "AMD GPU".to_string());
+
+    // Use system memory as approximation
+    let mem = get_system_memory_mb();
+    (mem / 4, 0, name) // rough estimate: 1/4 system memory
 }
 
 /// Detect CUDA GPU hardware info
@@ -291,6 +381,7 @@ mod tests {
     fn test_backend_display() {
         assert_eq!(format!("{}", BackendType::Cuda), "CUDA");
         assert_eq!(format!("{}", BackendType::Metal), "Metal");
+        assert_eq!(format!("{}", BackendType::Rocm), "ROCm");
         assert_eq!(format!("{}", BackendType::Cpu), "CPU");
     }
 

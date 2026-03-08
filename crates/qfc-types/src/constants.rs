@@ -74,20 +74,28 @@ pub const VOTE_TIMEOUT_SECS: u64 = 5;
 /// Block reward in wei (10 QFC)
 pub const BLOCK_REWARD: u128 = 10_000_000_000_000_000_000; // 10^19 wei
 
-/// Producer reward percentage (70%)
-pub const PRODUCER_REWARD_PERCENT: u64 = 70;
+/// Producer reward percentage (60%)
+pub const PRODUCER_REWARD_PERCENT: u64 = 60;
 
-/// Voters reward percentage (30%)
-pub const VOTERS_REWARD_PERCENT: u64 = 30;
+/// Voters reward percentage (25%)
+pub const VOTERS_REWARD_PERCENT: u64 = 25;
 
-/// Fee distribution: producer (50%)
-pub const FEE_PRODUCER_PERCENT: u64 = 50;
+/// Inference miners reward percentage (15%)
+/// Distributed to miners who submitted proofs in this block, proportional to FLOPS.
+/// If no inference proofs, this share goes back to producer + voters at 70/30 ratio.
+pub const INFERENCE_MINERS_REWARD_PERCENT: u64 = 15;
 
-/// Fee distribution: voters (30%)
-pub const FEE_VOTERS_PERCENT: u64 = 30;
+/// Fee distribution: producer (47%)
+pub const FEE_PRODUCER_PERCENT: u64 = 47;
+
+/// Fee distribution: voters (28%)
+pub const FEE_VOTERS_PERCENT: u64 = 28;
 
 /// Fee distribution: burn (20%)
 pub const FEE_BURN_PERCENT: u64 = 20;
+
+/// Fee distribution: treasury (5%)
+pub const FEE_TREASURY_PERCENT: u64 = 5;
 
 /// Contribution weight: stake (30%)
 pub const WEIGHT_STAKE: f64 = 0.30;
@@ -130,6 +138,16 @@ pub const ONE_QFC: u128 = 1_000_000_000_000_000_000;
 
 /// One Gwei in wei (10^9)
 pub const ONE_GWEI: u64 = 1_000_000_000;
+
+// ============ Treasury ============
+
+/// Treasury address — deterministic address derived from "qfc-treasury"
+/// keccak256("qfc-treasury")[12..] = 0x5146...
+/// This is a contract-like address with no private key.
+pub const TREASURY_ADDRESS_BYTES: [u8; 20] = [
+    0x51, 0x46, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x01,
+];
 
 // ============ Tokenomics ============
 
@@ -231,3 +249,23 @@ pub fn block_reward_for_year(year: u64) -> U256 {
 pub fn min_delegation() -> U256 {
     U256::from_u128(MIN_DELEGATION)
 }
+
+// ============ State Rent ============
+
+/// Storage deposit per account creation (0.01 QFC — refundable on deletion)
+pub const STORAGE_DEPOSIT_PER_ACCOUNT: u128 = ONE_QFC / 100;
+
+/// Storage deposit per contract byte (0.00001 QFC per byte — refundable)
+pub const STORAGE_DEPOSIT_PER_BYTE: u128 = ONE_QFC / 100_000;
+
+/// Storage rent per slot per epoch (0.000001 QFC per storage slot per epoch)
+pub const STORAGE_RENT_PER_SLOT_PER_EPOCH: u128 = ONE_QFC / 1_000_000;
+
+/// Number of epochs of inactivity before an account becomes dormant
+pub const DORMANT_THRESHOLD_EPOCHS: u64 = 262_800; // ~1 year at 10s epochs
+
+/// Reactivation fee (0.1 QFC — non-refundable)
+pub const REACTIVATION_FEE: u128 = ONE_QFC / 10;
+
+/// Minimum storage deposit balance before account is flagged for rent collection
+pub const MIN_STORAGE_DEPOSIT: u128 = ONE_QFC / 1_000; // 0.001 QFC

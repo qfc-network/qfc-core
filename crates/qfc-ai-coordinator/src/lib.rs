@@ -13,12 +13,15 @@
 pub mod assignment;
 pub mod challenge;
 pub mod governance;
+pub mod ipfs;
+pub mod param_governance;
 pub mod proof_pool;
 pub mod redundant;
 pub mod registry;
 pub mod router;
 pub mod task_pool;
 pub mod task_types;
+pub mod treasury;
 pub mod verification;
 
 pub use assignment::{MinerCapability, MinerRegistry};
@@ -27,9 +30,13 @@ pub use challenge::{
     ChallengePenalty, ChallengeVerdict,
 };
 pub use governance::{GovernanceError, ModelGovernance, ModelProposal, ProposalStatus};
+pub use param_governance::{
+    ParamGovernanceError, ParamProposalStatus, ParameterGovernance, ParameterKey, ParameterProposal,
+};
 pub use proof_pool::ProofPool;
 pub use task_pool::TaskPool;
 pub use task_types::estimate_base_fee;
+pub use treasury::{SpendProposal, SpendStatus, Treasury, TreasuryError};
 pub use verification::{
     should_spot_check, verify_basic, verify_spot_check, VerificationError, VerificationResult,
 };

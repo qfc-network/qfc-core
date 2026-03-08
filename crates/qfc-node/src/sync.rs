@@ -238,6 +238,44 @@ impl SyncManager {
                     genesis_hash,
                 }
             }
+
+            SyncRequest::GetHeaderRange { start, end } => {
+                let mut headers = Vec::new();
+                let end = end.min(start + MAX_BLOCKS_PER_REQUEST);
+
+                for num in start..=end {
+                    match self.chain.get_block_by_number(num) {
+                        Ok(Some(block)) => {
+                            headers.push(borsh::to_vec(&block.header).unwrap());
+                        }
+                        Ok(None) => break,
+                        Err(_) => break,
+                    }
+                }
+
+                if headers.is_empty() {
+                    SyncResponse::NotFound
+                } else {
+                    SyncResponse::Headers(headers)
+                }
+            }
+
+            SyncRequest::GetStateProof {
+                address,
+                block_number,
+            } => {
+                let addr = qfc_types::Address::new(address);
+                match self.chain.state_at(block_number) {
+                    Ok(state) => match state.get_account_proof(&addr) {
+                        Ok((proof, account)) => SyncResponse::StateProof {
+                            proof: proof.to_bytes(),
+                            account: borsh::to_vec(&account).unwrap(),
+                        },
+                        Err(e) => SyncResponse::Error(e.to_string()),
+                    },
+                    Err(e) => SyncResponse::Error(e.to_string()),
+                }
+            }
         }
     }
 
@@ -485,8 +523,13 @@ impl SyncManager {
             }
         };
 
-        // Add to mempool
-        match self.mempool.write().add(tx, sender) {
+        // Add to mempool with nonce validation
+        let state = self.chain.state();
+        match self
+            .mempool
+            .write()
+            .add_with_nonce_check(tx, sender, Some(state.as_ref()))
+        {
             Ok(_) => {
                 info!(
                     "Added transaction {} from network (sender: {})",
@@ -944,13 +987,13 @@ impl SyncManager {
             }
         };
 
-        // 5. Run basic verification (epoch, model, FLOPS)
-        // Advance epoch if expired before checking, so we use a fresh epoch number
-        let head_hash = self.chain.head().map(|h| h.hash).unwrap_or_default();
-        let epoch_number =
-            consensus.maybe_advance_epoch(qfc_types::EPOCH_DURATION_SECS * 1000, head_hash);
+        // 5. Run basic verification (timestamp freshness, model, FLOPS)
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         if let Err(e) =
-            qfc_ai_coordinator::verify_basic(&inference_proof, epoch_number, &self.model_registry)
+            qfc_ai_coordinator::verify_basic(&inference_proof, now_secs, &self.model_registry)
         {
             warn!(
                 "Inference proof from {} failed basic verification: {}",

@@ -296,7 +296,11 @@ impl MiningService {
             }
 
             // Verify locally before broadcasting
-            match qfc_ai_coordinator::verify_basic(&inf_proof, current_epoch, &model_registry) {
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            match qfc_ai_coordinator::verify_basic(&inf_proof, now_secs, &model_registry) {
                 Ok(_) => {
                     tasks_completed += 1;
 

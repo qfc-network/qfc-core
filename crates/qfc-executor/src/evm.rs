@@ -4,12 +4,12 @@ use crate::error::{ExecutorError, Result};
 use qfc_state::StateDB;
 use qfc_types::{Address, Hash, Log, U256};
 use revm::{
-    db::{CacheDB, EmptyDB},
+    db::CacheDB,
     primitives::{
         AccountInfo, Address as RevmAddress, Bytecode, Bytes, CreateScheme,
         ExecutionResult as RevmResult, Output, TransactTo, B256, U256 as RevmU256,
     },
-    Evm,
+    Database as _, Evm,
 };
 use std::collections::HashMap;
 
@@ -28,6 +28,66 @@ pub struct EvmResult {
     pub logs: Vec<Log>,
     /// Error message if failed
     pub error: Option<String>,
+}
+
+/// Wrapper around StateDB that implements revm's DatabaseRef trait.
+/// This allows revm to read account info and storage on-demand from our state.
+struct StateDBRef<'a> {
+    state: &'a StateDB,
+}
+
+impl<'a> revm::DatabaseRef for StateDBRef<'a> {
+    type Error = String;
+
+    fn basic_ref(
+        &self,
+        address: RevmAddress,
+    ) -> std::result::Result<Option<AccountInfo>, Self::Error> {
+        let addr = revm_to_address(&address);
+        let balance = self.state.get_balance(&addr).map_err(|e| e.to_string())?;
+        let nonce = self.state.get_nonce(&addr).map_err(|e| e.to_string())?;
+        let code = self.state.get_code(&addr).map_err(|e| e.to_string())?;
+
+        if code.is_empty() {
+            // EOA: use KECCAK_EMPTY as code_hash (required by EIP-3607)
+            Ok(Some(AccountInfo {
+                balance: u256_to_revm(balance),
+                nonce,
+                code_hash: revm::primitives::KECCAK_EMPTY,
+                code: None,
+            }))
+        } else {
+            let hash = qfc_crypto::blake3_hash(&code);
+            Ok(Some(AccountInfo {
+                balance: u256_to_revm(balance),
+                nonce,
+                code_hash: B256::from_slice(hash.as_bytes()),
+                code: Some(Bytecode::new_raw(Bytes::from(code))),
+            }))
+        }
+    }
+
+    fn code_by_hash_ref(&self, _code_hash: B256) -> std::result::Result<Bytecode, Self::Error> {
+        Ok(Bytecode::default())
+    }
+
+    fn storage_ref(
+        &self,
+        address: RevmAddress,
+        index: RevmU256,
+    ) -> std::result::Result<RevmU256, Self::Error> {
+        let addr = revm_to_address(&address);
+        let slot = revm_to_u256(index);
+        let value = self
+            .state
+            .get_storage(&addr, &slot)
+            .map_err(|e| e.to_string())?;
+        Ok(u256_to_revm(value))
+    }
+
+    fn block_hash_ref(&self, _number: RevmU256) -> std::result::Result<B256, Self::Error> {
+        Ok(B256::ZERO)
+    }
 }
 
 /// EVM wrapper for executing smart contracts
@@ -69,10 +129,6 @@ impl<'a> EvmExecutor<'a> {
         gas_limit: u64,
     ) -> Result<EvmResult> {
         let mut db = self.create_state_db()?;
-
-        // Load sender account
-        self.load_account(&mut db, sender)?;
-
         let mut evm = self.create_evm(&mut db);
 
         // Configure transaction
@@ -104,11 +160,6 @@ impl<'a> EvmExecutor<'a> {
         gas_limit: u64,
     ) -> Result<EvmResult> {
         let mut db = self.create_state_db()?;
-
-        // Load accounts
-        self.load_account(&mut db, sender)?;
-        self.load_account(&mut db, to)?;
-
         let mut evm = self.create_evm(&mut db);
 
         // Configure transaction
@@ -140,10 +191,19 @@ impl<'a> EvmExecutor<'a> {
     ) -> Result<EvmResult> {
         let mut db = self.create_state_db()?;
 
-        // Load accounts
         let caller = sender.unwrap_or(&Address::ZERO);
-        self.load_account(&mut db, caller)?;
-        self.load_account(&mut db, to)?;
+
+        // For static calls, give the caller enough balance to cover gas
+        // so view functions work without requiring funded accounts
+        let gas_balance = RevmU256::from(gas_limit) * RevmU256::from(1_000_000_000u64);
+        let caller_revm = address_to_revm(caller);
+        // Pre-load the caller account into cache so we can modify the balance
+        let _ = db.basic(caller_revm);
+        if let Some(account) = db.accounts.get_mut(&caller_revm) {
+            if account.info.balance < gas_balance {
+                account.info.balance = gas_balance;
+            }
+        }
 
         let mut evm = self.create_evm(&mut db);
 
@@ -166,46 +226,15 @@ impl<'a> EvmExecutor<'a> {
     }
 
     /// Create a revm database backed by our state
-    fn create_state_db(&self) -> Result<CacheDB<EmptyDB>> {
-        Ok(CacheDB::new(EmptyDB::default()))
-    }
-
-    /// Load an account from our state into the revm database
-    fn load_account(&self, db: &mut CacheDB<EmptyDB>, address: &Address) -> Result<()> {
-        let balance = self.state.get_balance(address)?;
-        let nonce = self.state.get_nonce(address)?;
-        let code = self.state.get_code(address)?;
-
-        let code_hash = if code.is_empty() {
-            B256::ZERO
-        } else {
-            let hash = qfc_crypto::blake3_hash(&code);
-            B256::from_slice(hash.as_bytes())
-        };
-
-        let bytecode = if code.is_empty() {
-            Bytecode::default()
-        } else {
-            Bytecode::new_raw(Bytes::from(code))
-        };
-
-        let account_info = AccountInfo {
-            balance: u256_to_revm(balance),
-            nonce,
-            code_hash,
-            code: Some(bytecode),
-        };
-
-        db.insert_account_info(address_to_revm(address), account_info);
-
-        Ok(())
+    fn create_state_db(&self) -> Result<CacheDB<StateDBRef<'a>>> {
+        Ok(CacheDB::new(StateDBRef { state: self.state }))
     }
 
     /// Create a configured EVM instance
     fn create_evm<'b>(
         &self,
-        db: &'b mut CacheDB<EmptyDB>,
-    ) -> Evm<'b, (), &'b mut CacheDB<EmptyDB>> {
+        db: &'b mut CacheDB<StateDBRef<'a>>,
+    ) -> Evm<'b, (), &'b mut CacheDB<StateDBRef<'a>>> {
         let mut evm = Evm::builder().with_db(db).build();
 
         // Configure block environment
@@ -423,10 +452,106 @@ mod tests {
         let result = executor.static_call(Some(&sender), &recipient, Vec::new(), 100_000);
 
         // Should succeed (static call to empty account)
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "static_call failed: {:?}", result.err());
         let evm_result = result.unwrap();
         // Static call to non-contract address succeeds
         assert!(evm_result.success);
+    }
+
+    #[test]
+    fn test_precompile_sha256() {
+        let state = create_test_state();
+        let sender = Address::new([0x11; 20]);
+        state
+            .set_balance(&sender, U256::from_u128(1_000_000_000_000_000_000))
+            .unwrap();
+
+        let executor = EvmExecutor::new(&state, 9000, 1, 1234567890, Address::ZERO, 30_000_000);
+
+        // Call SHA256 precompile (address 0x02) with "hello"
+        let input = b"hello".to_vec();
+        let sha256_addr =
+            Address::new([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+        let result = executor.static_call(Some(&sender), &sha256_addr, input, 100_000);
+        assert!(
+            result.is_ok(),
+            "sha256 precompile call failed: {:?}",
+            result.err()
+        );
+        let evm_result = result.unwrap();
+        assert!(
+            evm_result.success,
+            "sha256 precompile failed: {:?}",
+            evm_result.error
+        );
+        assert_eq!(evm_result.output.len(), 32, "sha256 should return 32 bytes");
+
+        // Verify against known SHA256("hello")
+        let expected =
+            hex::decode("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
+                .unwrap();
+        assert_eq!(evm_result.output, expected);
+    }
+
+    #[test]
+    fn test_precompile_ecrecover() {
+        let state = create_test_state();
+        let sender = Address::new([0x11; 20]);
+        state
+            .set_balance(&sender, U256::from_u128(1_000_000_000_000_000_000))
+            .unwrap();
+
+        let executor = EvmExecutor::new(&state, 9000, 1, 1234567890, Address::ZERO, 30_000_000);
+
+        // ecrecover precompile at address 0x01
+        // Input: hash (32 bytes) + v (32 bytes) + r (32 bytes) + s (32 bytes) = 128 bytes
+        // Use a known test vector
+        let input = hex::decode(
+            "456e9aea5e197a1f1af7a3e85a3212fa4049a3ba34c2289b4c860fc0b0c64ef3\
+             000000000000000000000000000000000000000000000000000000000000001c\
+             9242685bf161793cc25603c231bc2f568eb630ea16aa137d2664ac8038825608\
+             4f8ae3bd7535248d0bd448298cc2e2071e56992d0774dc340c368ae950852ada",
+        )
+        .unwrap();
+        let ecrecover_addr =
+            Address::new([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        let result = executor.static_call(Some(&sender), &ecrecover_addr, input, 100_000);
+        assert!(result.is_ok(), "ecrecover call failed: {:?}", result.err());
+        let evm_result = result.unwrap();
+        assert!(
+            evm_result.success,
+            "ecrecover failed: {:?}",
+            evm_result.error
+        );
+        // Should return 32 bytes (left-padded address)
+        assert_eq!(evm_result.output.len(), 32);
+        // The recovered address should be non-zero
+        assert_ne!(evm_result.output, vec![0u8; 32]);
+    }
+
+    #[test]
+    fn test_precompile_identity() {
+        let state = create_test_state();
+        let sender = Address::new([0x11; 20]);
+        state
+            .set_balance(&sender, U256::from_u128(1_000_000_000_000_000_000))
+            .unwrap();
+
+        let executor = EvmExecutor::new(&state, 9000, 1, 1234567890, Address::ZERO, 30_000_000);
+
+        // Call identity precompile (address 0x04) — returns input unchanged
+        let input = vec![1, 2, 3, 4, 5];
+        let identity_addr =
+            Address::new([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4]);
+        let result = executor.static_call(Some(&sender), &identity_addr, input.clone(), 100_000);
+        assert!(result.is_ok());
+        let evm_result = result.unwrap();
+        assert!(
+            evm_result.success,
+            "identity precompile failed: {:?}",
+            evm_result.error
+        );
+        assert_eq!(evm_result.output, input);
     }
 
     #[test]
@@ -451,7 +576,7 @@ mod tests {
             hex::decode("602a60005560208060106000396000f3fe60005460005260206000f3").unwrap();
 
         let result = executor.create(&sender, init_code, U256::ZERO, 1_000_000);
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "create failed: {:?}", result.err());
         let evm_result = result.unwrap();
         assert!(
             evm_result.success,

@@ -28,6 +28,7 @@ pub fn collect_gpu_metrics(backend: BackendType) -> GpuMetrics {
     match backend {
         BackendType::Cuda => collect_nvidia_metrics(),
         BackendType::Metal => collect_metal_metrics(),
+        BackendType::Rocm => collect_rocm_metrics(),
         BackendType::Cpu => collect_cpu_metrics(),
     }
 }
@@ -87,6 +88,53 @@ fn collect_metal_metrics() -> GpuMetrics {
         memory_used_mb: used,
         memory_total_mb: total,
         backend: "Metal".to_string(),
+    }
+}
+
+/// Collect AMD ROCm GPU metrics
+fn collect_rocm_metrics() -> GpuMetrics {
+    let output = std::process::Command::new("rocm-smi")
+        .args(["--showtemp", "--showuse", "--showmeminfo", "vram", "--csv"])
+        .output();
+
+    if let Ok(out) = output {
+        if out.status.success() {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            // Parse temperature, utilization, and memory from rocm-smi CSV
+            let mut temp = 0u32;
+            let mut util = 0u32;
+            let mut mem_used = 0u64;
+            let mut mem_total = 0u64;
+
+            for line in stdout.lines().skip(1) {
+                let fields: Vec<&str> = line.split(',').collect();
+                if fields.len() >= 4 {
+                    temp = fields[0].trim().parse().unwrap_or(0);
+                    util = fields[1].trim().parse().unwrap_or(0);
+                    mem_used = fields[2].trim().parse::<u64>().unwrap_or(0) / (1024 * 1024);
+                    mem_total = fields[3].trim().parse::<u64>().unwrap_or(0) / (1024 * 1024);
+                }
+            }
+
+            return GpuMetrics {
+                temperature_c: temp,
+                power_watts: 0,
+                utilization_percent: util,
+                memory_used_mb: mem_used,
+                memory_total_mb: mem_total,
+                backend: "ROCm".to_string(),
+            };
+        }
+    }
+
+    // Fallback
+    GpuMetrics {
+        temperature_c: 0,
+        power_watts: 0,
+        utilization_percent: 0,
+        memory_used_mb: 0,
+        memory_total_mb: 0,
+        backend: "ROCm".to_string(),
     }
 }
 

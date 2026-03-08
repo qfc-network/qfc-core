@@ -13,6 +13,7 @@ mod worker;
 
 use clap::Parser;
 use config::{MinerCli, MinerConfig};
+use qfc_inference::{BackendType, InferenceEngine};
 use qfc_types::Address;
 use tracing::info;
 
@@ -26,8 +27,39 @@ async fn main() -> anyhow::Result<()> {
 
     info!("QFC AI Inference Miner v{}", env!("CARGO_PKG_VERSION"));
 
+    // Generate wallet mode
+    if cli.generate_wallet {
+        let keypair = qfc_crypto::Keypair::generate();
+        let address = qfc_crypto::address_from_keypair(&keypair);
+        let secret = keypair.secret_bytes();
+        println!("=== New QFC Miner Wallet (Ed25519) ===");
+        println!("Address:     0x{}", hex::encode(address.as_bytes()));
+        println!("Private Key: 0x{}", hex::encode(secret));
+        println!();
+        println!("Save these! Then fund the address with test QFC:");
+        println!("  curl https://faucet.testnet.qfc.network/api/faucet -X POST \\");
+        println!("    -H 'Content-Type: application/json' \\",);
+        println!(
+            "    -d '{{\"address\":\"0x{}\"}}'",
+            hex::encode(address.as_bytes())
+        );
+        println!();
+        println!("Start mining with:");
+        println!(
+            "  qfc-miner --wallet 0x{} --private-key 0x{} --backend metal",
+            hex::encode(address.as_bytes()),
+            hex::encode(secret)
+        );
+        return Ok(());
+    }
+
     // Detect hardware
     let hw = gpu::detect_and_log();
+
+    // Validate required args
+    if cli.wallet.is_empty() || cli.private_key.is_empty() {
+        anyhow::bail!("--wallet and --private-key are required. Use --generate-wallet to create a new wallet.");
+    }
 
     // Parse wallet address
     let wallet_hex = cli.wallet.strip_prefix("0x").unwrap_or(&cli.wallet);
@@ -76,8 +108,8 @@ async fn main() -> anyhow::Result<()> {
         secret_key,
     };
 
-    // Create inference engine
-    let engine = qfc_inference::create_engine_for_backend(backend)?;
+    // Create inference engine (with auto-fallback to CPU on failure)
+    let (engine, backend) = create_engine_with_fallback(backend)?;
 
     // Run benchmark
     info!("Running hardware benchmark...");
@@ -154,4 +186,23 @@ async fn main() -> anyhow::Result<()> {
     worker.run().await;
 
     Ok(())
+}
+
+/// Create an inference engine, falling back to CPU if the requested backend fails.
+fn create_engine_with_fallback(
+    backend: BackendType,
+) -> anyhow::Result<(Box<dyn InferenceEngine>, BackendType)> {
+    match qfc_inference::create_engine_for_backend(backend) {
+        Ok(engine) => Ok((engine, backend)),
+        Err(e) if backend != BackendType::Cpu => {
+            tracing::warn!(
+                "{} backend unavailable: {}. Falling back to CPU.",
+                backend,
+                e
+            );
+            let engine = qfc_inference::create_engine_for_backend(BackendType::Cpu)?;
+            Ok((engine, BackendType::Cpu))
+        }
+        Err(e) => Err(e.into()),
+    }
 }

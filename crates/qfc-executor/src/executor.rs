@@ -651,16 +651,15 @@ impl Executor {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let _unlock_at = now + UNSTAKE_DELAY_SECS;
+        let unlock_at = now + UNSTAKE_DELAY_SECS;
 
-        // In a full implementation, we would store the undelegation record
-        // For now, we immediately return the funds (simplified)
-        // TODO: Store Undelegation record and process after lockup period
-        state.add_balance(sender, amount)?;
+        // Store undelegation record — funds are locked until unlock_at
+        let undelegation = qfc_types::Undelegation::new(*sender, validator, amount, unlock_at);
+        state.store_undelegation(&undelegation)?;
 
         debug!(
-            "Undelegated: {} <- {} amount={} (immediate return, lockup not implemented)",
-            sender, validator, amount
+            "Undelegated: {} <- {} amount={} unlock_at={}",
+            sender, validator, amount, unlock_at
         );
 
         Ok(ExecutionResult::success(MINIMUM_GAS * 3))
@@ -693,6 +692,45 @@ impl Executor {
         );
 
         Ok(ExecutionResult::success(MINIMUM_GAS * 2))
+    }
+
+    /// Process mature undelegations: return locked funds to delegators.
+    /// Called during block execution before processing transactions.
+    pub fn process_mature_undelegations(&self, state: &StateDB) -> u32 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let mature = match state.get_mature_undelegations(now) {
+            Ok(m) => m,
+            Err(e) => {
+                warn!("Failed to get mature undelegations: {}", e);
+                return 0;
+            }
+        };
+
+        let mut processed = 0u32;
+        for u in &mature {
+            if let Err(e) = state.add_balance(&u.delegator, u.amount) {
+                warn!("Failed to return undelegation to {}: {}", u.delegator, e);
+                continue;
+            }
+            if let Err(e) = state.delete_undelegation(&u.delegator, &u.validator, u.unlock_at) {
+                warn!("Failed to delete undelegation record: {}", e);
+                continue;
+            }
+            debug!(
+                "Undelegation matured: {} received {} from validator {}",
+                u.delegator, u.amount, u.validator
+            );
+            processed += 1;
+        }
+
+        if processed > 0 {
+            debug!("Processed {} mature undelegations", processed);
+        }
+        processed
     }
 
     /// Execute multiple transactions and return receipts

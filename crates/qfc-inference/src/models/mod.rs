@@ -6,9 +6,12 @@
 pub mod bert;
 
 #[cfg(feature = "candle")]
+pub mod qwen2;
+
+#[cfg(feature = "candle")]
 use crate::InferenceError;
 
-/// A loaded model ready for inference
+/// A loaded model ready for inference (embedding / classification)
 #[cfg(feature = "candle")]
 pub trait LoadedModel: Send + Sync {
     /// Run inference on raw input bytes, returning output bytes

@@ -1,8 +1,23 @@
 //! Ethereum-compatible RPC methods
 
 use crate::types::{BlockNumber, CallRequest, RpcBlock, RpcReceipt, RpcTransaction};
-use jsonrpsee::core::RpcResult;
+use jsonrpsee::core::{RpcResult, SubscriptionResult};
 use jsonrpsee::proc_macros::rpc;
+use serde::{Deserialize, Serialize};
+
+/// Subscription event for newHeads
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewHeadNotification {
+    pub number: String,
+    pub hash: String,
+    pub parent_hash: String,
+    pub timestamp: String,
+    pub state_root: String,
+    pub transactions_root: String,
+    pub gas_used: String,
+    pub gas_limit: String,
+}
 
 /// Ethereum RPC API trait
 #[rpc(server, namespace = "eth")]
@@ -79,4 +94,49 @@ pub trait EthApi {
         position: String,
         block: Option<BlockNumber>,
     ) -> RpcResult<String>;
+
+    /// Returns the account and storage values with Merkle proof
+    #[method(name = "getProof")]
+    async fn get_proof(
+        &self,
+        address: String,
+        storage_keys: Vec<String>,
+        block: Option<BlockNumber>,
+    ) -> RpcResult<RpcAccountProof>;
+
+    /// Subscribe to new block headers
+    #[subscription(name = "subscribe" => "subscription", unsubscribe = "unsubscribe", item = serde_json::Value)]
+    async fn eth_subscribe(&self, sub_type: String) -> SubscriptionResult;
+}
+
+/// Account proof (EIP-1186)
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcAccountProof {
+    /// Address
+    pub address: String,
+    /// Account proof nodes (hex-encoded)
+    pub account_proof: Vec<String>,
+    /// Account balance
+    pub balance: String,
+    /// Code hash
+    pub code_hash: String,
+    /// Account nonce
+    pub nonce: String,
+    /// Storage hash (state root)
+    pub storage_hash: String,
+    /// Storage proofs
+    pub storage_proof: Vec<RpcStorageProof>,
+}
+
+/// Storage slot proof
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcStorageProof {
+    /// Storage key
+    pub key: String,
+    /// Storage value
+    pub value: String,
+    /// Proof nodes (hex-encoded)
+    pub proof: Vec<String>,
 }

@@ -52,6 +52,7 @@ impl InferenceWorker {
         let mut status_timer = interval(Duration::from_secs(30));
         let mut tasks_completed: u64 = 0;
         let mut tasks_failed: u64 = 0;
+        let mut total_earnings_wei: u128 = 0;
 
         loop {
             tokio::select! {
@@ -88,7 +89,22 @@ impl InferenceWorker {
                 task_response.model_name
             );
 
-            // 2. Convert RPC response to InferenceTask
+            // 2. Deadline check — skip if task already expired
+            {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                if now_ms > task_response.deadline {
+                    warn!(
+                        "Task already past deadline (deadline: {}, now: {}), skipping",
+                        task_response.deadline, now_ms
+                    );
+                    continue;
+                }
+            }
+
+            // 3. Convert RPC response to InferenceTask
             let task = match self.convert_task(&task_response) {
                 Ok(t) => t,
                 Err(e) => {
@@ -115,13 +131,50 @@ impl InferenceWorker {
                 }
             }
 
-            // 4. Run inference
+            // 4. Run inference (with auto-fallback to CPU on Metal/CUDA runtime errors)
             let result = match self.engine.run_inference(&task).await {
                 Ok(r) => r,
                 Err(e) => {
-                    error!("Inference failed: {}", e);
-                    tasks_failed += 1;
-                    continue;
+                    let err_msg = format!("{}", e);
+
+                    // Auto-fallback to CPU if Metal/CUDA has unsupported ops
+                    if (err_msg.contains("Metal error")
+                        || err_msg.contains("no metal implementation")
+                        || err_msg.contains("CUDA error"))
+                        && self.engine.backend_type() != qfc_inference::BackendType::Cpu
+                    {
+                        warn!(
+                            "{} backend failed: {}. Auto-switching to CPU backend.",
+                            self.engine.backend_type(),
+                            err_msg
+                        );
+                        match qfc_inference::create_engine_for_backend(
+                            qfc_inference::BackendType::Cpu,
+                        ) {
+                            Ok(cpu_engine) => {
+                                self.engine = cpu_engine;
+                                info!("Switched to CPU backend. Retrying task...");
+                                // Retry this task with CPU
+                                match self.engine.run_inference(&task).await {
+                                    Ok(r) => r,
+                                    Err(e2) => {
+                                        error!("Inference failed on CPU fallback: {}", e2);
+                                        tasks_failed += 1;
+                                        continue;
+                                    }
+                                }
+                            }
+                            Err(e2) => {
+                                error!("Failed to create CPU fallback engine: {}", e2);
+                                tasks_failed += 1;
+                                continue;
+                            }
+                        }
+                    } else {
+                        error!("Inference failed: {}", err_msg);
+                        tasks_failed += 1;
+                        continue;
+                    }
                 }
             };
 
@@ -160,15 +213,31 @@ impl InferenceWorker {
             // 6. Submit proof to validator
             let rpc_url = &self.config.validator_rpc;
             let miner_addr = hex::encode(self.config.wallet_address.as_bytes());
-
             match submit::submit_proof(rpc_url, &miner_addr, &proof).await {
                 Ok(result) => {
                     tasks_completed += 1;
                     if result.accepted {
-                        info!(
-                            "Proof accepted! (spot_checked: {}, total: {}, failed: {})",
-                            result.spot_checked, tasks_completed, tasks_failed
-                        );
+                        // Parse reward estimate and accumulate
+                        let reward_wei = result
+                            .reward_estimate
+                            .as_deref()
+                            .and_then(parse_hex_u128)
+                            .unwrap_or(0);
+                        total_earnings_wei += reward_wei;
+
+                        let reward_display = format_wei_as_qfc(reward_wei);
+                        let total_display = format_wei_as_qfc(total_earnings_wei);
+
+                        info!("╔══════════════════════════════════════════════════════╗");
+                        info!("║  ✅ PROOF ACCEPTED — REWARD EARNED                  ║");
+                        info!("║                                                      ║");
+                        info!("║  This task:  +{} QFC{}", reward_display, " ".repeat(36_usize.saturating_sub(reward_display.len())));
+                        info!("║  Session total: {} QFC{}", total_display, " ".repeat(33_usize.saturating_sub(total_display.len())));
+                        info!("║  Tasks: {} completed, {} failed{}", tasks_completed, tasks_failed, " ".repeat(24_usize.saturating_sub(format!("{}{}", tasks_completed, tasks_failed).len())));
+                        if result.spot_checked {
+                            info!("║  🔍 Spot-check: PASSED                              ║");
+                        }
+                        info!("╚══════════════════════════════════════════════════════╝");
                     } else {
                         warn!("Proof rejected: {}", result.message);
                     }
@@ -277,4 +346,20 @@ impl InferenceWorker {
     pub fn stop(&self) {
         self.stop_flag.store(true, Ordering::Relaxed);
     }
+}
+
+/// Parse a hex string like "0x1a2b" into u128
+fn parse_hex_u128(s: &str) -> Option<u128> {
+    let hex_str = s.strip_prefix("0x").unwrap_or(s);
+    u128::from_str_radix(hex_str, 16).ok()
+}
+
+/// Format wei amount as human-readable QFC (1 QFC = 1e18 wei)
+fn format_wei_as_qfc(wei: u128) -> String {
+    if wei == 0 {
+        return "0.000000".to_string();
+    }
+    let whole = wei / 1_000_000_000_000_000_000;
+    let frac = wei % 1_000_000_000_000_000_000;
+    format!("{}.{:06}", whole, frac / 1_000_000_000_000)
 }

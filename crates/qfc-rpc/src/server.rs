@@ -3,12 +3,17 @@
 use crate::error::RpcError;
 use crate::eth::EthApiServer;
 use crate::qfc::{
-    QfcApiServer, RpcComputeInfo, RpcEpoch, RpcFaucetResponse, RpcInferenceProofSubmission,
-    RpcInferenceStats, RpcInferenceTask, RpcMinerStatusReport, RpcModel, RpcModelProposal,
-    RpcNodeInfo, RpcProofResult, RpcProposeModelRequest, RpcPublicTaskStatus,
-    RpcRegisterMinerRequest, RpcRegisterMinerResult, RpcSubmitPublicTask, RpcTaskRequest,
-    RpcValidator, RpcValidatorMetrics, RpcValidatorScoreBreakdown, RpcVoteModelRequest,
+    QfcApiServer, RpcAccountRentInfo, RpcBridgeDeposit, RpcBridgeStatus, RpcBridgeWithdrawal,
+    RpcComputeInfo, RpcEpoch, RpcEstimateInferenceFee, RpcFaucetResponse, RpcInferenceFeeEstimate,
+    RpcInferenceProofSubmission, RpcInferenceStats, RpcInferenceTask, RpcMinerStatusReport,
+    RpcModel, RpcModelProposal, RpcNodeInfo, RpcParameterOverride, RpcParameterProposal,
+    RpcProofResult, RpcProposeModelRequest, RpcProposeParameterRequest, RpcProposeSpendRequest,
+    RpcPublicTaskStatus, RpcRegisterMinerRequest, RpcRegisterMinerResult, RpcSpendProposal,
+    RpcSubmitPublicTask, RpcTaskRequest, RpcTreasuryInfo, RpcUndelegation, RpcUserOperation,
+    RpcUserOperationStatus, RpcValidator, RpcValidatorMetrics, RpcValidatorScoreBreakdown,
+    RpcVoteModelRequest, RpcVoteParameterRequest, RpcVoteSpendRequest,
 };
+use crate::txpool::{TxPoolApiServer, TxPoolContent, TxPoolStatus};
 use crate::types::{BlockNumber, BlockTag, CallRequest, RpcBlock, RpcReceipt, RpcTransaction};
 use jsonrpsee::core::{RpcResult, SubscriptionResult};
 use jsonrpsee::server::{ServerBuilder, ServerHandle};
@@ -69,6 +74,12 @@ pub struct RpcServer {
     model_registry: Arc<qfc_inference::model::ModelRegistry>,
     /// v2.0: Model governance
     governance: Arc<RwLock<qfc_ai_coordinator::ModelGovernance>>,
+    /// v2.0: Parameter governance (stake-weighted voting on protocol params)
+    param_governance: Arc<RwLock<qfc_ai_coordinator::ParameterGovernance>>,
+    /// v2.0: Treasury — community fund with governance-controlled spending
+    treasury: Arc<RwLock<qfc_ai_coordinator::Treasury>>,
+    /// v2.0: Cross-chain bridge relayer (Ethereum ↔ QFC)
+    bridge: Arc<RwLock<qfc_bridge::BridgeRelayer>>,
     /// v2.0: Inference engine for spot-check re-execution
     inference_engine: Option<Arc<tokio::sync::RwLock<Box<dyn qfc_inference::InferenceEngine>>>>,
     /// v2.0: Pool of verified inference proofs awaiting block inclusion
@@ -79,6 +90,20 @@ pub struct RpcServer {
     redundant_verifier: Option<Arc<RwLock<qfc_ai_coordinator::redundant::RedundantVerifier>>>,
     /// v2.0 P2: Task router for model-aware miner selection
     task_router: Option<Arc<RwLock<qfc_ai_coordinator::router::TaskRouter>>>,
+    /// B2: IPFS client for large result storage (optional)
+    ipfs_client: Option<Arc<qfc_ai_coordinator::ipfs::IpfsClient>>,
+    /// Registered miners (address → public key) — miners don't need to be validators
+    registered_miners: Arc<RwLock<std::collections::HashMap<Address, qfc_types::PublicKey>>>,
+    /// v2.0: Inference stats — total FLOPS accumulated from verified proofs
+    total_flops: Arc<std::sync::atomic::AtomicU64>,
+    /// v2.0: Inference stats — total inference time in ms
+    total_inference_time_ms: Arc<std::sync::atomic::AtomicU64>,
+    /// v2.0: Inference stats — total verified proof count (for averaging)
+    verified_proof_count: Arc<std::sync::atomic::AtomicU64>,
+    /// v2.0: EIP-4337 EntryPoint for account abstraction
+    entry_point: Arc<RwLock<qfc_executor::account_abstraction::EntryPoint>>,
+    /// v2.0: UserOperation mempool
+    user_op_pool: Arc<RwLock<qfc_executor::account_abstraction::UserOpPool>>,
 }
 
 impl Clone for RpcServer {
@@ -92,11 +117,21 @@ impl Clone for RpcServer {
             task_pool: self.task_pool.clone(),
             model_registry: self.model_registry.clone(),
             governance: self.governance.clone(),
+            param_governance: self.param_governance.clone(),
+            treasury: self.treasury.clone(),
+            bridge: self.bridge.clone(),
             inference_engine: self.inference_engine.clone(),
             proof_pool: self.proof_pool.clone(),
             challenge_generator: self.challenge_generator.clone(),
             redundant_verifier: self.redundant_verifier.clone(),
             task_router: self.task_router.clone(),
+            ipfs_client: self.ipfs_client.clone(),
+            registered_miners: self.registered_miners.clone(),
+            total_flops: self.total_flops.clone(),
+            total_inference_time_ms: self.total_inference_time_ms.clone(),
+            verified_proof_count: self.verified_proof_count.clone(),
+            entry_point: self.entry_point.clone(),
+            user_op_pool: self.user_op_pool.clone(),
         }
     }
 }
@@ -121,11 +156,27 @@ impl RpcServer {
             task_pool: Arc::new(RwLock::new(task_pool)),
             model_registry: Arc::new(qfc_inference::model::ModelRegistry::default_v2()),
             governance: Arc::new(RwLock::new(qfc_ai_coordinator::ModelGovernance::new())),
+            param_governance: Arc::new(RwLock::new(qfc_ai_coordinator::ParameterGovernance::new())),
+            treasury: Arc::new(RwLock::new(qfc_ai_coordinator::Treasury::new())),
+            bridge: Arc::new(RwLock::new(qfc_bridge::BridgeRelayer::new(
+                qfc_bridge::RelayerConfig::default(),
+            ))),
             inference_engine: None,
             proof_pool: None,
             challenge_generator: None,
             redundant_verifier: None,
             task_router: None,
+            ipfs_client: None,
+            registered_miners: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            total_flops: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            total_inference_time_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            verified_proof_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            entry_point: Arc::new(RwLock::new(
+                qfc_executor::account_abstraction::EntryPoint::new(chain_id),
+            )),
+            user_op_pool: Arc::new(RwLock::new(
+                qfc_executor::account_abstraction::UserOpPool::new(1000, 16),
+            )),
         }
     }
 
@@ -153,6 +204,12 @@ impl RpcServer {
         router: Arc<RwLock<qfc_ai_coordinator::router::TaskRouter>>,
     ) -> Self {
         self.task_router = Some(router);
+        self
+    }
+
+    /// Set the IPFS client for large result storage (B2)
+    pub fn with_ipfs_client(mut self, client: qfc_ai_coordinator::ipfs::IpfsClient) -> Self {
+        self.ipfs_client = Some(Arc::new(client));
         self
     }
 
@@ -202,12 +259,16 @@ impl RpcServer {
 
         let server = ServerBuilder::default().build(config.http_addr).await?;
 
-        // Merge both RPC modules
+        // Merge all RPC modules
         let mut eth_module = EthApiServer::into_rpc(self.clone());
-        let qfc_module = QfcApiServer::into_rpc(self);
+        let qfc_module = QfcApiServer::into_rpc(self.clone());
+        let txpool_module = TxPoolApiServer::into_rpc(self);
         eth_module
             .merge(qfc_module)
-            .expect("Failed to merge RPC modules");
+            .expect("Failed to merge QFC RPC module");
+        eth_module
+            .merge(txpool_module)
+            .expect("Failed to merge txpool RPC module");
 
         let handle = server.start(eth_module);
 
@@ -248,6 +309,72 @@ impl RpcServer {
             .try_into()
             .map_err(|_| RpcError::InvalidParams("invalid U256 length".into()))?;
         Ok(U256::from_be_bytes(&bytes))
+    }
+
+    fn parse_parameter_key(s: &str) -> Result<qfc_ai_coordinator::ParameterKey, RpcError> {
+        use qfc_ai_coordinator::ParameterKey;
+        match s {
+            "block_reward" => Ok(ParameterKey::BlockReward),
+            "min_validator_stake" => Ok(ParameterKey::MinValidatorStake),
+            "block_gas_limit" => Ok(ParameterKey::BlockGasLimit),
+            "min_gas_price" => Ok(ParameterKey::MinGasPrice),
+            "fee_producer_percent" => Ok(ParameterKey::FeeProducerPercent),
+            "fee_voters_percent" => Ok(ParameterKey::FeeVotersPercent),
+            "fee_burn_percent" => Ok(ParameterKey::FeeBurnPercent),
+            "fee_treasury_percent" => Ok(ParameterKey::FeeTreasuryPercent),
+            "producer_reward_percent" => Ok(ParameterKey::ProducerRewardPercent),
+            "voters_reward_percent" => Ok(ParameterKey::VotersRewardPercent),
+            "inference_miners_reward_percent" => Ok(ParameterKey::InferenceMinersRewardPercent),
+            "inference_fee_miner_percent" => Ok(ParameterKey::InferenceFeeMinerPercent),
+            "inference_fee_validators_percent" => Ok(ParameterKey::InferenceFeeValidatorsPercent),
+            "inference_fee_burn_percent" => Ok(ParameterKey::InferenceFeeBurnPercent),
+            "slash_double_sign_percent" => Ok(ParameterKey::SlashDoubleSignPercent),
+            "slash_offline_percent" => Ok(ParameterKey::SlashOfflinePercent),
+            "unstake_delay_secs" => Ok(ParameterKey::UnstakeDelaySecs),
+            "min_delegation" => Ok(ParameterKey::MinDelegation),
+            "max_transactions_per_block" => Ok(ParameterKey::MaxTransactionsPerBlock),
+            _ => Err(RpcError::InvalidParams(format!(
+                "Unknown parameter key: {}",
+                s
+            ))),
+        }
+    }
+
+    fn get_current_param_value(&self, key: &qfc_ai_coordinator::ParameterKey) -> u128 {
+        use qfc_ai_coordinator::ParameterKey;
+
+        // Check overrides first, then fall back to compile-time constants
+        if let Some(val) = self.param_governance.read().get_override(key) {
+            return val;
+        }
+
+        match key {
+            ParameterKey::BlockReward => qfc_types::BLOCK_REWARD,
+            ParameterKey::MinValidatorStake => qfc_types::MIN_VALIDATOR_STAKE,
+            ParameterKey::BlockGasLimit => qfc_types::DEFAULT_BLOCK_GAS_LIMIT as u128,
+            ParameterKey::MinGasPrice => qfc_types::MIN_GAS_PRICE as u128,
+            ParameterKey::FeeProducerPercent => qfc_types::FEE_PRODUCER_PERCENT as u128,
+            ParameterKey::FeeVotersPercent => qfc_types::FEE_VOTERS_PERCENT as u128,
+            ParameterKey::FeeBurnPercent => qfc_types::FEE_BURN_PERCENT as u128,
+            ParameterKey::FeeTreasuryPercent => qfc_types::FEE_TREASURY_PERCENT as u128,
+            ParameterKey::ProducerRewardPercent => qfc_types::PRODUCER_REWARD_PERCENT as u128,
+            ParameterKey::VotersRewardPercent => qfc_types::VOTERS_REWARD_PERCENT as u128,
+            ParameterKey::InferenceMinersRewardPercent => {
+                qfc_types::INFERENCE_MINERS_REWARD_PERCENT as u128
+            }
+            ParameterKey::InferenceFeeMinerPercent => {
+                qfc_types::INFERENCE_FEE_MINER_PERCENT as u128
+            }
+            ParameterKey::InferenceFeeValidatorsPercent => {
+                qfc_types::INFERENCE_FEE_VALIDATORS_PERCENT as u128
+            }
+            ParameterKey::InferenceFeeBurnPercent => qfc_types::INFERENCE_FEE_BURN_PERCENT as u128,
+            ParameterKey::SlashDoubleSignPercent => qfc_types::SLASH_DOUBLE_SIGN_PERCENT as u128,
+            ParameterKey::SlashOfflinePercent => qfc_types::SLASH_OFFLINE_PERCENT as u128,
+            ParameterKey::UnstakeDelaySecs => qfc_types::UNSTAKE_DELAY_SECS as u128,
+            ParameterKey::MinDelegation => qfc_types::MIN_DELEGATION,
+            ParameterKey::MaxTransactionsPerBlock => qfc_types::MAX_TRANSACTIONS_PER_BLOCK as u128,
+        }
     }
 }
 
@@ -487,10 +614,11 @@ impl EthApiServer for RpcServer {
             // Derive sender from public key (Ed25519)
             let sender = qfc_crypto::address_from_public_key(&tx.public_key);
 
-            // Add to mempool
+            // Add to mempool with nonce validation
+            let state = self.chain.state();
             self.mempool
                 .write()
-                .add(tx.clone(), sender)
+                .add_with_nonce_check(tx.clone(), sender, Some(state.as_ref()))
                 .map_err(|e| RpcError::Execution(e.to_string()))?;
 
             info!("Added QFC transaction {} to mempool from {}", hash, sender);
@@ -559,10 +687,11 @@ impl EthApiServer for RpcServer {
             warn!("Failed to store Ethereum tx hash mapping: {}", e);
         }
 
-        // Add to mempool
+        // Add to mempool with nonce validation
+        let state = self.chain.state();
         self.mempool
             .write()
-            .add(qfc_tx.clone(), sender)
+            .add_with_nonce_check(qfc_tx.clone(), sender, Some(state.as_ref()))
             .map_err(|e| RpcError::Execution(e.to_string()))?;
 
         info!(
@@ -733,6 +862,150 @@ impl EthApiServer for RpcServer {
 
         Ok(format!("0x{:064x}", value.0))
     }
+
+    async fn get_proof(
+        &self,
+        address: String,
+        storage_keys: Vec<String>,
+        block: Option<BlockNumber>,
+    ) -> RpcResult<crate::eth::RpcAccountProof> {
+        let address = Self::parse_address(&address)?;
+        let block_num = self.resolve_block_number(block);
+
+        let state = self
+            .chain
+            .state_at(block_num)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        // Generate account proof
+        let (account_proof, account) = state
+            .get_account_proof(&address)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        // Convert proof nodes to hex
+        let proof_nodes: Vec<String> = account_proof
+            .nodes
+            .iter()
+            .map(|n| format!("0x{}", hex::encode(n)))
+            .collect();
+
+        // Generate storage proofs for requested keys
+        let mut storage_proofs = Vec::new();
+        for key_str in &storage_keys {
+            let slot = Self::parse_u256(key_str)?;
+            let value = state
+                .get_storage(&address, &slot)
+                .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+            storage_proofs.push(crate::eth::RpcStorageProof {
+                key: key_str.clone(),
+                value: format!("0x{:064x}", value.0),
+                proof: vec![], // storage trie proofs not yet implemented
+            });
+        }
+
+        Ok(crate::eth::RpcAccountProof {
+            address: address.to_string(),
+            account_proof: proof_nodes,
+            balance: format!("0x{:x}", account.balance.0),
+            code_hash: account
+                .code_hash
+                .map(|h| format!("0x{}", hex::encode(h.as_bytes())))
+                .unwrap_or_else(|| "0x".to_string()),
+            nonce: format!("0x{:x}", account.nonce),
+            storage_hash: format!("0x{}", hex::encode(state.root().as_bytes())),
+            storage_proof: storage_proofs,
+        })
+    }
+
+    async fn eth_subscribe(
+        &self,
+        pending: jsonrpsee::PendingSubscriptionSink,
+        sub_type: String,
+    ) -> SubscriptionResult {
+        use jsonrpsee::SubscriptionMessage;
+
+        let sink = pending.accept().await?;
+
+        match sub_type.as_str() {
+            "newHeads" => {
+                let chain = self.chain.clone();
+                let mut last_height = chain.block_number();
+
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    if sink.is_closed() {
+                        break;
+                    }
+
+                    let current = chain.block_number();
+                    if current > last_height {
+                        // Send all new blocks since last check
+                        for h in (last_height + 1)..=current {
+                            if let Ok(Some(block)) = chain.get_block_by_number(h) {
+                                let block_hash = qfc_crypto::blake3_hash(&block.header_bytes());
+                                let head = crate::eth::NewHeadNotification {
+                                    number: format!("0x{:x}", block.number()),
+                                    hash: block_hash.to_string(),
+                                    parent_hash: block.header.parent_hash.to_string(),
+                                    timestamp: format!("0x{:x}", block.header.timestamp),
+                                    state_root: block.header.state_root.to_string(),
+                                    transactions_root: block.header.transactions_root.to_string(),
+                                    gas_used: format!("0x{:x}", block.header.gas_used),
+                                    gas_limit: format!("0x{:x}", block.header.gas_limit),
+                                };
+                                let msg = SubscriptionMessage::from_json(&head)?;
+                                if sink.send(msg).await.is_err() {
+                                    return Ok(());
+                                }
+                            }
+                        }
+                        last_height = current;
+                    }
+                }
+            }
+            "newPendingTransactions" => {
+                let mempool = self.mempool.clone();
+                let mut known: std::collections::HashSet<qfc_types::Hash> =
+                    std::collections::HashSet::new();
+
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    if sink.is_closed() {
+                        break;
+                    }
+
+                    // Collect new tx hashes while lock is held, then send after dropping lock
+                    let new_hashes: Vec<qfc_types::Hash> = {
+                        let pool = mempool.read();
+                        let all = pool.get_all_by_sender();
+                        let mut hashes = Vec::new();
+                        for (_sender, txs) in all {
+                            for ptx in txs {
+                                if known.insert(ptx.hash) {
+                                    hashes.push(ptx.hash);
+                                }
+                            }
+                        }
+                        hashes
+                    };
+
+                    for hash in new_hashes {
+                        let hash_str = hash.to_string();
+                        let msg = SubscriptionMessage::from_json(&hash_str)?;
+                        if sink.send(msg).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            _ => {
+                // Unknown subscription type — just close
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
@@ -793,6 +1066,29 @@ impl QfcApiServer for RpcServer {
             .get_stake(&address)
             .map_err(|e| RpcError::Internal(e.to_string()))?;
         Ok(format!("0x{:x}", stake.0))
+    }
+
+    async fn get_pending_undelegations(&self, address: String) -> RpcResult<Vec<RpcUndelegation>> {
+        let address = Self::parse_address(&address)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let undelegations = self
+            .chain
+            .state()
+            .get_undelegations(&address)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(undelegations
+            .into_iter()
+            .map(|u| RpcUndelegation {
+                delegator: format!("0x{}", hex::encode(u.delegator.as_bytes())),
+                validator: format!("0x{}", hex::encode(u.validator.as_bytes())),
+                amount: format!("0x{:x}", u.amount.0),
+                unlock_at: u.unlock_at,
+                is_unlocked: u.is_unlocked(now),
+            })
+            .collect())
     }
 
     async fn get_epoch(&self) -> RpcResult<RpcEpoch> {
@@ -1029,20 +1325,24 @@ impl QfcApiServer for RpcServer {
     ) -> RpcResult<RpcRegisterMinerResult> {
         let miner_address = Self::parse_address(&req.miner_address)?;
 
-        // Verify signature
-        let consensus = self.chain.consensus();
-        let validators = consensus.get_validators();
-        let validator = match validators.iter().find(|v| v.address == miner_address) {
-            Some(v) => v,
-            None => {
-                return Ok(RpcRegisterMinerResult {
-                    registered: false,
-                    assigned_tier: 0,
-                    message: "Unknown validator address".to_string(),
-                });
-            }
-        };
+        // Parse public key from request
+        let pk_hex = req.public_key.strip_prefix("0x").unwrap_or(&req.public_key);
+        let pk_bytes = hex::decode(pk_hex)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid public key hex: {}", e)))?;
+        let public_key = qfc_types::PublicKey::from_slice(&pk_bytes)
+            .ok_or_else(|| RpcError::InvalidParams("Invalid public key length".into()))?;
 
+        // Verify public key derives to claimed address
+        let derived_address = qfc_crypto::address_from_public_key(&public_key);
+        if derived_address != miner_address {
+            return Ok(RpcRegisterMinerResult {
+                registered: false,
+                assigned_tier: 0,
+                message: "Public key does not match miner address".to_string(),
+            });
+        }
+
+        // Verify signature using the submitted public key
         let sig_payload = format!(
             "{}{}{}",
             req.miner_address, req.gpu_model, req.benchmark_score
@@ -1053,13 +1353,18 @@ impl QfcApiServer for RpcServer {
         let signature = qfc_types::Signature::from_slice(&sig_bytes)
             .ok_or_else(|| RpcError::InvalidParams("Invalid signature length".into()))?;
 
-        if verify_hash_signature(&validator.public_key, &sig_hash, &signature).is_err() {
+        if verify_hash_signature(&public_key, &sig_hash, &signature).is_err() {
             return Ok(RpcRegisterMinerResult {
                 registered: false,
                 assigned_tier: 0,
                 message: "Invalid signature".to_string(),
             });
         }
+
+        // Store the miner's public key for future proof verification
+        self.registered_miners
+            .write()
+            .insert(miner_address, public_key);
 
         // Validate GPU claim
         if !qfc_inference::validate_gpu_claim(&req.gpu_model, req.benchmark_score) {
@@ -1085,7 +1390,9 @@ impl QfcApiServer for RpcServer {
             _ => None,
         };
 
-        // Update validator state
+        let consensus = self.chain.consensus();
+
+        // Update validator state if this miner is also a validator
         consensus.register_miner_profile(
             &miner_address,
             req.gpu_model.clone(),
@@ -1182,7 +1489,12 @@ impl QfcApiServer for RpcServer {
                     .collect(),
                 gpu_memory_mb: v.gpu_memory_mb,
                 inference_score: format!("0x{:x}", v.inference_score),
-                gpu_tier: "unknown".to_string(), // TODO: derive from hardware
+                gpu_tier: match v.gpu_tier {
+                    1 => "T1".to_string(),
+                    2 => "T2".to_string(),
+                    3 => "T3".to_string(),
+                    _ => "unknown".to_string(),
+                },
                 provides_compute: true,
             }),
             None => Ok(RpcComputeInfo {
@@ -1235,10 +1547,23 @@ impl QfcApiServer for RpcServer {
             0.0
         };
 
+        let proof_count = self
+            .verified_proof_count
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let total_time = self
+            .total_inference_time_ms
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let avg_time = if proof_count > 0 {
+            total_time / proof_count
+        } else {
+            0
+        };
+        let flops = self.total_flops.load(std::sync::atomic::Ordering::Relaxed);
+
         Ok(RpcInferenceStats {
             tasks_completed: total_tasks.to_string(),
-            avg_time_ms: "0".to_string(), // TODO: track average
-            flops_total: "0".to_string(), // TODO: accumulate
+            avg_time_ms: avg_time.to_string(),
+            flops_total: format!("0x{:x}", flops),
             pass_rate: format!("{:.2}", avg_pass_rate * 100.0),
         })
     }
@@ -1261,9 +1586,9 @@ impl QfcApiServer for RpcServer {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_millis() as u64;
-            let epoch_seed =
-                qfc_crypto::blake3_hash(now.to_le_bytes().as_ref()).as_bytes()[0] as u64;
-            pool.generate_synthetic_tasks(now / 10_000, epoch_seed, now + 30_000);
+            let current_epoch = self.chain.get_epoch();
+            let epoch_seed = u64::from_le_bytes(current_epoch.seed[..8].try_into().unwrap());
+            pool.generate_synthetic_tasks(current_epoch.number, epoch_seed, now + 30_000);
         }
 
         match pool.fetch_task(tier, request.available_memory_mb) {
@@ -1300,49 +1625,72 @@ impl QfcApiServer for RpcServer {
 
         let consensus = self.chain.consensus();
 
-        // 2. Find the validator
-        let validators = consensus.get_validators();
-        let validator = match validators.iter().find(|v| v.address == proof.validator) {
-            Some(v) => v,
+        // 2. Find the miner's public key (check registered miners first, then validators)
+        let miner_pubkey = {
+            let miners = self.registered_miners.read();
+            if let Some(pk) = miners.get(&proof.validator) {
+                Some(*pk)
+            } else {
+                // Fallback: check validator set for backward compatibility
+                let validators = consensus.get_validators();
+                validators
+                    .iter()
+                    .find(|v| v.address == proof.validator)
+                    .map(|v| v.public_key)
+            }
+        };
+
+        let public_key = match miner_pubkey {
+            Some(pk) => pk,
             None => {
                 return Ok(RpcProofResult {
                     accepted: false,
                     spot_checked: false,
-                    message: "Unknown validator".to_string(),
+                    message: "Unknown miner — register first via qfc_registerMiner".to_string(),
+                    reward_estimate: None,
                 });
             }
         };
 
-        // 3. Check if validator is active
-        if !validator.is_active() {
-            return Ok(RpcProofResult {
-                accepted: false,
-                spot_checked: false,
-                message: "Validator is inactive or jailed".to_string(),
-            });
+        // 3. Check if miner is also a validator and if so, verify active status
+        {
+            let validators = consensus.get_validators();
+            if let Some(v) = validators.iter().find(|v| v.address == proof.validator) {
+                if !v.is_active() {
+                    return Ok(RpcProofResult {
+                        accepted: false,
+                        spot_checked: false,
+                        message: "Validator is inactive or jailed".to_string(),
+                        reward_estimate: None,
+                    });
+                }
+            }
         }
 
         // 4. Verify the proof signature
         let proof_hash = blake3_hash(&proof.to_bytes_without_signature());
-        if verify_hash_signature(&validator.public_key, &proof_hash, &proof.signature).is_err() {
+        if verify_hash_signature(&public_key, &proof_hash, &proof.signature).is_err() {
             warn!("Invalid inference proof signature from {}", proof.validator);
             return Ok(RpcProofResult {
                 accepted: false,
                 spot_checked: false,
                 message: "Invalid proof signature".to_string(),
+                reward_estimate: None,
             });
         }
 
-        // 5. Basic verification (epoch, model, FLOPS)
-        let current_epoch = consensus.get_epoch();
-        if let Err(e) =
-            qfc_ai_coordinator::verify_basic(&proof, current_epoch.number, &self.model_registry)
-        {
+        // 5. Basic verification (timestamp freshness, model, FLOPS)
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if let Err(e) = qfc_ai_coordinator::verify_basic(&proof, now_secs, &self.model_registry) {
             warn!("Proof rejected from {}: {}", submission.miner_address, e);
             return Ok(RpcProofResult {
                 accepted: false,
                 spot_checked: false,
                 message: format!("Proof rejected: {}", e),
+                reward_estimate: None,
             });
         }
 
@@ -1394,6 +1742,7 @@ impl QfcApiServer for RpcServer {
                                 spot_checked: true,
                                 message: "Proof rejected: spot-check failed (output hash mismatch)"
                                     .to_string(),
+                                reward_estimate: None,
                             });
                         }
                         Err(e) => {
@@ -1440,6 +1789,7 @@ impl QfcApiServer for RpcServer {
                         accepted: passed,
                         spot_checked: true,
                         message: format!("Challenge result: {:?}", verdict),
+                        reward_estimate: None,
                     });
                 }
             }
@@ -1460,6 +1810,7 @@ impl QfcApiServer for RpcServer {
                             accepted: false,
                             spot_checked: false,
                             message: "Redundant verification: inconsistent output".to_string(),
+                            reward_estimate: None,
                         });
                     }
                 } else {
@@ -1467,13 +1818,22 @@ impl QfcApiServer for RpcServer {
                         accepted: true,
                         spot_checked: false,
                         message: "Redundant verification: waiting for more submissions".to_string(),
+                        reward_estimate: None,
                     });
                 }
             }
         }
 
-        // 8. Proof passed — update inference score
+        // 8. Proof passed — update inference score and track stats
         consensus.update_inference_score(&proof.validator, proof.flops_estimated, 1);
+        self.total_flops
+            .fetch_add(proof.flops_estimated, std::sync::atomic::Ordering::Relaxed);
+        self.total_inference_time_ms.fetch_add(
+            proof.execution_time_ms as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self.verified_proof_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // 9. Push to proof pool for block inclusion (v2.0)
         // Convert qfc_inference::InferenceProof → qfc_types::InferenceProof via borsh roundtrip
@@ -1483,18 +1843,67 @@ impl QfcApiServer for RpcServer {
             pool.write().add(types_proof);
         }
 
-        // 10. Check if this proof completes a public task (v2.0)
+        // 10. Check if this proof completes a public task (v2.0, B2: IPFS for large results)
         {
-            let mut task_pool = self.task_pool.write();
-            if task_pool.get_public_task(&proof.input_hash).is_some() {
+            use qfc_ai_coordinator::task_pool::ResultStorage;
+
+            let has_public_task = {
+                let pool = self.task_pool.read();
+                pool.get_public_task(&proof.input_hash).is_some()
+            };
+
+            if has_public_task {
                 let result_data = submission
                     .result_data
                     .as_ref()
                     .and_then(|s| hex::decode(s.strip_prefix("0x").unwrap_or(s)).ok())
                     .unwrap_or_else(|| proof.output_hash.as_bytes().to_vec());
+
+                // B2: If result is large and IPFS client is available, upload to IPFS
+                let result_storage = if let Some(ref ipfs) = self.ipfs_client {
+                    if ipfs.should_upload(&result_data) {
+                        // Upload to IPFS (no lock held during async call)
+                        match ipfs.upload(&result_data).await {
+                            Ok(upload_result) => {
+                                let preview_len = std::cmp::min(1024, result_data.len());
+                                let preview = result_data[..preview_len].to_vec();
+                                info!(
+                                    "Uploaded large result ({} bytes) to IPFS: {}",
+                                    result_data.len(),
+                                    upload_result.cid
+                                );
+                                ResultStorage::Ipfs {
+                                    cid: upload_result.cid,
+                                    size: upload_result.size,
+                                    preview,
+                                }
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "IPFS upload failed for large result ({} bytes), storing inline: {}",
+                                    result_data.len(),
+                                    e
+                                );
+                                ResultStorage::Inline(result_data)
+                            }
+                        }
+                    } else {
+                        ResultStorage::Inline(result_data)
+                    }
+                } else {
+                    if result_data.len() > 1_048_576 {
+                        warn!(
+                            "Large result ({} bytes) stored inline because no IPFS client is configured",
+                            result_data.len()
+                        );
+                    }
+                    ResultStorage::Inline(result_data)
+                };
+
+                let mut task_pool = self.task_pool.write();
                 task_pool.complete_public_task(
                     &proof.input_hash,
-                    result_data,
+                    result_storage,
                     proof.validator,
                     proof.execution_time_ms,
                 );
@@ -1510,6 +1919,28 @@ impl QfcApiServer for RpcServer {
             spot_checked
         );
 
+        // Compute estimated miner reward based on base fee (15% miner pool)
+        let reward_est = {
+            let base_fee = qfc_ai_coordinator::estimate_base_fee(&proof.task_type);
+            // Miner gets ~15% of base fee per the reward distribution formula
+            let miner_share = base_fee * 15 / 100;
+            format!("0x{:x}", miner_share)
+        };
+
+        // Also query miner's current balance for the response
+        let balance = self
+            .chain
+            .state()
+            .get_balance(&proof.validator)
+            .unwrap_or_default();
+
+        info!(
+            "Miner {} reward estimate: {} wei (balance: {} QFC)",
+            proof.validator,
+            reward_est,
+            format_qfc_balance(balance),
+        );
+
         Ok(RpcProofResult {
             accepted: true,
             spot_checked,
@@ -1518,6 +1949,7 @@ impl QfcApiServer for RpcServer {
             } else {
                 "Proof accepted".to_string()
             },
+            reward_estimate: Some(reward_est),
         })
     }
 
@@ -1600,6 +2032,417 @@ impl QfcApiServer for RpcServer {
                 }
             })
             .collect())
+    }
+
+    // ---- v2.0: Treasury endpoints ----
+
+    async fn get_treasury_info(&self) -> RpcResult<RpcTreasuryInfo> {
+        let treasury_addr = qfc_types::Address::new(qfc_types::TREASURY_ADDRESS_BYTES);
+        let state = self.chain.state();
+        let balance = state.get_balance(&treasury_addr).unwrap_or_default();
+        let treasury = self.treasury.read();
+
+        Ok(RpcTreasuryInfo {
+            address: treasury_addr.to_string(),
+            balance: balance.to_string(),
+            total_disbursed: treasury.total_disbursed().to_string(),
+            active_proposals: treasury.active_proposals().len() as u64,
+        })
+    }
+
+    async fn propose_spend(&self, request: RpcProposeSpendRequest) -> RpcResult<String> {
+        let proposer = Self::parse_address(&request.proposer)?;
+        let recipient = Self::parse_address(&request.recipient)?;
+        let amount: u128 = request
+            .amount
+            .parse()
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid amount: {}", e)))?;
+
+        let state = self.chain.state();
+        let proposer_stake = state.get_stake(&proposer).unwrap_or_default().0.as_u128();
+
+        let treasury_addr = qfc_types::Address::new(qfc_types::TREASURY_ADDRESS_BYTES);
+        let treasury_balance = state
+            .get_balance(&treasury_addr)
+            .unwrap_or_default()
+            .0
+            .as_u128();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        let id = self
+            .treasury
+            .write()
+            .propose_spend(
+                proposer,
+                recipient,
+                amount,
+                request.description,
+                proposer_stake,
+                treasury_balance,
+                now,
+            )
+            .map_err(|e| RpcError::Execution(e.to_string()))?;
+
+        Ok(hex::encode(id.as_bytes()))
+    }
+
+    async fn vote_spend(&self, request: RpcVoteSpendRequest) -> RpcResult<bool> {
+        let proposal_id = Self::parse_hash(&request.proposal_id)?;
+        let voter = Self::parse_address(&request.voter)?;
+
+        let state = self.chain.state();
+        let voter_stake = state.get_stake(&voter).unwrap_or_default().0.as_u128();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        self.treasury
+            .write()
+            .vote(proposal_id, voter, request.approve, voter_stake, now)
+            .map_err(|e| RpcError::Execution(e.to_string()))?;
+
+        // Tally after each vote
+        let consensus = self.chain.consensus();
+        let validators = consensus.get_validators();
+        let total_stake: u128 = validators.iter().map(|v| v.stake.0.as_u128()).sum();
+        self.treasury.write().tally(total_stake, now);
+
+        Ok(true)
+    }
+
+    async fn get_spend_proposals(&self) -> RpcResult<Vec<RpcSpendProposal>> {
+        let treasury = self.treasury.read();
+        let proposals = treasury.all_proposals();
+
+        Ok(proposals
+            .into_iter()
+            .map(|p| {
+                let status = match &p.status {
+                    qfc_ai_coordinator::SpendStatus::Active => "Active".to_string(),
+                    qfc_ai_coordinator::SpendStatus::Queued { execute_after } => {
+                        format!("Queued(execute_after={})", execute_after)
+                    }
+                    qfc_ai_coordinator::SpendStatus::Executed => "Executed".to_string(),
+                    qfc_ai_coordinator::SpendStatus::Rejected => "Rejected".to_string(),
+                    qfc_ai_coordinator::SpendStatus::Expired => "Expired".to_string(),
+                    qfc_ai_coordinator::SpendStatus::Cancelled => "Cancelled".to_string(),
+                };
+
+                RpcSpendProposal {
+                    proposal_id: hex::encode(p.proposal_id.as_bytes()),
+                    proposer: p.proposer.to_string(),
+                    recipient: p.recipient.to_string(),
+                    amount: p.amount.to_string(),
+                    description: p.description.clone(),
+                    stake_for: p.stake_for().to_string(),
+                    stake_against: p.stake_against().to_string(),
+                    status,
+                    created_at: p.created_at,
+                    voting_deadline: p.voting_deadline,
+                }
+            })
+            .collect())
+    }
+
+    // ---- v2.0: Parameter Governance endpoints ----
+
+    async fn propose_parameter(&self, request: RpcProposeParameterRequest) -> RpcResult<String> {
+        let proposer = Self::parse_address(&request.proposer)?;
+
+        // Parse parameter key
+        let parameter = Self::parse_parameter_key(&request.parameter)?;
+
+        // Get current value for this parameter
+        let current_value = self.get_current_param_value(&parameter);
+
+        // Parse proposed value
+        let proposed_value: u128 = request
+            .proposed_value
+            .parse()
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid proposed_value: {}", e)))?;
+
+        // Get proposer's stake
+        let state = self.chain.state();
+        let stake = state.get_stake(&proposer).unwrap_or_default().0.as_u128();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        let proposal_id = self
+            .param_governance
+            .write()
+            .propose(
+                proposer,
+                parameter,
+                current_value,
+                proposed_value,
+                request.description,
+                stake,
+                now,
+            )
+            .map_err(|e| RpcError::Execution(e.to_string()))?;
+
+        Ok(hex::encode(proposal_id.as_bytes()))
+    }
+
+    async fn vote_parameter(&self, request: RpcVoteParameterRequest) -> RpcResult<bool> {
+        let proposal_id = Self::parse_hash(&request.proposal_id)?;
+        let voter = Self::parse_address(&request.voter)?;
+
+        // Get voter's stake for stake-weighted voting
+        let state = self.chain.state();
+        let voter_stake = state.get_stake(&voter).unwrap_or_default().0.as_u128();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        self.param_governance
+            .write()
+            .vote(proposal_id, voter, request.approve, voter_stake, now)
+            .map_err(|e| RpcError::Execution(e.to_string()))?;
+
+        // Tally after each vote to check for early pass/reject
+        let consensus = self.chain.consensus();
+        let validators = consensus.get_validators();
+        let total_stake: u128 = validators.iter().map(|v| v.stake.0.as_u128()).sum();
+        self.param_governance.write().tally(total_stake, now);
+
+        Ok(true)
+    }
+
+    async fn get_parameter_proposals(&self) -> RpcResult<Vec<RpcParameterProposal>> {
+        let gov = self.param_governance.read();
+        let proposals = gov.all_proposals();
+
+        Ok(proposals
+            .into_iter()
+            .map(|p| {
+                let status = match &p.status {
+                    qfc_ai_coordinator::ParamProposalStatus::Active => "Active".to_string(),
+                    qfc_ai_coordinator::ParamProposalStatus::Queued { execute_after } => {
+                        format!("Queued(execute_after={})", execute_after)
+                    }
+                    qfc_ai_coordinator::ParamProposalStatus::Executed => "Executed".to_string(),
+                    qfc_ai_coordinator::ParamProposalStatus::Rejected => "Rejected".to_string(),
+                    qfc_ai_coordinator::ParamProposalStatus::Expired => "Expired".to_string(),
+                    qfc_ai_coordinator::ParamProposalStatus::Cancelled => "Cancelled".to_string(),
+                };
+
+                RpcParameterProposal {
+                    proposal_id: hex::encode(p.proposal_id.as_bytes()),
+                    proposer: p.proposer.to_string(),
+                    parameter: p.parameter.to_string(),
+                    current_value: p.current_value.to_string(),
+                    proposed_value: p.proposed_value.to_string(),
+                    description: p.description.clone(),
+                    stake_for: p.stake_for().to_string(),
+                    stake_against: p.stake_against().to_string(),
+                    status,
+                    created_at: p.created_at,
+                    voting_deadline: p.voting_deadline,
+                }
+            })
+            .collect())
+    }
+
+    async fn get_parameter_overrides(&self) -> RpcResult<Vec<RpcParameterOverride>> {
+        let gov = self.param_governance.read();
+        let overrides = gov.all_overrides();
+
+        Ok(overrides
+            .iter()
+            .map(|(key, value)| RpcParameterOverride {
+                parameter: key.to_string(),
+                value: value.to_string(),
+            })
+            .collect())
+    }
+
+    // ---- v2.0: Cross-chain bridge endpoints ----
+
+    async fn get_bridge_status(&self) -> RpcResult<RpcBridgeStatus> {
+        let bridge = self.bridge.read();
+        let status = bridge.status();
+        Ok(RpcBridgeStatus {
+            active: status.active,
+            validator_count: status.validator_count,
+            threshold: status.threshold,
+            total_deposits: status.total_deposits,
+            total_withdrawals: status.total_withdrawals,
+            pending_deposits: status.pending_deposits,
+            pending_withdrawals: status.pending_withdrawals,
+            total_value_locked: status.total_value_locked,
+        })
+    }
+
+    async fn get_bridge_deposit(&self, deposit_id: String) -> RpcResult<Option<RpcBridgeDeposit>> {
+        let hash = Self::parse_hash(&deposit_id)?;
+        let bridge = self.bridge.read();
+        Ok(bridge.get_deposit(&hash).map(|d| {
+            let status = match d.status {
+                qfc_bridge::DepositStatus::Pending => "Pending",
+                qfc_bridge::DepositStatus::Confirmed => "Confirmed",
+                qfc_bridge::DepositStatus::Minting => "Minting",
+                qfc_bridge::DepositStatus::Completed => "Completed",
+                qfc_bridge::DepositStatus::Failed => "Failed",
+            };
+            RpcBridgeDeposit {
+                deposit_id: hex::encode(d.deposit_id.as_bytes()),
+                eth_tx_hash: hex::encode(d.eth_tx_hash.as_bytes()),
+                eth_block_number: d.eth_block_number,
+                eth_sender: d.eth_sender.to_string(),
+                qfc_recipient: d.qfc_recipient.to_string(),
+                token_address: d.token_address.to_string(),
+                amount: d.amount.to_string(),
+                status: status.to_string(),
+                signature_count: d.signatures.len(),
+                observed_at: d.observed_at,
+            }
+        }))
+    }
+
+    async fn get_bridge_withdrawal(
+        &self,
+        withdrawal_id: String,
+    ) -> RpcResult<Option<RpcBridgeWithdrawal>> {
+        let hash = Self::parse_hash(&withdrawal_id)?;
+        let bridge = self.bridge.read();
+        Ok(bridge.get_withdrawal(&hash).map(|w| {
+            let status = match w.status {
+                qfc_bridge::WithdrawalStatus::Pending => "Pending",
+                qfc_bridge::WithdrawalStatus::Signing => "Signing",
+                qfc_bridge::WithdrawalStatus::Submitted => "Submitted",
+                qfc_bridge::WithdrawalStatus::Completed => "Completed",
+                qfc_bridge::WithdrawalStatus::Failed => "Failed",
+            };
+            RpcBridgeWithdrawal {
+                withdrawal_id: hex::encode(w.withdrawal_id.as_bytes()),
+                qfc_tx_hash: hex::encode(w.qfc_tx_hash.as_bytes()),
+                qfc_block_number: w.qfc_block_number,
+                qfc_sender: w.qfc_sender.to_string(),
+                eth_recipient: w.eth_recipient.to_string(),
+                token_address: w.token_address.to_string(),
+                amount: w.amount.to_string(),
+                status: status.to_string(),
+                signature_count: w.signatures.len(),
+                observed_at: w.observed_at,
+                eth_unlock_tx: w.eth_unlock_tx.map(|h| hex::encode(h.as_bytes())),
+            }
+        }))
+    }
+
+    // ---- v2.0: State rent endpoints ----
+
+    async fn get_account_rent_info(&self, address: String) -> RpcResult<RpcAccountRentInfo> {
+        let addr = Self::parse_address(&address)?;
+        let state = self.chain.state();
+        let account = state
+            .get_account(&addr)
+            .map_err(|e| RpcError::Internal(format!("Failed to get account: {}", e)))?;
+
+        let current_block = self.chain.block_number();
+        let current_epoch = current_block / qfc_types::BLOCKS_PER_EPOCH;
+
+        let epochs_since_active = current_epoch.saturating_sub(account.last_active_epoch);
+        let rent_owed = qfc_types::STORAGE_RENT_PER_SLOT_PER_EPOCH
+            * account.storage_slot_count as u128
+            * epochs_since_active as u128;
+
+        Ok(RpcAccountRentInfo {
+            address: addr.to_string(),
+            storage_deposit: account.storage_deposit.to_string(),
+            storage_slot_count: account.storage_slot_count,
+            last_active_epoch: account.last_active_epoch,
+            is_dormant: account.is_dormant,
+            rent_owed: rent_owed.to_string(),
+            current_epoch,
+            reactivation_fee: qfc_types::REACTIVATION_FEE.to_string(),
+        })
+    }
+
+    // ---- v2.0: Account abstraction (EIP-4337) endpoints ----
+
+    async fn send_user_operation(&self, user_op: RpcUserOperation) -> RpcResult<String> {
+        let sender = Self::parse_address(&user_op.sender)?;
+
+        let parse_hex = |s: &str| -> Vec<u8> {
+            hex::decode(s.strip_prefix("0x").unwrap_or(s)).unwrap_or_default()
+        };
+        let parse_u64 = |s: &str| -> u64 {
+            s.strip_prefix("0x")
+                .map(|h| u64::from_str_radix(h, 16).unwrap_or(0))
+                .unwrap_or_else(|| s.parse().unwrap_or(0))
+        };
+        let parse_u128 = |s: &str| -> u128 {
+            s.strip_prefix("0x")
+                .map(|h| u128::from_str_radix(h, 16).unwrap_or(0))
+                .unwrap_or_else(|| s.parse().unwrap_or(0))
+        };
+
+        let op = qfc_executor::account_abstraction::UserOperation {
+            sender,
+            nonce: parse_u64(&user_op.nonce),
+            init_code: parse_hex(&user_op.init_code),
+            call_data: parse_hex(&user_op.call_data),
+            call_gas_limit: parse_u64(&user_op.call_gas_limit),
+            verification_gas_limit: parse_u64(&user_op.verification_gas_limit),
+            pre_verification_gas: parse_u64(&user_op.pre_verification_gas),
+            max_fee_per_gas: parse_u128(&user_op.max_fee_per_gas),
+            max_priority_fee_per_gas: parse_u128(&user_op.max_priority_fee_per_gas),
+            paymaster_and_data: parse_hex(&user_op.paymaster_and_data),
+            signature: parse_hex(&user_op.signature),
+        };
+
+        // Validate via EntryPoint
+        {
+            let ep = self.entry_point.read();
+            ep.validate_user_op(&op, 0)
+                .map_err(|e| RpcError::Execution(e.to_string()))?;
+        }
+
+        // Add to UserOp pool
+        let ep_addr = {
+            let ep = self.entry_point.read();
+            *ep.address()
+        };
+        let hash = self
+            .user_op_pool
+            .write()
+            .add(op, &ep_addr, self.chain_id, 0)
+            .map_err(|e| RpcError::Execution(e.to_string()))?;
+
+        Ok(hex::encode(hash.as_bytes()))
+    }
+
+    async fn get_user_operation_by_hash(
+        &self,
+        hash: String,
+    ) -> RpcResult<Option<RpcUserOperationStatus>> {
+        let op_hash = Self::parse_hash(&hash)?;
+        let pool = self.user_op_pool.read();
+
+        Ok(pool.get(&op_hash).map(|pooled| RpcUserOperationStatus {
+            user_op_hash: hex::encode(pooled.hash.as_bytes()),
+            sender: pooled.user_op.sender.to_string(),
+            nonce: pooled.user_op.nonce,
+            status: "pending".to_string(),
+            paymaster: pooled.user_op.paymaster().map(|p| p.to_string()),
+        }))
+    }
+
+    async fn supported_entry_points(&self) -> RpcResult<Vec<String>> {
+        let ep = self.entry_point.read();
+        Ok(vec![ep.address().to_string()])
     }
 
     // ---- v2.0: Public Inference API endpoints ----
@@ -1721,9 +2564,10 @@ impl QfcApiServer for RpcServer {
             qfc_crypto::blake3_hash(&data)
         };
 
+        let current_epoch = self.chain.get_epoch();
         let task = qfc_inference::InferenceTask::new(
             task_id,
-            now / 10_000,
+            current_epoch.number,
             task_type,
             input_data,
             now,
@@ -1748,6 +2592,81 @@ impl QfcApiServer for RpcServer {
             Some(task) => Ok(Self::build_task_status(task)),
             None => Err(RpcError::InvalidParams("Task not found".to_string()).into()),
         }
+    }
+
+    async fn estimate_inference_fee(
+        &self,
+        request: RpcEstimateInferenceFee,
+    ) -> RpcResult<RpcInferenceFeeEstimate> {
+        use qfc_inference::{ComputeTaskType, ModelId};
+
+        // Parse model_id: "name" or "name:version"
+        let (model_name, model_version) = if let Some(idx) = request.model_id.find(':') {
+            (
+                request.model_id[..idx].to_string(),
+                request.model_id[idx + 1..].to_string(),
+            )
+        } else {
+            (request.model_id.clone(), "v1.0".to_string())
+        };
+        let model_id = ModelId::new(&model_name, &model_version);
+
+        // Build a ComputeTaskType from the request
+        let task_type = match request.task_type.as_str() {
+            "TextGeneration" => ComputeTaskType::TextGeneration {
+                model_id,
+                prompt_hash: qfc_types::Hash::ZERO,
+                max_tokens: request.max_tokens as u32,
+                temperature_fp: 0,
+                seed: 0,
+            },
+            "ImageClassification" => ComputeTaskType::ImageClassification {
+                model_id,
+                input_hash: qfc_types::Hash::ZERO,
+            },
+            "OnnxInference" => ComputeTaskType::OnnxInference {
+                model_hash: qfc_types::Hash::ZERO,
+                input_hash: qfc_types::Hash::ZERO,
+            },
+            _ => ComputeTaskType::Embedding {
+                model_id,
+                input_hash: qfc_types::Hash::ZERO,
+            },
+        };
+
+        let reqs = qfc_ai_coordinator::task_types::task_requirements(&task_type);
+        let base_fee = qfc_ai_coordinator::estimate_base_fee(&task_type);
+
+        let tier_str = match reqs.min_tier {
+            qfc_inference::GpuTier::Hot => "Hot",
+            qfc_inference::GpuTier::Warm => "Warm",
+            qfc_inference::GpuTier::Cold => "Cold",
+        };
+
+        Ok(RpcInferenceFeeEstimate {
+            base_fee: format!("0x{:x}", base_fee),
+            model_id: request.model_id,
+            gpu_tier: tier_str.to_string(),
+            estimated_time_ms: reqs.timeout_ms,
+            min_memory_mb: reqs.min_memory_mb,
+            estimated_flops: reqs.estimated_flops,
+        })
+    }
+
+    async fn get_inference_result(&self, cid: String) -> RpcResult<String> {
+        use base64::Engine;
+
+        let ipfs = self
+            .ipfs_client
+            .as_ref()
+            .ok_or_else(|| RpcError::Internal("IPFS client not configured".to_string()))?;
+
+        let data = ipfs
+            .fetch(&cid)
+            .await
+            .map_err(|e| RpcError::Internal(format!("Failed to fetch from IPFS: {}", e)))?;
+
+        Ok(base64::engine::general_purpose::STANDARD.encode(&data))
     }
 
     async fn subscribe_task_status(
@@ -1816,9 +2735,10 @@ impl QfcApiServer for RpcServer {
 
 // Helper methods
 impl RpcServer {
-    /// Build RpcPublicTaskStatus from a PublicTask (B1: structured envelope)
+    /// Build RpcPublicTaskStatus from a PublicTask (B1: structured envelope, B2: IPFS support)
     fn build_task_status(task: &qfc_ai_coordinator::task_pool::PublicTask) -> RpcPublicTaskStatus {
         use base64::Engine;
+        use qfc_ai_coordinator::task_pool::ResultStorage;
 
         let model_id = task
             .inner_task
@@ -1827,29 +2747,53 @@ impl RpcServer {
             .map(|m| format!("{}:{}", m.name, m.version))
             .unwrap_or_default();
 
-        let (status, result, result_size, miner_address, execution_time_ms) = match &task.status {
+        let (
+            status,
+            result,
+            result_size,
+            result_type,
+            result_cid,
+            result_preview,
+            miner_address,
+            execution_time_ms,
+        ) = match &task.status {
             qfc_ai_coordinator::task_pool::PublicTaskStatus::Pending => {
-                ("Pending".into(), None, None, None, None)
+                ("Pending".into(), None, None, None, None, None, None, None)
             }
             qfc_ai_coordinator::task_pool::PublicTaskStatus::Assigned => {
-                ("Assigned".into(), None, None, None, None)
+                ("Assigned".into(), None, None, None, None, None, None, None)
             }
             qfc_ai_coordinator::task_pool::PublicTaskStatus::Completed {
-                result_data,
+                result,
                 miner,
                 execution_time_ms,
-            } => (
-                "Completed".into(),
-                Some(base64::engine::general_purpose::STANDARD.encode(result_data)),
-                Some(result_data.len()),
-                Some(miner.to_string()),
-                Some(*execution_time_ms),
-            ),
+            } => match result {
+                ResultStorage::Inline(data) => (
+                    "Completed".into(),
+                    Some(base64::engine::general_purpose::STANDARD.encode(data)),
+                    Some(data.len()),
+                    Some("inline".to_string()),
+                    None,
+                    None,
+                    Some(miner.to_string()),
+                    Some(*execution_time_ms),
+                ),
+                ResultStorage::Ipfs { cid, size, preview } => (
+                    "Completed".into(),
+                    None,
+                    Some(*size),
+                    Some("ipfs".to_string()),
+                    Some(cid.clone()),
+                    Some(base64::engine::general_purpose::STANDARD.encode(preview)),
+                    Some(miner.to_string()),
+                    Some(*execution_time_ms),
+                ),
+            },
             qfc_ai_coordinator::task_pool::PublicTaskStatus::Failed => {
-                ("Failed".into(), None, None, None, None)
+                ("Failed".into(), None, None, None, None, None, None, None)
             }
             qfc_ai_coordinator::task_pool::PublicTaskStatus::Expired => {
-                ("Expired".into(), None, None, None, None)
+                ("Expired".into(), None, None, None, None, None, None, None)
             }
         };
 
@@ -1864,8 +2808,68 @@ impl RpcServer {
             max_fee: format!("0x{:x}", task.max_fee),
             result,
             result_size,
+            result_type,
+            result_cid,
+            result_preview,
             miner_address,
             execution_time_ms,
+        }
+    }
+}
+
+// ---- txpool RPC ----
+
+#[async_trait::async_trait]
+impl TxPoolApiServer for RpcServer {
+    async fn txpool_content(&self) -> RpcResult<TxPoolContent> {
+        let mempool = self.mempool.read();
+        let all = mempool.get_all_by_sender();
+
+        let mut pending: std::collections::HashMap<
+            String,
+            std::collections::HashMap<String, RpcTransaction>,
+        > = std::collections::HashMap::new();
+
+        for (sender, txs) in all {
+            let sender_str = sender.to_string();
+            let nonce_map = pending.entry(sender_str).or_default();
+            for ptx in txs {
+                let nonce_str = format!("{}", ptx.tx.nonce);
+                nonce_map.insert(
+                    nonce_str,
+                    RpcTransaction::from_pending(ptx.tx, ptx.hash, ptx.sender),
+                );
+            }
+        }
+
+        Ok(TxPoolContent {
+            pending,
+            queued: std::collections::HashMap::new(), // QFC mempool has no separate queued pool
+        })
+    }
+
+    async fn txpool_status(&self) -> RpcResult<TxPoolStatus> {
+        let mempool = self.mempool.read();
+        let size = mempool.size();
+        Ok(TxPoolStatus {
+            pending: format!("0x{:x}", size),
+            queued: "0x0".to_string(),
+        })
+    }
+}
+
+/// Format a U256 balance as human-readable QFC (1 QFC = 1e18 wei)
+fn format_qfc_balance(balance: qfc_types::U256) -> String {
+    let wei_str = format!("{}", balance);
+    if wei_str.len() <= 18 {
+        format!("0.{:0>18}", wei_str)
+    } else {
+        let (whole, frac) = wei_str.split_at(wei_str.len() - 18);
+        let frac_trimmed = frac.trim_end_matches('0');
+        if frac_trimmed.is_empty() {
+            whole.to_string()
+        } else {
+            format!("{}.{}", whole, &frac[..6.min(frac.len())])
         }
     }
 }

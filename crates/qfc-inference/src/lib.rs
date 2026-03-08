@@ -9,12 +9,15 @@
 //! - **CPU**: Always available, uses candle-core CPU backend
 //! - **CUDA**: NVIDIA GPUs via candle-core CUDA backend (requires `cuda` feature)
 //! - **Metal**: Apple Silicon via candle-core Metal backend (requires `metal` feature)
+//! - **ROCm**: AMD GPUs via ONNX Runtime ROCm backend (requires `rocm` feature)
 //!
 //! # Feature Flags
 //!
 //! - `cpu` (default): CPU-only inference
 //! - `cuda`: Enable NVIDIA CUDA GPU support
 //! - `metal`: Enable Apple Metal GPU support (macOS only)
+//! - `onnx`: Enable ONNX Runtime inference
+//! - `rocm`: Enable AMD ROCm GPU support (implies `onnx`)
 
 pub mod backend;
 pub mod download;
@@ -118,6 +121,16 @@ pub fn create_engine_for_backend(
             "Metal (not compiled with metal feature)".to_string(),
         )),
 
+        #[cfg(feature = "onnx")]
+        BackendType::Rocm => {
+            let engine = backend::onnx::OnnxEngine::new_rocm()?;
+            Ok(Box::new(engine))
+        }
+        #[cfg(not(feature = "onnx"))]
+        BackendType::Rocm => Err(InferenceError::BackendUnavailable(
+            "ROCm (not compiled with rocm feature)".to_string(),
+        )),
+
         BackendType::Cpu => {
             let engine = backend::cpu::CpuEngine::new();
             Ok(Box::new(engine))
@@ -135,7 +148,7 @@ mod tests {
         let engine = create_engine().unwrap();
         assert!(matches!(
             engine.backend_type(),
-            BackendType::Cpu | BackendType::Metal | BackendType::Cuda
+            BackendType::Cpu | BackendType::Metal | BackendType::Cuda | BackendType::Rocm
         ));
     }
 
@@ -147,13 +160,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_engine_full_workflow() {
-        let mut engine = backend::cpu::CpuEngine::new();
+        let engine = backend::cpu::CpuEngine::new();
 
-        // Load a model (placeholder name — works without candle, skips with candle)
+        // Run inference with a model that isn't loaded — should fail
         let model_id = ModelId::new("test-model", "v1");
-        let _ = engine.load_model(&model_id).await;
-
-        // Run inference (uses deterministic placeholder if model not loaded)
         let task = InferenceTask::new(
             qfc_types::Hash::new([0x42; 32]),
             1,
@@ -166,11 +176,13 @@ mod tests {
             10000,
         );
 
-        let result = engine.run_inference(&task).await.unwrap();
-        assert!(!result.output_data.is_empty());
-        assert_ne!(result.output_hash, qfc_types::Hash::ZERO);
+        let result = engine.run_inference(&task).await;
+        assert!(
+            result.is_err(),
+            "Should reject inference when model not loaded"
+        );
 
-        // Benchmark
+        // Benchmark should always work
         let bench = engine.benchmark().unwrap();
         assert!(bench.flops > 0.0);
     }
