@@ -105,3 +105,17 @@ jobs:
           cd /tmp/digests
           docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
             $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
+
+      - name: Update qfc-testnet image tag
+        if: github.ref_type == 'branch'
+        env:
+          SHORT_SHA: ${{ github.sha }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          TAG="${BRANCH}-sha-${SHORT_SHA:0:7}"
+          curl -sf -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.TESTNET_DISPATCH_TOKEN }}" \
+            https://api.github.com/repos/qfc-network/qfc-testnet/dispatches \
+            -d "{\"event_type\":\"image-published\",\"client_payload\":{\"tag\":\"${TAG}\",\"branch\":\"${BRANCH}\",\"sha\":\"${{ github.sha }}\"}}"
+          echo "Dispatched qfc-testnet update: ${TAG}"
