@@ -58,6 +58,10 @@ pub struct ModelInfo {
     /// Canonical format for deterministic verification.
     /// All nodes MUST use this format for spot-check to pass.
     pub canonical_format: CanonicalFormat,
+    /// Blake3 hash of the model weight file (for integrity verification).
+    /// If set, downloaded weights are verified against this hash.
+    /// Prevents supply-chain attacks and ensures all miners use identical weights.
+    pub weights_hash: Option<qfc_types::Hash>,
 }
 
 /// Local model cache with LRU eviction and auto-download
@@ -194,6 +198,12 @@ impl ModelCache {
 
         // Download the model
         let downloaded = crate::download::download_model(&model_id.name)?;
+
+        // Verify weight file integrity if registry has an expected hash
+        let registry = ModelRegistry::default_v2();
+        let expected_hash = registry.get_model(model_id).and_then(|m| m.weights_hash);
+        crate::download::verify_weights_hash(&downloaded.weights_path, expected_hash)?;
+
         let size_bytes = [
             &downloaded.weights_path,
             &downloaded.tokenizer_path,
@@ -248,6 +258,7 @@ impl ModelRegistry {
                 size_mb: 80,
                 approved: true,
                 canonical_format: CanonicalFormat::SafetensorsFp32,
+                weights_hash: None,
             },
             ModelInfo {
                 id: ModelId::new("qfc-embed-medium", "v1.0"),
@@ -258,6 +269,7 @@ impl ModelRegistry {
                 size_mb: 120,
                 approved: true,
                 canonical_format: CanonicalFormat::SafetensorsFp32,
+                weights_hash: None,
             },
             ModelInfo {
                 id: ModelId::new("qfc-classify-small", "v1.0"),
@@ -268,6 +280,7 @@ impl ModelRegistry {
                 size_mb: 440,
                 approved: true,
                 canonical_format: CanonicalFormat::SafetensorsFp32,
+                weights_hash: None,
             },
             ModelInfo {
                 id: ModelId::new("qfc-llm-0.5b", "v1.0"),
@@ -279,6 +292,7 @@ impl ModelRegistry {
                 size_mb: 990,
                 approved: true,
                 canonical_format: CanonicalFormat::SafetensorsFp32,
+                weights_hash: None,
             },
             ModelInfo {
                 id: ModelId::new("qfc-llm-3b", "v1.0"),
@@ -290,6 +304,7 @@ impl ModelRegistry {
                 size_mb: 2200,
                 approved: true,
                 canonical_format: CanonicalFormat::GgufQ4KM,
+                weights_hash: None,
             },
             ModelInfo {
                 id: ModelId::new("qfc-llm-7b", "v1.0"),
@@ -301,6 +316,7 @@ impl ModelRegistry {
                 size_mb: 4700,
                 approved: true,
                 canonical_format: CanonicalFormat::GgufQ4KM,
+                weights_hash: None,
             },
         ];
 

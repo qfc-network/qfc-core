@@ -1940,6 +1940,7 @@ impl QfcApiServer for RpcServer {
             size_mb: request.size_mb,
             approved: false,
             canonical_format: qfc_inference::CanonicalFormat::SafetensorsFp32,
+            weights_hash: None,
         };
 
         let now = std::time::SystemTime::now()
