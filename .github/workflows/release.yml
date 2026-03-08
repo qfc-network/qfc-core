@@ -35,6 +35,10 @@ jobs:
             os: ubuntu-24.04-arm
             features: candle
             label: linux-arm64
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            features: rocm
+            label: linux-x86_64-rocm
 
     steps:
       - uses: actions/checkout@v4
@@ -117,3 +121,5 @@ jobs:
             artifacts/qfc-linux-x86_64.tar.gz.sha256
             artifacts/qfc-linux-arm64.tar.gz
             artifacts/qfc-linux-arm64.tar.gz.sha256
+            artifacts/qfc-linux-x86_64-rocm.tar.gz
+            artifacts/qfc-linux-x86_64-rocm.tar.gz.sha256

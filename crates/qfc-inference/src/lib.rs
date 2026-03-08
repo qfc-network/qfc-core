@@ -9,12 +9,15 @@
 //! - **CPU**: Always available, uses candle-core CPU backend
 //! - **CUDA**: NVIDIA GPUs via candle-core CUDA backend (requires `cuda` feature)
 //! - **Metal**: Apple Silicon via candle-core Metal backend (requires `metal` feature)
+//! - **ROCm**: AMD GPUs via ONNX Runtime ROCm backend (requires `rocm` feature)
 //!
 //! # Feature Flags
 //!
 //! - `cpu` (default): CPU-only inference
 //! - `cuda`: Enable NVIDIA CUDA GPU support
 //! - `metal`: Enable Apple Metal GPU support (macOS only)
+//! - `onnx`: Enable ONNX Runtime inference
+//! - `rocm`: Enable AMD ROCm GPU support (implies `onnx`)
 
 pub mod backend;
 pub mod download;
@@ -118,6 +121,16 @@ pub fn create_engine_for_backend(
             "Metal (not compiled with metal feature)".to_string(),
         )),
 
+        #[cfg(feature = "onnx")]
+        BackendType::Rocm => {
+            let engine = backend::onnx::OnnxEngine::new_rocm()?;
+            Ok(Box::new(engine))
+        }
+        #[cfg(not(feature = "onnx"))]
+        BackendType::Rocm => Err(InferenceError::BackendUnavailable(
+            "ROCm (not compiled with rocm feature)".to_string(),
+        )),
+
         BackendType::Cpu => {
             let engine = backend::cpu::CpuEngine::new();
             Ok(Box::new(engine))
@@ -135,7 +148,7 @@ mod tests {
         let engine = create_engine().unwrap();
         assert!(matches!(
             engine.backend_type(),
-            BackendType::Cpu | BackendType::Metal | BackendType::Cuda
+            BackendType::Cpu | BackendType::Metal | BackendType::Cuda | BackendType::Rocm
         ));
     }
 

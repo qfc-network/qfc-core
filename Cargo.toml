@@ -93,6 +93,9 @@ candle-transformers = "0.9"
 hf-hub = { version = "0.5", features = ["tokio"] }
 tokenizers = "0.22"
 
+# AI / ML inference (ONNX Runtime — AMD ROCm, DirectML, CPU)
+ort = "2.0.0-rc.12"
+
 # Utilities
 hex = "0.4"
 bytes = "1.5"
