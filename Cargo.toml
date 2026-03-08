@@ -21,6 +21,8 @@ members = [
     "crates/qfc-inference",
     "crates/qfc-ai-coordinator",
     "crates/qfc-miner",
+    # v2.0: Cross-chain bridge
+    "crates/qfc-bridge",
 ]
 
 
@@ -124,6 +126,7 @@ qfc-pow = { path = "crates/qfc-pow" }
 qfc-inference = { path = "crates/qfc-inference" }
 qfc-ai-coordinator = { path = "crates/qfc-ai-coordinator" }
 qfc-miner = { path = "crates/qfc-miner" }
+qfc-bridge = { path = "crates/qfc-bridge" }
 
 [profile.release]
 lto = true

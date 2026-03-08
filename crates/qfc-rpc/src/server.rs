@@ -3,14 +3,15 @@
 use crate::error::RpcError;
 use crate::eth::EthApiServer;
 use crate::qfc::{
-    QfcApiServer, RpcComputeInfo, RpcEpoch, RpcEstimateInferenceFee, RpcFaucetResponse,
-    RpcInferenceFeeEstimate, RpcInferenceProofSubmission, RpcInferenceStats, RpcInferenceTask,
-    RpcMinerStatusReport, RpcModel, RpcModelProposal, RpcNodeInfo, RpcParameterOverride,
-    RpcParameterProposal, RpcProofResult, RpcProposeModelRequest, RpcProposeParameterRequest,
-    RpcProposeSpendRequest, RpcPublicTaskStatus, RpcRegisterMinerRequest, RpcRegisterMinerResult,
-    RpcSpendProposal, RpcSubmitPublicTask, RpcTaskRequest, RpcTreasuryInfo, RpcUndelegation,
-    RpcValidator, RpcValidatorMetrics, RpcValidatorScoreBreakdown, RpcVoteModelRequest,
-    RpcVoteParameterRequest, RpcVoteSpendRequest,
+    QfcApiServer, RpcBridgeDeposit, RpcBridgeStatus, RpcBridgeWithdrawal, RpcComputeInfo, RpcEpoch,
+    RpcEstimateInferenceFee, RpcFaucetResponse, RpcInferenceFeeEstimate,
+    RpcInferenceProofSubmission, RpcInferenceStats, RpcInferenceTask, RpcMinerStatusReport,
+    RpcModel, RpcModelProposal, RpcNodeInfo, RpcParameterOverride, RpcParameterProposal,
+    RpcProofResult, RpcProposeModelRequest, RpcProposeParameterRequest, RpcProposeSpendRequest,
+    RpcPublicTaskStatus, RpcRegisterMinerRequest, RpcRegisterMinerResult, RpcSpendProposal,
+    RpcSubmitPublicTask, RpcTaskRequest, RpcTreasuryInfo, RpcUndelegation, RpcValidator,
+    RpcValidatorMetrics, RpcValidatorScoreBreakdown, RpcVoteModelRequest, RpcVoteParameterRequest,
+    RpcVoteSpendRequest,
 };
 use crate::txpool::{TxPoolApiServer, TxPoolContent, TxPoolStatus};
 use crate::types::{BlockNumber, BlockTag, CallRequest, RpcBlock, RpcReceipt, RpcTransaction};
@@ -77,6 +78,8 @@ pub struct RpcServer {
     param_governance: Arc<RwLock<qfc_ai_coordinator::ParameterGovernance>>,
     /// v2.0: Treasury — community fund with governance-controlled spending
     treasury: Arc<RwLock<qfc_ai_coordinator::Treasury>>,
+    /// v2.0: Cross-chain bridge relayer (Ethereum ↔ QFC)
+    bridge: Arc<RwLock<qfc_bridge::BridgeRelayer>>,
     /// v2.0: Inference engine for spot-check re-execution
     inference_engine: Option<Arc<tokio::sync::RwLock<Box<dyn qfc_inference::InferenceEngine>>>>,
     /// v2.0: Pool of verified inference proofs awaiting block inclusion
@@ -112,6 +115,7 @@ impl Clone for RpcServer {
             governance: self.governance.clone(),
             param_governance: self.param_governance.clone(),
             treasury: self.treasury.clone(),
+            bridge: self.bridge.clone(),
             inference_engine: self.inference_engine.clone(),
             proof_pool: self.proof_pool.clone(),
             challenge_generator: self.challenge_generator.clone(),
@@ -148,6 +152,9 @@ impl RpcServer {
             governance: Arc::new(RwLock::new(qfc_ai_coordinator::ModelGovernance::new())),
             param_governance: Arc::new(RwLock::new(qfc_ai_coordinator::ParameterGovernance::new())),
             treasury: Arc::new(RwLock::new(qfc_ai_coordinator::Treasury::new())),
+            bridge: Arc::new(RwLock::new(qfc_bridge::BridgeRelayer::new(
+                qfc_bridge::RelayerConfig::default(),
+            ))),
             inference_engine: None,
             proof_pool: None,
             challenge_generator: None,
@@ -2215,6 +2222,79 @@ impl QfcApiServer for RpcServer {
                 value: value.to_string(),
             })
             .collect())
+    }
+
+    // ---- v2.0: Cross-chain bridge endpoints ----
+
+    async fn get_bridge_status(&self) -> RpcResult<RpcBridgeStatus> {
+        let bridge = self.bridge.read();
+        let status = bridge.status();
+        Ok(RpcBridgeStatus {
+            active: status.active,
+            validator_count: status.validator_count,
+            threshold: status.threshold,
+            total_deposits: status.total_deposits,
+            total_withdrawals: status.total_withdrawals,
+            pending_deposits: status.pending_deposits,
+            pending_withdrawals: status.pending_withdrawals,
+            total_value_locked: status.total_value_locked,
+        })
+    }
+
+    async fn get_bridge_deposit(&self, deposit_id: String) -> RpcResult<Option<RpcBridgeDeposit>> {
+        let hash = Self::parse_hash(&deposit_id)?;
+        let bridge = self.bridge.read();
+        Ok(bridge.get_deposit(&hash).map(|d| {
+            let status = match d.status {
+                qfc_bridge::DepositStatus::Pending => "Pending",
+                qfc_bridge::DepositStatus::Confirmed => "Confirmed",
+                qfc_bridge::DepositStatus::Minting => "Minting",
+                qfc_bridge::DepositStatus::Completed => "Completed",
+                qfc_bridge::DepositStatus::Failed => "Failed",
+            };
+            RpcBridgeDeposit {
+                deposit_id: hex::encode(d.deposit_id.as_bytes()),
+                eth_tx_hash: hex::encode(d.eth_tx_hash.as_bytes()),
+                eth_block_number: d.eth_block_number,
+                eth_sender: d.eth_sender.to_string(),
+                qfc_recipient: d.qfc_recipient.to_string(),
+                token_address: d.token_address.to_string(),
+                amount: d.amount.to_string(),
+                status: status.to_string(),
+                signature_count: d.signatures.len(),
+                observed_at: d.observed_at,
+            }
+        }))
+    }
+
+    async fn get_bridge_withdrawal(
+        &self,
+        withdrawal_id: String,
+    ) -> RpcResult<Option<RpcBridgeWithdrawal>> {
+        let hash = Self::parse_hash(&withdrawal_id)?;
+        let bridge = self.bridge.read();
+        Ok(bridge.get_withdrawal(&hash).map(|w| {
+            let status = match w.status {
+                qfc_bridge::WithdrawalStatus::Pending => "Pending",
+                qfc_bridge::WithdrawalStatus::Signing => "Signing",
+                qfc_bridge::WithdrawalStatus::Submitted => "Submitted",
+                qfc_bridge::WithdrawalStatus::Completed => "Completed",
+                qfc_bridge::WithdrawalStatus::Failed => "Failed",
+            };
+            RpcBridgeWithdrawal {
+                withdrawal_id: hex::encode(w.withdrawal_id.as_bytes()),
+                qfc_tx_hash: hex::encode(w.qfc_tx_hash.as_bytes()),
+                qfc_block_number: w.qfc_block_number,
+                qfc_sender: w.qfc_sender.to_string(),
+                eth_recipient: w.eth_recipient.to_string(),
+                token_address: w.token_address.to_string(),
+                amount: w.amount.to_string(),
+                status: status.to_string(),
+                signature_count: w.signatures.len(),
+                observed_at: w.observed_at,
+                eth_unlock_tx: w.eth_unlock_tx.map(|h| hex::encode(h.as_bytes())),
+            }
+        }))
     }
 
     // ---- v2.0: Public Inference API endpoints ----

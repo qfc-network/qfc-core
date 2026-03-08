@@ -247,6 +247,23 @@ pub trait QfcApi {
     /// Pushes RpcPublicTaskStatus whenever the task transitions state.
     #[subscription(name = "subscribeTaskStatus" => "taskStatus", unsubscribe = "unsubscribeTaskStatus", item = RpcPublicTaskStatus)]
     async fn subscribe_task_status(&self, task_id: String) -> SubscriptionResult;
+
+    // ---- v2.0: Bridge endpoints ----
+
+    /// Get bridge status (validators, TVL, pending operations)
+    #[method(name = "getBridgeStatus")]
+    async fn get_bridge_status(&self) -> RpcResult<RpcBridgeStatus>;
+
+    /// Get a bridge deposit by ID
+    #[method(name = "getBridgeDeposit")]
+    async fn get_bridge_deposit(&self, deposit_id: String) -> RpcResult<Option<RpcBridgeDeposit>>;
+
+    /// Get a bridge withdrawal by ID
+    #[method(name = "getBridgeWithdrawal")]
+    async fn get_bridge_withdrawal(
+        &self,
+        withdrawal_id: String,
+    ) -> RpcResult<Option<RpcBridgeWithdrawal>>;
 }
 
 /// Faucet response
@@ -721,4 +738,53 @@ pub struct RpcSpendProposal {
     pub status: String,
     pub created_at: u64,
     pub voting_deadline: u64,
+}
+
+// ============ v2.0: Bridge RPC Types ============
+
+/// Bridge status
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcBridgeStatus {
+    pub active: bool,
+    pub validator_count: usize,
+    pub threshold: usize,
+    pub total_deposits: u64,
+    pub total_withdrawals: u64,
+    pub pending_deposits: u64,
+    pub pending_withdrawals: u64,
+    pub total_value_locked: String,
+}
+
+/// Bridge deposit info
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcBridgeDeposit {
+    pub deposit_id: String,
+    pub eth_tx_hash: String,
+    pub eth_block_number: u64,
+    pub eth_sender: String,
+    pub qfc_recipient: String,
+    pub token_address: String,
+    pub amount: String,
+    pub status: String,
+    pub signature_count: usize,
+    pub observed_at: u64,
+}
+
+/// Bridge withdrawal info
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcBridgeWithdrawal {
+    pub withdrawal_id: String,
+    pub qfc_tx_hash: String,
+    pub qfc_block_number: u64,
+    pub qfc_sender: String,
+    pub eth_recipient: String,
+    pub token_address: String,
+    pub amount: String,
+    pub status: String,
+    pub signature_count: usize,
+    pub observed_at: u64,
+    pub eth_unlock_tx: Option<String>,
 }
