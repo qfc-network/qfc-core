@@ -6,10 +6,12 @@ mod error;
 mod eth;
 mod qfc;
 mod server;
+mod txpool;
 mod types;
 
 pub use error::*;
 pub use eth::*;
 pub use qfc::*;
 pub use server::*;
+pub use txpool::*;
 pub use types::*;

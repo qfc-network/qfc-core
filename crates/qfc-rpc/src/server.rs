@@ -10,6 +10,7 @@ use crate::qfc::{
     RpcSubmitPublicTask, RpcTaskRequest, RpcValidator, RpcValidatorMetrics,
     RpcValidatorScoreBreakdown, RpcVoteModelRequest,
 };
+use crate::txpool::{TxPoolApiServer, TxPoolContent, TxPoolStatus};
 use crate::types::{BlockNumber, BlockTag, CallRequest, RpcBlock, RpcReceipt, RpcTransaction};
 use jsonrpsee::core::{RpcResult, SubscriptionResult};
 use jsonrpsee::server::{ServerBuilder, ServerHandle};
@@ -217,12 +218,16 @@ impl RpcServer {
 
         let server = ServerBuilder::default().build(config.http_addr).await?;
 
-        // Merge both RPC modules
+        // Merge all RPC modules
         let mut eth_module = EthApiServer::into_rpc(self.clone());
-        let qfc_module = QfcApiServer::into_rpc(self);
+        let qfc_module = QfcApiServer::into_rpc(self.clone());
+        let txpool_module = TxPoolApiServer::into_rpc(self);
         eth_module
             .merge(qfc_module)
-            .expect("Failed to merge RPC modules");
+            .expect("Failed to merge QFC RPC module");
+        eth_module
+            .merge(txpool_module)
+            .expect("Failed to merge txpool RPC module");
 
         let handle = server.start(eth_module);
 
@@ -2063,5 +2068,46 @@ impl RpcServer {
             miner_address,
             execution_time_ms,
         }
+    }
+}
+
+// ---- txpool RPC ----
+
+#[async_trait::async_trait]
+impl TxPoolApiServer for RpcServer {
+    async fn txpool_content(&self) -> RpcResult<TxPoolContent> {
+        let mempool = self.mempool.read();
+        let all = mempool.get_all_by_sender();
+
+        let mut pending: std::collections::HashMap<
+            String,
+            std::collections::HashMap<String, RpcTransaction>,
+        > = std::collections::HashMap::new();
+
+        for (sender, txs) in all {
+            let sender_str = sender.to_string();
+            let nonce_map = pending.entry(sender_str).or_default();
+            for ptx in txs {
+                let nonce_str = format!("{}", ptx.tx.nonce);
+                nonce_map.insert(
+                    nonce_str,
+                    RpcTransaction::from_pending(ptx.tx, ptx.hash, ptx.sender),
+                );
+            }
+        }
+
+        Ok(TxPoolContent {
+            pending,
+            queued: std::collections::HashMap::new(), // QFC mempool has no separate queued pool
+        })
+    }
+
+    async fn txpool_status(&self) -> RpcResult<TxPoolStatus> {
+        let mempool = self.mempool.read();
+        let size = mempool.size();
+        Ok(TxPoolStatus {
+            pending: format!("0x{:x}", size),
+            queued: "0x0".to_string(),
+        })
     }
 }
