@@ -320,9 +320,8 @@ impl ModelRegistry {
             },
             ModelInfo {
                 id: ModelId::new("qfc-whisper-base", "v1.0"),
-                description:
-                    "Whisper base speech-to-text model (~150MB, Cold tier, CPU-capable)"
-                        .to_string(),
+                description: "Whisper base speech-to-text model (~150MB, Cold tier, CPU-capable)"
+                    .to_string(),
                 min_memory_mb: 512,
                 min_tier: GpuTier::Cold,
                 size_mb: 150,
@@ -332,9 +331,8 @@ impl ModelRegistry {
             },
             ModelInfo {
                 id: ModelId::new("qfc-whisper-large", "v1.0"),
-                description:
-                    "Whisper large-v3 speech-to-text model (~1.5GB, Warm tier)"
-                        .to_string(),
+                description: "Whisper large-v3 speech-to-text model (~1.5GB, Warm tier)"
+                    .to_string(),
                 min_memory_mb: 3072,
                 min_tier: GpuTier::Warm,
                 size_mb: 1500,

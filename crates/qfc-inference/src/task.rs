@@ -151,9 +151,7 @@ impl InferenceTask {
             ComputeTaskType::Embedding { model_id, .. } => {
                 estimate_model_memory(&model_id.name).min(4096)
             }
-            ComputeTaskType::SpeechToText { model_id, .. } => {
-                estimate_model_memory(&model_id.name)
-            }
+            ComputeTaskType::SpeechToText { model_id, .. } => estimate_model_memory(&model_id.name),
             ComputeTaskType::OnnxInference { .. } => 1024,
         }
     }

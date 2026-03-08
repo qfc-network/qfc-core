@@ -206,7 +206,9 @@ impl InferenceEngine for CpuEngine {
                         let pcm_samples: Vec<f32> = task
                             .input_data
                             .chunks_exact(4)
-                            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                            .map(|chunk| {
+                                f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+                            })
                             .collect();
                         let lang = if language.is_empty() {
                             None
