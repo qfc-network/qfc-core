@@ -1,8 +1,23 @@
 //! Ethereum-compatible RPC methods
 
 use crate::types::{BlockNumber, CallRequest, RpcBlock, RpcReceipt, RpcTransaction};
-use jsonrpsee::core::RpcResult;
+use jsonrpsee::core::{RpcResult, SubscriptionResult};
 use jsonrpsee::proc_macros::rpc;
+use serde::{Deserialize, Serialize};
+
+/// Subscription event for newHeads
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewHeadNotification {
+    pub number: String,
+    pub hash: String,
+    pub parent_hash: String,
+    pub timestamp: String,
+    pub state_root: String,
+    pub transactions_root: String,
+    pub gas_used: String,
+    pub gas_limit: String,
+}
 
 /// Ethereum RPC API trait
 #[rpc(server, namespace = "eth")]
@@ -79,4 +94,8 @@ pub trait EthApi {
         position: String,
         block: Option<BlockNumber>,
     ) -> RpcResult<String>;
+
+    /// Subscribe to new block headers
+    #[subscription(name = "subscribe" => "subscription", unsubscribe = "unsubscribe", item = serde_json::Value)]
+    async fn eth_subscribe(&self, sub_type: String) -> SubscriptionResult;
 }

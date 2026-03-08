@@ -753,6 +753,95 @@ impl EthApiServer for RpcServer {
 
         Ok(format!("0x{:064x}", value.0))
     }
+
+    async fn eth_subscribe(
+        &self,
+        pending: jsonrpsee::PendingSubscriptionSink,
+        sub_type: String,
+    ) -> SubscriptionResult {
+        use jsonrpsee::SubscriptionMessage;
+
+        let sink = pending.accept().await?;
+
+        match sub_type.as_str() {
+            "newHeads" => {
+                let chain = self.chain.clone();
+                let mut last_height = chain.block_number();
+
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    if sink.is_closed() {
+                        break;
+                    }
+
+                    let current = chain.block_number();
+                    if current > last_height {
+                        // Send all new blocks since last check
+                        for h in (last_height + 1)..=current {
+                            if let Ok(Some(block)) = chain.get_block_by_number(h) {
+                                let block_hash = qfc_crypto::blake3_hash(&block.header_bytes());
+                                let head = crate::eth::NewHeadNotification {
+                                    number: format!("0x{:x}", block.number()),
+                                    hash: block_hash.to_string(),
+                                    parent_hash: block.header.parent_hash.to_string(),
+                                    timestamp: format!("0x{:x}", block.header.timestamp),
+                                    state_root: block.header.state_root.to_string(),
+                                    transactions_root: block.header.transactions_root.to_string(),
+                                    gas_used: format!("0x{:x}", block.header.gas_used),
+                                    gas_limit: format!("0x{:x}", block.header.gas_limit),
+                                };
+                                let msg = SubscriptionMessage::from_json(&head)?;
+                                if sink.send(msg).await.is_err() {
+                                    return Ok(());
+                                }
+                            }
+                        }
+                        last_height = current;
+                    }
+                }
+            }
+            "newPendingTransactions" => {
+                let mempool = self.mempool.clone();
+                let mut known: std::collections::HashSet<qfc_types::Hash> =
+                    std::collections::HashSet::new();
+
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    if sink.is_closed() {
+                        break;
+                    }
+
+                    // Collect new tx hashes while lock is held, then send after dropping lock
+                    let new_hashes: Vec<qfc_types::Hash> = {
+                        let pool = mempool.read();
+                        let all = pool.get_all_by_sender();
+                        let mut hashes = Vec::new();
+                        for (_sender, txs) in all {
+                            for ptx in txs {
+                                if known.insert(ptx.hash) {
+                                    hashes.push(ptx.hash);
+                                }
+                            }
+                        }
+                        hashes
+                    };
+
+                    for hash in new_hashes {
+                        let hash_str = hash.to_string();
+                        let msg = SubscriptionMessage::from_json(&hash_str)?;
+                        if sink.send(msg).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            _ => {
+                // Unknown subscription type — just close
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
