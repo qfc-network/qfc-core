@@ -194,9 +194,25 @@ impl InferenceWorker {
             let signature = keypair.sign_hash(&proof_hash);
             proof.set_signature(signature);
 
-            // 6. Submit proof to validator
+            // 6. Pre-submission epoch staleness check
             let rpc_url = &self.config.validator_rpc;
             let miner_addr = hex::encode(self.config.wallet_address.as_bytes());
+
+            if let Ok(current_epoch) = submit::fetch_epoch(rpc_url).await {
+                let diff = if task_response.epoch >= current_epoch {
+                    task_response.epoch - current_epoch
+                } else {
+                    current_epoch - task_response.epoch
+                };
+                if diff > 1 {
+                    warn!(
+                        "Skipping stale proof: task epoch {} but validator at epoch {} (drift {})",
+                        task_response.epoch, current_epoch, diff
+                    );
+                    tasks_failed += 1;
+                    continue;
+                }
+            }
 
             match submit::submit_proof(rpc_url, &miner_addr, &proof).await {
                 Ok(result) => {
