@@ -267,6 +267,22 @@ pub trait QfcApi {
     #[subscription(name = "subscribeMinerEvents" => "minerEvent", unsubscribe = "unsubscribeMinerEvents", item = RpcMinerEvent)]
     async fn subscribe_miner_events(&self, address: String) -> SubscriptionResult;
 
+    // ---- v2.0: Miner notification endpoints ----
+
+    /// Register a webhook URL for miner event notifications.
+    /// Supports Discord, Telegram bot, or any custom HTTPS endpoint.
+    /// Requires miner signature for authentication.
+    #[method(name = "registerWebhook")]
+    async fn register_webhook(&self, request: RpcRegisterWebhookRequest) -> RpcResult<String>;
+
+    /// Remove a previously registered webhook.
+    #[method(name = "removeWebhook")]
+    async fn remove_webhook(&self, request: RpcRemoveWebhookRequest) -> RpcResult<bool>;
+
+    /// List active webhooks for a miner address.
+    #[method(name = "getWebhooks")]
+    async fn get_webhooks(&self, address: String) -> RpcResult<Vec<RpcWebhook>>;
+
     // ---- v2.0: Bridge endpoints ----
 
     /// Get bridge status (validators, TVL, pending operations)
@@ -776,6 +792,55 @@ pub struct RpcVestingTranche {
     pub end_time: String,
     /// Vesting progress percentage (0-100)
     pub percent_vested: u8,
+}
+
+// ============ v2.0: Miner Notification/Webhook Types ============
+
+/// Request to register a webhook for miner event notifications
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcRegisterWebhookRequest {
+    /// Miner address (hex)
+    pub miner_address: String,
+    /// Webhook URL (must be HTTPS, or Discord/Telegram webhook URL)
+    pub url: String,
+    /// Event types to receive: "all", "proof_accepted", "proof_rejected", "reward_settled"
+    #[serde(default = "default_events")]
+    pub events: Vec<String>,
+    /// Ed25519 signature of the URL for authentication
+    pub signature: String,
+}
+
+fn default_events() -> Vec<String> {
+    vec!["all".to_string()]
+}
+
+/// Request to remove a webhook
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcRemoveWebhookRequest {
+    /// Miner address (hex)
+    pub miner_address: String,
+    /// Webhook ID to remove
+    pub webhook_id: String,
+    /// Ed25519 signature for authentication
+    pub signature: String,
+}
+
+/// Registered webhook info
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcWebhook {
+    /// Unique webhook ID
+    pub id: String,
+    /// Webhook URL (partially masked for security)
+    pub url: String,
+    /// Subscribed event types
+    pub events: Vec<String>,
+    /// Registration timestamp (seconds)
+    pub created_at: String,
+    /// Whether the webhook is active
+    pub active: bool,
 }
 
 // ============ v2.0: Parameter Governance RPC Types ============

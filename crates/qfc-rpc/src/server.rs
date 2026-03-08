@@ -9,10 +9,11 @@ use crate::qfc::{
     RpcMinerEarnings, RpcMinerEvent, RpcMinerStatusReport, RpcMinerVesting, RpcModel,
     RpcModelProposal, RpcNodeInfo, RpcParameterOverride, RpcParameterProposal, RpcProofResult,
     RpcProposeModelRequest, RpcProposeParameterRequest, RpcProposeSpendRequest,
-    RpcPublicTaskStatus, RpcRegisterMinerRequest, RpcRegisterMinerResult, RpcSpendProposal,
-    RpcSubmitPublicTask, RpcTaskRequest, RpcTreasuryInfo, RpcUndelegation, RpcUserOperation,
-    RpcUserOperationStatus, RpcValidator, RpcValidatorMetrics, RpcValidatorScoreBreakdown,
-    RpcVoteModelRequest, RpcVoteParameterRequest, RpcVoteSpendRequest,
+    RpcPublicTaskStatus, RpcRegisterMinerRequest, RpcRegisterMinerResult,
+    RpcRegisterWebhookRequest, RpcRemoveWebhookRequest, RpcSpendProposal, RpcSubmitPublicTask,
+    RpcTaskRequest, RpcTreasuryInfo, RpcUndelegation, RpcUserOperation, RpcUserOperationStatus,
+    RpcValidator, RpcValidatorMetrics, RpcValidatorScoreBreakdown, RpcVoteModelRequest,
+    RpcVoteParameterRequest, RpcVoteSpendRequest, RpcWebhook,
 };
 use crate::txpool::{TxPoolApiServer, TxPoolContent, TxPoolStatus};
 use crate::types::{BlockNumber, BlockTag, CallRequest, RpcBlock, RpcReceipt, RpcTransaction};
@@ -105,6 +106,8 @@ pub struct RpcServer {
     entry_point: Arc<RwLock<qfc_executor::account_abstraction::EntryPoint>>,
     /// v2.0: UserOperation mempool
     user_op_pool: Arc<RwLock<qfc_executor::account_abstraction::UserOpPool>>,
+    /// v2.0: Miner webhook notification store
+    webhook_store: crate::webhook::WebhookStore,
 }
 
 impl Clone for RpcServer {
@@ -133,6 +136,7 @@ impl Clone for RpcServer {
             verified_proof_count: self.verified_proof_count.clone(),
             entry_point: self.entry_point.clone(),
             user_op_pool: self.user_op_pool.clone(),
+            webhook_store: self.webhook_store.clone(),
         }
     }
 }
@@ -178,6 +182,7 @@ impl RpcServer {
             user_op_pool: Arc::new(RwLock::new(
                 qfc_executor::account_abstraction::UserOpPool::new(1000, 16),
             )),
+            webhook_store: crate::webhook::new_store(),
         }
     }
 
@@ -1942,6 +1947,26 @@ impl QfcApiServer for RpcServer {
             format_qfc_balance(balance),
         );
 
+        // Deliver webhook notification for accepted proof
+        crate::webhook::deliver(
+            &self.webhook_store,
+            &proof.validator,
+            crate::webhook::WebhookPayload {
+                event_type: "proof_accepted".to_string(),
+                miner: hex::encode(proof.validator.as_bytes()),
+                block_height: None,
+                task_type: Some(format!("{:?}", proof.task_type)),
+                flops: Some(proof.flops_estimated),
+                reward_wei: Some(reward_est.clone()),
+                spot_checked: Some(spot_checked),
+                timestamp: proof.timestamp,
+                message: format!(
+                    "Proof accepted: {} FLOPS, est. reward {}",
+                    proof.flops_estimated, reward_est
+                ),
+            },
+        );
+
         Ok(RpcProofResult {
             accepted: true,
             spot_checked,
@@ -2483,6 +2508,134 @@ impl QfcApiServer for RpcServer {
             balance: format!("0x{:x}", balance.0),
             records,
         })
+    }
+
+    // ---- v2.0: Miner notification endpoints ----
+
+    async fn register_webhook(&self, request: RpcRegisterWebhookRequest) -> RpcResult<String> {
+        let miner_address = Self::parse_address(&request.miner_address)?;
+
+        // Verify miner is registered
+        {
+            let miners = self.registered_miners.read();
+            let public_key = miners
+                .get(&miner_address)
+                .ok_or_else(|| RpcError::Execution("Miner not registered".to_string()))?;
+
+            // Verify signature over the URL
+            let url_hash = qfc_crypto::blake3_hash(request.url.as_bytes());
+            let sig_bytes = hex::decode(
+                request
+                    .signature
+                    .strip_prefix("0x")
+                    .unwrap_or(&request.signature),
+            )
+            .map_err(|e| RpcError::Execution(format!("Invalid signature hex: {}", e)))?;
+            let signature = qfc_types::Signature::from_slice(&sig_bytes)
+                .ok_or_else(|| RpcError::Execution("Invalid signature length".to_string()))?;
+            qfc_crypto::verify_hash_signature(public_key, &url_hash, &signature)
+                .map_err(|_| RpcError::Execution("Signature verification failed".to_string()))?;
+        }
+
+        // Validate URL
+        if !request.url.starts_with("https://") && !request.url.starts_with("http://localhost") {
+            return Err(RpcError::Execution("Webhook URL must use HTTPS".to_string()).into());
+        }
+
+        // Generate webhook ID
+        let id_input = format!("{}{}", request.miner_address, request.url);
+        let id = hex::encode(&qfc_crypto::blake3_hash(id_input.as_bytes()).as_bytes()[..8]);
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let webhook = crate::webhook::Webhook {
+            id: id.clone(),
+            url: request.url.clone(),
+            events: request.events,
+            created_at: now,
+            active: true,
+        };
+
+        // Store webhook (max 5 per miner)
+        {
+            let mut store = self.webhook_store.write();
+            let hooks = store.entry(miner_address).or_default();
+            if hooks.len() >= 5 {
+                return Err(RpcError::Execution("Maximum 5 webhooks per miner".to_string()).into());
+            }
+            // Replace if same ID exists
+            hooks.retain(|h| h.id != id);
+            hooks.push(webhook);
+        }
+
+        info!(
+            "Webhook registered for miner {}: {}",
+            request.miner_address,
+            crate::webhook::mask_url(&request.url)
+        );
+
+        Ok(id)
+    }
+
+    async fn remove_webhook(&self, request: RpcRemoveWebhookRequest) -> RpcResult<bool> {
+        let miner_address = Self::parse_address(&request.miner_address)?;
+
+        // Verify miner is registered and signature is valid
+        {
+            let miners = self.registered_miners.read();
+            let public_key = miners
+                .get(&miner_address)
+                .ok_or_else(|| RpcError::Execution("Miner not registered".to_string()))?;
+
+            let msg_hash = qfc_crypto::blake3_hash(request.webhook_id.as_bytes());
+            let sig_bytes = hex::decode(
+                request
+                    .signature
+                    .strip_prefix("0x")
+                    .unwrap_or(&request.signature),
+            )
+            .map_err(|e| RpcError::Execution(format!("Invalid signature hex: {}", e)))?;
+            let signature = qfc_types::Signature::from_slice(&sig_bytes)
+                .ok_or_else(|| RpcError::Execution("Invalid signature length".to_string()))?;
+            qfc_crypto::verify_hash_signature(public_key, &msg_hash, &signature)
+                .map_err(|_| RpcError::Execution("Signature verification failed".to_string()))?;
+        }
+
+        let mut store = self.webhook_store.write();
+        if let Some(hooks) = store.get_mut(&miner_address) {
+            let before = hooks.len();
+            hooks.retain(|h| h.id != request.webhook_id);
+            let removed = hooks.len() < before;
+            if removed {
+                info!(
+                    "Webhook {} removed for miner {}",
+                    request.webhook_id, request.miner_address
+                );
+            }
+            Ok(removed)
+        } else {
+            Ok(false)
+        }
+    }
+
+    async fn get_webhooks(&self, address: String) -> RpcResult<Vec<RpcWebhook>> {
+        let miner_address = Self::parse_address(&address)?;
+        let store = self.webhook_store.read();
+        let hooks = store.get(&miner_address).cloned().unwrap_or_default();
+
+        Ok(hooks
+            .into_iter()
+            .map(|h| RpcWebhook {
+                id: h.id,
+                url: crate::webhook::mask_url(&h.url),
+                events: h.events,
+                created_at: format!("{}", h.created_at),
+                active: h.active,
+            })
+            .collect())
     }
 
     // ---- v2.0: Cross-chain bridge endpoints ----
