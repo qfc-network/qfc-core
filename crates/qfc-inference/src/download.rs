@@ -9,6 +9,16 @@ use std::path::PathBuf;
 #[cfg(feature = "candle")]
 use crate::InferenceError;
 
+/// Model format (safetensors vs GGUF quantized)
+#[cfg(feature = "candle")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModelFormat {
+    /// Standard safetensors format (FP32/FP16)
+    Safetensors,
+    /// GGUF quantized format (Q4_K_M, Q5_K_M, etc.)
+    Gguf,
+}
+
 /// HuggingFace repo IDs for approved QFC benchmark models
 #[cfg(feature = "candle")]
 pub struct HfModelRepo {
@@ -20,6 +30,11 @@ pub struct HfModelRepo {
     pub tokenizer_file: &'static str,
     /// Config file name
     pub config_file: &'static str,
+    /// Model format
+    pub format: ModelFormat,
+    /// Tokenizer repo ID (if different from weights repo, e.g. GGUF models
+    /// use a separate repo for the GGUF file but tokenizer comes from the base repo)
+    pub tokenizer_repo_id: Option<&'static str>,
 }
 
 /// Get HuggingFace repo info for a QFC model name
@@ -31,24 +46,48 @@ pub fn get_hf_repo(model_name: &str) -> Option<HfModelRepo> {
             weights_file: "model.safetensors",
             tokenizer_file: "tokenizer.json",
             config_file: "config.json",
+            format: ModelFormat::Safetensors,
+            tokenizer_repo_id: None,
         }),
         "qfc-embed-medium" => Some(HfModelRepo {
             repo_id: "sentence-transformers/all-MiniLM-L12-v2",
             weights_file: "model.safetensors",
             tokenizer_file: "tokenizer.json",
             config_file: "config.json",
+            format: ModelFormat::Safetensors,
+            tokenizer_repo_id: None,
         }),
         "qfc-classify-small" => Some(HfModelRepo {
             repo_id: "google-bert/bert-base-uncased",
             weights_file: "model.safetensors",
             tokenizer_file: "tokenizer.json",
             config_file: "config.json",
+            format: ModelFormat::Safetensors,
+            tokenizer_repo_id: None,
         }),
         "qfc-llm-0.5b" => Some(HfModelRepo {
             repo_id: "Qwen/Qwen2.5-0.5B-Instruct",
             weights_file: "model.safetensors",
             tokenizer_file: "tokenizer.json",
             config_file: "config.json",
+            format: ModelFormat::Safetensors,
+            tokenizer_repo_id: None,
+        }),
+        "qfc-llm-3b" => Some(HfModelRepo {
+            repo_id: "Qwen/Qwen2.5-3B-Instruct-GGUF",
+            weights_file: "qwen2.5-3b-instruct-q4_k_m.gguf",
+            tokenizer_file: "tokenizer.json",
+            config_file: "config.json",
+            format: ModelFormat::Gguf,
+            tokenizer_repo_id: Some("Qwen/Qwen2.5-3B-Instruct"),
+        }),
+        "qfc-llm-7b" => Some(HfModelRepo {
+            repo_id: "Qwen/Qwen2.5-7B-Instruct-GGUF",
+            weights_file: "qwen2.5-7b-instruct-q4_k_m.gguf",
+            tokenizer_file: "tokenizer.json",
+            config_file: "config.json",
+            format: ModelFormat::Gguf,
+            tokenizer_repo_id: Some("Qwen/Qwen2.5-7B-Instruct"),
         }),
         _ => None,
     }
@@ -143,14 +182,25 @@ pub fn download_model(model_name: &str) -> Result<DownloadedModel, InferenceErro
         .join(".cache/qfc-models")
         .join(model_name);
 
+    // Download weights from the primary repo
     let weights_path = download_file(&repo, repo_info.repo_id, repo_info.weights_file, &cache_dir)?;
-    let tokenizer_path = download_file(
-        &repo,
-        repo_info.repo_id,
-        repo_info.tokenizer_file,
-        &cache_dir,
-    )?;
-    let config_path = download_file(&repo, repo_info.repo_id, repo_info.config_file, &cache_dir)?;
+
+    // For GGUF models, tokenizer and config come from the base (non-GGUF) repo
+    let (tokenizer_path, config_path) = if let Some(tok_repo_id) = repo_info.tokenizer_repo_id {
+        let tok_repo = api.model(tok_repo_id.to_string());
+        let tp = download_file(&tok_repo, tok_repo_id, repo_info.tokenizer_file, &cache_dir)?;
+        let cp = download_file(&tok_repo, tok_repo_id, repo_info.config_file, &cache_dir)?;
+        (tp, cp)
+    } else {
+        let tp = download_file(
+            &repo,
+            repo_info.repo_id,
+            repo_info.tokenizer_file,
+            &cache_dir,
+        )?;
+        let cp = download_file(&repo, repo_info.repo_id, repo_info.config_file, &cache_dir)?;
+        (tp, cp)
+    };
 
     tracing::info!("Model {} downloaded successfully", model_name);
 

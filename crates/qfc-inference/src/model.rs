@@ -241,6 +241,26 @@ impl ModelRegistry {
                 size_mb: 990,
                 approved: true,
             },
+            ModelInfo {
+                id: ModelId::new("qfc-llm-3b", "v1.0"),
+                description:
+                    "Qwen2.5-3B-Instruct-GGUF (Q4_K_M) quantized text generation for Warm tier"
+                        .to_string(),
+                min_memory_mb: 4096,
+                min_tier: GpuTier::Warm,
+                size_mb: 2200,
+                approved: true,
+            },
+            ModelInfo {
+                id: ModelId::new("qfc-llm-7b", "v1.0"),
+                description:
+                    "Qwen2.5-7B-Instruct-GGUF (Q4_K_M) quantized text generation for Hot tier"
+                        .to_string(),
+                min_memory_mb: 8192,
+                min_tier: GpuTier::Hot,
+                size_mb: 4700,
+                approved: true,
+            },
         ];
 
         Self { models }
@@ -361,9 +381,13 @@ mod tests {
         let cold_models = registry.models_for_tier(GpuTier::Cold);
         assert_eq!(cold_models.len(), 3);
 
+        // Warm tier can run Cold models + 3B
+        let warm_models = registry.models_for_tier(GpuTier::Warm);
+        assert_eq!(warm_models.len(), 5);
+
         // Hot tier can run all models
         let hot_models = registry.models_for_tier(GpuTier::Hot);
-        assert_eq!(hot_models.len(), 4);
+        assert_eq!(hot_models.len(), 6);
     }
 
     #[test]

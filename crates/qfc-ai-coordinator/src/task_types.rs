@@ -36,8 +36,10 @@ pub fn task_requirements(task_type: &ComputeTaskType) -> TaskRequirements {
                 estimated_flops: 2 * params * (*max_tokens as u64),
                 timeout_ms: if params < 1_000_000_000 {
                     60_000
-                } else {
+                } else if params <= 3_000_000_000 {
                     120_000
+                } else {
+                    180_000
                 },
             }
         }
@@ -74,7 +76,7 @@ fn model_tier_and_memory(model_name: &str) -> (GpuTier, u64) {
     } else if model_name.contains("7b") || model_name.contains("7B") {
         (GpuTier::Warm, 6_000)
     } else if model_name.contains("3b") || model_name.contains("3B") {
-        (GpuTier::Cold, 3_000)
+        (GpuTier::Warm, 4_096)
     } else if model_name.contains("0.5b") || model_name.contains("0.5B") {
         (GpuTier::Cold, 1_024)
     } else {

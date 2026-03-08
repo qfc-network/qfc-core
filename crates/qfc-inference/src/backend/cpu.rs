@@ -24,6 +24,10 @@ pub struct CpuEngine {
     /// Loaded Qwen2 models for text generation (needs &mut self for KV cache)
     #[cfg(feature = "candle")]
     qwen_models: HashMap<String, std::sync::Mutex<crate::models::qwen2::Qwen2TextGen>>,
+    /// Loaded quantized Qwen2 models (GGUF format)
+    #[cfg(feature = "candle")]
+    quantized_models:
+        HashMap<String, std::sync::Mutex<crate::models::quantized_qwen2::QuantizedQwen2TextGen>>,
     #[cfg(not(feature = "candle"))]
     _models: HashMap<String, ()>,
 }
@@ -38,6 +42,8 @@ impl CpuEngine {
             candle_models: HashMap::new(),
             #[cfg(feature = "candle")]
             qwen_models: HashMap::new(),
+            #[cfg(feature = "candle")]
+            quantized_models: HashMap::new(),
             #[cfg(not(feature = "candle"))]
             _models: HashMap::new(),
         }
@@ -67,7 +73,7 @@ impl InferenceEngine for CpuEngine {
     async fn load_model(&mut self, model_id: &ModelId) -> Result<(), InferenceError> {
         #[cfg(feature = "candle")]
         {
-            use crate::download::download_model;
+            use crate::download::{download_model, get_hf_repo, ModelFormat};
             use candle_core::Device;
 
             tracing::info!("Loading model {} on CPU backend (candle)", model_id);
@@ -75,16 +81,35 @@ impl InferenceEngine for CpuEngine {
             let downloaded = download_model(&model_id.name)?;
             let device = Device::Cpu;
 
+            // Determine model format from registry
+            let format = get_hf_repo(&model_id.name)
+                .map(|r| r.format)
+                .unwrap_or(ModelFormat::Safetensors);
+
             if is_text_gen_model(&model_id.name) {
-                // Load as Qwen2 text generation model
-                let qwen = crate::models::qwen2::Qwen2TextGen::load(
-                    &downloaded.weights_path,
-                    &downloaded.tokenizer_path,
-                    &downloaded.config_path,
-                    &device,
-                )?;
-                self.qwen_models
-                    .insert(model_id.name.clone(), std::sync::Mutex::new(qwen));
+                match format {
+                    ModelFormat::Gguf => {
+                        // Load as quantized GGUF model
+                        let qmodel = crate::models::quantized_qwen2::QuantizedQwen2TextGen::load(
+                            &downloaded.weights_path,
+                            &downloaded.tokenizer_path,
+                            &device,
+                        )?;
+                        self.quantized_models
+                            .insert(model_id.name.clone(), std::sync::Mutex::new(qmodel));
+                    }
+                    ModelFormat::Safetensors => {
+                        // Load as Qwen2 FP32 text generation model
+                        let qwen = crate::models::qwen2::Qwen2TextGen::load(
+                            &downloaded.weights_path,
+                            &downloaded.tokenizer_path,
+                            &downloaded.config_path,
+                            &device,
+                        )?;
+                        self.qwen_models
+                            .insert(model_id.name.clone(), std::sync::Mutex::new(qwen));
+                    }
+                }
             } else {
                 // Load as BERT embedding/classification model
                 let loaded: Box<dyn LoadedModel> =
@@ -124,13 +149,19 @@ impl InferenceEngine for CpuEngine {
                     max_tokens,
                     ..
                 } => {
-                    // Use Qwen2 text generation model
-                    if let Some(model_mutex) = self.qwen_models.get(model_id.name.as_str()) {
+                    let prompt = std::str::from_utf8(&task.input_data).map_err(|e| {
+                        InferenceError::ExecutionFailed(format!("Invalid UTF-8 input: {}", e))
+                    })?;
+
+                    // Try quantized (GGUF) models first, then FP32 models
+                    if let Some(model_mutex) = self.quantized_models.get(model_id.name.as_str()) {
                         let mut model = model_mutex.lock().map_err(|e| {
                             InferenceError::ExecutionFailed(format!("Model lock failed: {}", e))
                         })?;
-                        let prompt = std::str::from_utf8(&task.input_data).map_err(|e| {
-                            InferenceError::ExecutionFailed(format!("Invalid UTF-8 input: {}", e))
+                        model.generate(prompt, *max_tokens)?
+                    } else if let Some(model_mutex) = self.qwen_models.get(model_id.name.as_str()) {
+                        let mut model = model_mutex.lock().map_err(|e| {
+                            InferenceError::ExecutionFailed(format!("Model lock failed: {}", e))
                         })?;
                         model.generate(prompt, *max_tokens)?
                     } else {
@@ -247,6 +278,10 @@ fn estimate_flops(task_type: &ComputeTaskType, _elapsed_ms: u64) -> u64 {
                 500_000_000u64
             } else if model_id.name.contains("1b") || model_id.name.contains("1B") {
                 1_000_000_000u64
+            } else if model_id.name.contains("3b") || model_id.name.contains("3B") {
+                3_000_000_000u64
+            } else if model_id.name.contains("7b") || model_id.name.contains("7B") {
+                7_000_000_000u64
             } else {
                 7_000_000_000u64
             };
