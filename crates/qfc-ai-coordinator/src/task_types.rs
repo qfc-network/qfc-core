@@ -34,7 +34,11 @@ pub fn task_requirements(task_type: &ComputeTaskType) -> TaskRequirements {
                 min_memory_mb: memory,
                 model_id: Some(model_id.clone()),
                 estimated_flops: 2 * params * (*max_tokens as u64),
-                timeout_ms: if params < 1_000_000_000 { 60_000 } else { 120_000 },
+                timeout_ms: if params < 1_000_000_000 {
+                    60_000
+                } else {
+                    120_000
+                },
             }
         }
         ComputeTaskType::ImageClassification { model_id, .. } => TaskRequirements {

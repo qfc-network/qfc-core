@@ -85,15 +85,12 @@ impl Qwen2TextGen {
     ///
     /// Returns generated token bytes (UTF-8 encoded text).
     /// Temperature must be 0 for deterministic output suitable for spot-check.
-    pub fn generate(
-        &mut self,
-        prompt: &str,
-        max_tokens: u32,
-    ) -> Result<Vec<u8>, InferenceError> {
+    pub fn generate(&mut self, prompt: &str, max_tokens: u32) -> Result<Vec<u8>, InferenceError> {
         // Tokenize prompt
-        let encoding = self.tokenizer.encode(prompt, true).map_err(|e| {
-            InferenceError::ExecutionFailed(format!("Tokenization failed: {}", e))
-        })?;
+        let encoding = self
+            .tokenizer
+            .encode(prompt, true)
+            .map_err(|e| InferenceError::ExecutionFailed(format!("Tokenization failed: {}", e)))?;
 
         let prompt_tokens = encoding.get_ids().to_vec();
         let prompt_len = prompt_tokens.len();
@@ -141,12 +138,9 @@ impl Qwen2TextGen {
                 .map_err(|e| InferenceError::ExecutionFailed(e.to_string()))?;
 
             let seqlen_offset = tokens.len() - 1;
-            let logits = self
-                .model
-                .forward(&input, seqlen_offset)
-                .map_err(|e| {
-                    InferenceError::ExecutionFailed(format!("Decode step failed: {}", e))
-                })?;
+            let logits = self.model.forward(&input, seqlen_offset).map_err(|e| {
+                InferenceError::ExecutionFailed(format!("Decode step failed: {}", e))
+            })?;
 
             let next_token = logits
                 .squeeze(0)
