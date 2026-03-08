@@ -13,6 +13,7 @@ mod worker;
 
 use clap::Parser;
 use config::{MinerCli, MinerConfig};
+use qfc_inference::{BackendType, InferenceEngine};
 use qfc_types::Address;
 use tracing::info;
 
@@ -107,8 +108,8 @@ async fn main() -> anyhow::Result<()> {
         secret_key,
     };
 
-    // Create inference engine
-    let engine = qfc_inference::create_engine_for_backend(backend)?;
+    // Create inference engine (with auto-fallback to CPU on failure)
+    let (engine, backend) = create_engine_with_fallback(backend)?;
 
     // Run benchmark
     info!("Running hardware benchmark...");
@@ -185,4 +186,23 @@ async fn main() -> anyhow::Result<()> {
     worker.run().await;
 
     Ok(())
+}
+
+/// Create an inference engine, falling back to CPU if the requested backend fails.
+fn create_engine_with_fallback(
+    backend: BackendType,
+) -> anyhow::Result<(Box<dyn InferenceEngine>, BackendType)> {
+    match qfc_inference::create_engine_for_backend(backend) {
+        Ok(engine) => Ok((engine, backend)),
+        Err(e) if backend != BackendType::Cpu => {
+            tracing::warn!(
+                "{} backend unavailable: {}. Falling back to CPU.",
+                backend,
+                e
+            );
+            let engine = qfc_inference::create_engine_for_backend(BackendType::Cpu)?;
+            Ok((engine, BackendType::Cpu))
+        }
+        Err(e) => Err(e.into()),
+    }
 }

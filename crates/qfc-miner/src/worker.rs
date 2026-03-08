@@ -115,13 +115,50 @@ impl InferenceWorker {
                 }
             }
 
-            // 4. Run inference
+            // 4. Run inference (with auto-fallback to CPU on Metal/CUDA runtime errors)
             let result = match self.engine.run_inference(&task).await {
                 Ok(r) => r,
                 Err(e) => {
-                    error!("Inference failed: {}", e);
-                    tasks_failed += 1;
-                    continue;
+                    let err_msg = format!("{}", e);
+
+                    // Auto-fallback to CPU if Metal/CUDA has unsupported ops
+                    if (err_msg.contains("Metal error")
+                        || err_msg.contains("no metal implementation")
+                        || err_msg.contains("CUDA error"))
+                        && self.engine.backend_type() != qfc_inference::BackendType::Cpu
+                    {
+                        warn!(
+                            "{} backend failed: {}. Auto-switching to CPU backend.",
+                            self.engine.backend_type(),
+                            err_msg
+                        );
+                        match qfc_inference::create_engine_for_backend(
+                            qfc_inference::BackendType::Cpu,
+                        ) {
+                            Ok(cpu_engine) => {
+                                self.engine = cpu_engine;
+                                info!("Switched to CPU backend. Retrying task...");
+                                // Retry this task with CPU
+                                match self.engine.run_inference(&task).await {
+                                    Ok(r) => r,
+                                    Err(e2) => {
+                                        error!("Inference failed on CPU fallback: {}", e2);
+                                        tasks_failed += 1;
+                                        continue;
+                                    }
+                                }
+                            }
+                            Err(e2) => {
+                                error!("Failed to create CPU fallback engine: {}", e2);
+                                tasks_failed += 1;
+                                continue;
+                            }
+                        }
+                    } else {
+                        error!("Inference failed: {}", err_msg);
+                        tasks_failed += 1;
+                        continue;
+                    }
                 }
             };
 
