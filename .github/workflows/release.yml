@@ -1,0 +1,113 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            os: macos-13
+            features: candle
+            label: macos-intel
+          - target: aarch64-apple-darwin
+            os: macos-14
+            features: metal,candle
+            label: macos-arm64
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            features: candle
+            label: linux-x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev
+
+      - name: Build qfc-miner
+        run: |
+          cargo build --release --features "${{ matrix.features }}" \
+            --bin qfc-miner --target ${{ matrix.target }}
+
+      - name: Build qfc-node
+        run: |
+          cargo build --release \
+            --bin qfc-node --target ${{ matrix.target }}
+
+      - name: Package binaries
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/qfc-miner dist/
+          cp target/${{ matrix.target }}/release/qfc-node dist/
+          cd dist
+          tar czf ../qfc-${{ matrix.label }}.tar.gz qfc-miner qfc-node
+          cd ..
+
+      - name: Generate checksums
+        run: |
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            shasum -a 256 qfc-${{ matrix.label }}.tar.gz > qfc-${{ matrix.label }}.tar.gz.sha256
+          else
+            sha256sum qfc-${{ matrix.label }}.tar.gz > qfc-${{ matrix.label }}.tar.gz.sha256
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qfc-${{ matrix.label }}
+          path: |
+            qfc-${{ matrix.label }}.tar.gz
+            qfc-${{ matrix.label }}.tar.gz.sha256
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la artifacts/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/qfc-macos-intel.tar.gz
+            artifacts/qfc-macos-intel.tar.gz.sha256
+            artifacts/qfc-macos-arm64.tar.gz
+            artifacts/qfc-macos-arm64.tar.gz.sha256
+            artifacts/qfc-linux-x86_64.tar.gz
+            artifacts/qfc-linux-x86_64.tar.gz.sha256
