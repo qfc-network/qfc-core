@@ -88,7 +88,23 @@ impl InferenceWorker {
                 task_response.model_name
             );
 
-            // 2. Convert RPC response to InferenceTask
+            // 2. Epoch staleness check — skip before wasting compute
+            if let Ok(current_epoch) = submit::fetch_epoch(&self.config.validator_rpc).await {
+                let diff = if task_response.epoch >= current_epoch {
+                    task_response.epoch - current_epoch
+                } else {
+                    current_epoch - task_response.epoch
+                };
+                if diff > 1 {
+                    warn!(
+                        "Task epoch {} is stale (validator at {}), skipping",
+                        task_response.epoch, current_epoch
+                    );
+                    continue;
+                }
+            }
+
+            // 3. Convert RPC response to InferenceTask
             let task = match self.convert_task(&task_response) {
                 Ok(t) => t,
                 Err(e) => {
@@ -194,25 +210,9 @@ impl InferenceWorker {
             let signature = keypair.sign_hash(&proof_hash);
             proof.set_signature(signature);
 
-            // 6. Pre-submission epoch staleness check
+            // 6. Submit proof to validator
             let rpc_url = &self.config.validator_rpc;
             let miner_addr = hex::encode(self.config.wallet_address.as_bytes());
-
-            if let Ok(current_epoch) = submit::fetch_epoch(rpc_url).await {
-                let diff = if task_response.epoch >= current_epoch {
-                    task_response.epoch - current_epoch
-                } else {
-                    current_epoch - task_response.epoch
-                };
-                if diff > 1 {
-                    warn!(
-                        "Skipping stale proof: task epoch {} but validator at epoch {} (drift {})",
-                        task_response.epoch, current_epoch, diff
-                    );
-                    tasks_failed += 1;
-                    continue;
-                }
-            }
 
             match submit::submit_proof(rpc_url, &miner_addr, &proof).await {
                 Ok(result) => {
