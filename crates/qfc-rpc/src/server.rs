@@ -3,11 +3,12 @@
 use crate::error::RpcError;
 use crate::eth::EthApiServer;
 use crate::qfc::{
-    QfcApiServer, RpcComputeInfo, RpcEpoch, RpcFaucetResponse, RpcInferenceProofSubmission,
-    RpcInferenceStats, RpcInferenceTask, RpcMinerStatusReport, RpcModel, RpcModelProposal,
-    RpcNodeInfo, RpcProofResult, RpcProposeModelRequest, RpcPublicTaskStatus,
-    RpcRegisterMinerRequest, RpcRegisterMinerResult, RpcSubmitPublicTask, RpcTaskRequest,
-    RpcValidator, RpcValidatorMetrics, RpcValidatorScoreBreakdown, RpcVoteModelRequest,
+    QfcApiServer, RpcComputeInfo, RpcEpoch, RpcEstimateInferenceFee, RpcFaucetResponse,
+    RpcInferenceFeeEstimate, RpcInferenceProofSubmission, RpcInferenceStats, RpcInferenceTask,
+    RpcMinerStatusReport, RpcModel, RpcModelProposal, RpcNodeInfo, RpcProofResult,
+    RpcProposeModelRequest, RpcPublicTaskStatus, RpcRegisterMinerRequest, RpcRegisterMinerResult,
+    RpcSubmitPublicTask, RpcTaskRequest, RpcValidator, RpcValidatorMetrics,
+    RpcValidatorScoreBreakdown, RpcVoteModelRequest,
 };
 use crate::types::{BlockNumber, BlockTag, CallRequest, RpcBlock, RpcReceipt, RpcTransaction};
 use jsonrpsee::core::{RpcResult, SubscriptionResult};
