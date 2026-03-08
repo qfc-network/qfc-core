@@ -71,7 +71,7 @@ futures = "0.3"
 async-trait = "0.1"
 
 # CLI
-clap = { version = "4.4", features = ["derive"] }
+clap = { version = "4.4", features = ["derive", "env"] }
 
 # Logging
 tracing = "0.1"
