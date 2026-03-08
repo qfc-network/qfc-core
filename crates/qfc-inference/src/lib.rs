@@ -20,6 +20,7 @@
 //! - `rocm`: Enable AMD ROCm GPU support (implies `onnx`)
 
 pub mod backend;
+pub mod data_store;
 pub mod download;
 pub mod gpu_monitor;
 pub mod model;
@@ -35,6 +36,7 @@ pub use runtime::{
     compute_benchmark_score, validate_gpu_claim, BackendType, BenchmarkResult, GpuTier,
     HardwareInfo,
 };
+pub use data_store::{DataRef, LocalDataStore, TaskData, MAX_INLINE_SIZE};
 pub use task::{ComputeTaskType, InferenceTask, ModelId};
 
 use async_trait::async_trait;
