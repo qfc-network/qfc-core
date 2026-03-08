@@ -12,6 +12,9 @@ pub mod qwen2;
 pub mod quantized_qwen2;
 
 #[cfg(feature = "candle")]
+pub mod whisper;
+
+#[cfg(feature = "candle")]
 use crate::InferenceError;
 
 /// A loaded model ready for inference (embedding / classification)

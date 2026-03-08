@@ -28,6 +28,9 @@ pub struct CpuEngine {
     #[cfg(feature = "candle")]
     quantized_models:
         HashMap<String, std::sync::Mutex<crate::models::quantized_qwen2::QuantizedQwen2TextGen>>,
+    /// Loaded Whisper models for speech-to-text
+    #[cfg(feature = "candle")]
+    whisper_models: HashMap<String, std::sync::Mutex<crate::models::whisper::WhisperModel>>,
     #[cfg(not(feature = "candle"))]
     _models: HashMap<String, ()>,
 }
@@ -44,6 +47,8 @@ impl CpuEngine {
             qwen_models: HashMap::new(),
             #[cfg(feature = "candle")]
             quantized_models: HashMap::new(),
+            #[cfg(feature = "candle")]
+            whisper_models: HashMap::new(),
             #[cfg(not(feature = "candle"))]
             _models: HashMap::new(),
         }
@@ -86,7 +91,28 @@ impl InferenceEngine for CpuEngine {
                 .map(|r| r.format)
                 .unwrap_or(ModelFormat::Safetensors);
 
-            if is_text_gen_model(&model_id.name) {
+            if is_whisper_model(&model_id.name) {
+                // Load as Whisper speech-to-text model
+                let mel_path = downloaded
+                    .extra_paths
+                    .iter()
+                    .find(|(name, _)| name.contains("mel_filters"))
+                    .map(|(_, p)| p.clone())
+                    .ok_or_else(|| {
+                        InferenceError::ExecutionFailed(
+                            "mel_filters file not found in download".to_string(),
+                        )
+                    })?;
+                let whisper = crate::models::whisper::WhisperModel::load(
+                    &downloaded.weights_path,
+                    &downloaded.tokenizer_path,
+                    &downloaded.config_path,
+                    &mel_path,
+                    &device,
+                )?;
+                self.whisper_models
+                    .insert(model_id.name.clone(), std::sync::Mutex::new(whisper));
+            } else if is_text_gen_model(&model_id.name) {
                 match format {
                     ModelFormat::Gguf => {
                         // Load as quantized GGUF model
@@ -168,6 +194,30 @@ impl InferenceEngine for CpuEngine {
                         return Err(InferenceError::ModelNotLoaded(model_id.name.clone()));
                     }
                 }
+                ComputeTaskType::SpeechToText {
+                    model_id, language, ..
+                } => {
+                    // Use Whisper speech-to-text model
+                    if let Some(model_mutex) = self.whisper_models.get(model_id.name.as_str()) {
+                        let mut model = model_mutex.lock().map_err(|e| {
+                            InferenceError::ExecutionFailed(format!("Model lock failed: {}", e))
+                        })?;
+                        // Input data is raw PCM f32 samples (4 bytes per sample, little-endian)
+                        let pcm_samples: Vec<f32> = task
+                            .input_data
+                            .chunks_exact(4)
+                            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                            .collect();
+                        let lang = if language.is_empty() {
+                            None
+                        } else {
+                            Some(language.as_str())
+                        };
+                        model.transcribe(&pcm_samples, lang)?
+                    } else {
+                        return Err(InferenceError::ModelNotLoaded(model_id.name.clone()));
+                    }
+                }
                 _ => {
                     // Embedding / classification — use LoadedModel trait
                     if let Some(model_name) = task.task_type.model_id().map(|m| &m.name) {
@@ -234,6 +284,12 @@ fn is_text_gen_model(model_name: &str) -> bool {
     model_name.starts_with("qfc-llm-")
 }
 
+/// Check if a model name refers to a Whisper speech-to-text model
+#[cfg(feature = "candle")]
+fn is_whisper_model(model_name: &str) -> bool {
+    model_name.starts_with("qfc-whisper-")
+}
+
 /// Deterministic placeholder output (used by all backends during development)
 pub fn deterministic_placeholder(task: &InferenceTask) -> Vec<u8> {
     compute_deterministic_output(task)
@@ -289,6 +345,14 @@ fn estimate_flops(task_type: &ComputeTaskType, _elapsed_ms: u64) -> u64 {
         }
         ComputeTaskType::ImageClassification { .. } => 4_000_000_000u64,
         ComputeTaskType::Embedding { .. } => 1_000_000_000u64,
+        ComputeTaskType::SpeechToText { model_id, .. } => {
+            // Whisper base: ~74M params, large: ~1.5B params
+            if model_id.name.contains("large") {
+                30_000_000_000u64
+            } else {
+                4_000_000_000u64
+            }
+        }
         ComputeTaskType::OnnxInference { .. } => 2_000_000_000u64,
     }
 }

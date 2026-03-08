@@ -307,6 +307,11 @@ impl InferenceWorker {
                 temperature_fp: 0,
                 seed: resp.epoch,
             },
+            "speech_to_text" => ComputeTaskType::SpeechToText {
+                model_id,
+                audio_hash: input_hash,
+                language: resp.language.clone().unwrap_or_default(),
+            },
             other => return Err(format!("Unknown task type: {}", other)),
         };
 

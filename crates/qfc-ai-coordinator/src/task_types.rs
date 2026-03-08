@@ -57,6 +57,25 @@ pub fn task_requirements(task_type: &ComputeTaskType) -> TaskRequirements {
             estimated_flops: 1_000_000_000,
             timeout_ms: 10_000,
         },
+        ComputeTaskType::SpeechToText { model_id, .. } => {
+            let (tier, memory) = if model_id.name.contains("large") {
+                (GpuTier::Warm, 3_072)
+            } else {
+                (GpuTier::Cold, 512)
+            };
+            let estimated_flops = if model_id.name.contains("large") {
+                30_000_000_000
+            } else {
+                4_000_000_000
+            };
+            TaskRequirements {
+                min_tier: tier,
+                min_memory_mb: memory,
+                model_id: Some(model_id.clone()),
+                estimated_flops,
+                timeout_ms: 120_000, // 2 minutes for audio processing
+            }
+        }
         ComputeTaskType::OnnxInference { .. } => TaskRequirements {
             min_tier: GpuTier::Cold,
             min_memory_mb: 1024,
@@ -116,11 +135,16 @@ pub fn estimate_base_fee(task_type: &ComputeTaskType) -> u128 {
     let base = gflops as u128 * 1_000_000_000_000u128;
 
     // Tier multiplier
-    let fee = match reqs.min_tier {
+    let mut fee = match reqs.min_tier {
         GpuTier::Hot => base * 2,
         GpuTier::Warm => base * 3 / 2,
         GpuTier::Cold => base,
     };
+
+    // Task type multiplier (audio/image processing costs more)
+    if matches!(task_type, ComputeTaskType::SpeechToText { .. }) {
+        fee *= 2; // 2x for speech-to-text per design doc
+    }
 
     // Minimum fee: 0.0001 QFC
     fee.max(100_000_000_000_000u128)
