@@ -28,12 +28,13 @@ pub fn task_requirements(task_type: &ComputeTaskType) -> TaskRequirements {
             ..
         } => {
             let (tier, memory) = model_tier_and_memory(&model_id.name);
+            let params = estimate_model_params(&model_id.name);
             TaskRequirements {
                 min_tier: tier,
                 min_memory_mb: memory,
                 model_id: Some(model_id.clone()),
-                estimated_flops: 2 * 7_000_000_000u64 * (*max_tokens as u64),
-                timeout_ms: 30_000,
+                estimated_flops: 2 * params * (*max_tokens as u64),
+                timeout_ms: if params < 1_000_000_000 { 60_000 } else { 120_000 },
             }
         }
         ComputeTaskType::ImageClassification { model_id, .. } => TaskRequirements {
@@ -70,8 +71,29 @@ fn model_tier_and_memory(model_name: &str) -> (GpuTier, u64) {
         (GpuTier::Warm, 6_000)
     } else if model_name.contains("3b") || model_name.contains("3B") {
         (GpuTier::Cold, 3_000)
+    } else if model_name.contains("0.5b") || model_name.contains("0.5B") {
+        (GpuTier::Cold, 1_024)
     } else {
         (GpuTier::Cold, 2_000)
+    }
+}
+
+/// Estimate model parameter count from name
+fn estimate_model_params(model_name: &str) -> u64 {
+    if model_name.contains("70b") || model_name.contains("70B") {
+        70_000_000_000
+    } else if model_name.contains("13b") || model_name.contains("13B") {
+        13_000_000_000
+    } else if model_name.contains("7b") || model_name.contains("7B") {
+        7_000_000_000
+    } else if model_name.contains("3b") || model_name.contains("3B") {
+        3_000_000_000
+    } else if model_name.contains("1b") || model_name.contains("1B") {
+        1_000_000_000
+    } else if model_name.contains("0.5b") || model_name.contains("0.5B") {
+        500_000_000
+    } else {
+        7_000_000_000 // default
     }
 }
 
@@ -153,17 +175,29 @@ mod tests {
         // 1 GFLOP * 1e12 * 1x (Cold) = 1e12, but min is 1e14
         assert_eq!(fee, 100_000_000_000_000); // minimum 0.0001 QFC
 
-        let text_gen = ComputeTaskType::TextGeneration {
+        let text_gen_7b = ComputeTaskType::TextGeneration {
             model_id: ModelId::new("llama-7b", "v1"),
             prompt_hash: Hash::ZERO,
             max_tokens: 100,
             temperature_fp: 0,
             seed: 42,
         };
-        let fee = estimate_base_fee(&text_gen);
+        let fee = estimate_base_fee(&text_gen_7b);
         // 2 * 7B * 100 tokens = 1.4T FLOPS = 1400 GFLOPS
         // 1400 * 1e12 * 1.5 (Warm) = 2.1e15
         assert!(fee > 1_000_000_000_000_000); // > 0.001 QFC
+
+        let text_gen_0_5b = ComputeTaskType::TextGeneration {
+            model_id: ModelId::new("qfc-llm-0.5b", "v1.0"),
+            prompt_hash: Hash::ZERO,
+            max_tokens: 64,
+            temperature_fp: 0,
+            seed: 42,
+        };
+        let fee = estimate_base_fee(&text_gen_0_5b);
+        // 2 * 500M * 64 = 64G FLOPS = 64 GFLOPS
+        // 64 * 1e12 * 1x (Cold) = 6.4e13, but min is 1e14
+        assert_eq!(fee, 100_000_000_000_000); // minimum 0.0001 QFC
     }
 
     #[test]
