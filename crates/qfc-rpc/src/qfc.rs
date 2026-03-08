@@ -512,6 +512,8 @@ pub struct RpcInferenceFeeEstimate {
 pub struct RpcRegisterMinerRequest {
     /// Miner wallet address (hex)
     pub miner_address: String,
+    /// Ed25519 public key (hex) — used to verify signature and derive address
+    pub public_key: String,
     /// GPU model name (e.g. "NVIDIA RTX 4090")
     pub gpu_model: String,
     /// VRAM in MB

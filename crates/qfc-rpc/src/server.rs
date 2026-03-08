@@ -82,6 +82,8 @@ pub struct RpcServer {
     task_router: Option<Arc<RwLock<qfc_ai_coordinator::router::TaskRouter>>>,
     /// B2: IPFS client for large result storage (optional)
     ipfs_client: Option<Arc<qfc_ai_coordinator::ipfs::IpfsClient>>,
+    /// Registered miners (address → public key) — miners don't need to be validators
+    registered_miners: Arc<RwLock<std::collections::HashMap<Address, qfc_types::PublicKey>>>,
 }
 
 impl Clone for RpcServer {
@@ -101,6 +103,7 @@ impl Clone for RpcServer {
             redundant_verifier: self.redundant_verifier.clone(),
             task_router: self.task_router.clone(),
             ipfs_client: self.ipfs_client.clone(),
+            registered_miners: self.registered_miners.clone(),
         }
     }
 }
@@ -131,6 +134,7 @@ impl RpcServer {
             redundant_verifier: None,
             task_router: None,
             ipfs_client: None,
+            registered_miners: Arc::new(RwLock::new(std::collections::HashMap::new())),
         }
     }
 
@@ -1040,20 +1044,24 @@ impl QfcApiServer for RpcServer {
     ) -> RpcResult<RpcRegisterMinerResult> {
         let miner_address = Self::parse_address(&req.miner_address)?;
 
-        // Verify signature
-        let consensus = self.chain.consensus();
-        let validators = consensus.get_validators();
-        let validator = match validators.iter().find(|v| v.address == miner_address) {
-            Some(v) => v,
-            None => {
-                return Ok(RpcRegisterMinerResult {
-                    registered: false,
-                    assigned_tier: 0,
-                    message: "Unknown validator address".to_string(),
-                });
-            }
-        };
+        // Parse public key from request
+        let pk_hex = req.public_key.strip_prefix("0x").unwrap_or(&req.public_key);
+        let pk_bytes = hex::decode(pk_hex)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid public key hex: {}", e)))?;
+        let public_key = qfc_types::PublicKey::from_slice(&pk_bytes)
+            .ok_or_else(|| RpcError::InvalidParams("Invalid public key length".into()))?;
 
+        // Verify public key derives to claimed address
+        let derived_address = qfc_crypto::address_from_public_key(&public_key);
+        if derived_address != miner_address {
+            return Ok(RpcRegisterMinerResult {
+                registered: false,
+                assigned_tier: 0,
+                message: "Public key does not match miner address".to_string(),
+            });
+        }
+
+        // Verify signature using the submitted public key
         let sig_payload = format!(
             "{}{}{}",
             req.miner_address, req.gpu_model, req.benchmark_score
@@ -1064,13 +1072,18 @@ impl QfcApiServer for RpcServer {
         let signature = qfc_types::Signature::from_slice(&sig_bytes)
             .ok_or_else(|| RpcError::InvalidParams("Invalid signature length".into()))?;
 
-        if verify_hash_signature(&validator.public_key, &sig_hash, &signature).is_err() {
+        if verify_hash_signature(&public_key, &sig_hash, &signature).is_err() {
             return Ok(RpcRegisterMinerResult {
                 registered: false,
                 assigned_tier: 0,
                 message: "Invalid signature".to_string(),
             });
         }
+
+        // Store the miner's public key for future proof verification
+        self.registered_miners
+            .write()
+            .insert(miner_address, public_key);
 
         // Validate GPU claim
         if !qfc_inference::validate_gpu_claim(&req.gpu_model, req.benchmark_score) {
@@ -1096,7 +1109,9 @@ impl QfcApiServer for RpcServer {
             _ => None,
         };
 
-        // Update validator state
+        let consensus = self.chain.consensus();
+
+        // Update validator state if this miner is also a validator
         consensus.register_miner_profile(
             &miner_address,
             req.gpu_model.clone(),
@@ -1311,31 +1326,49 @@ impl QfcApiServer for RpcServer {
 
         let consensus = self.chain.consensus();
 
-        // 2. Find the validator
-        let validators = consensus.get_validators();
-        let validator = match validators.iter().find(|v| v.address == proof.validator) {
-            Some(v) => v,
+        // 2. Find the miner's public key (check registered miners first, then validators)
+        let miner_pubkey = {
+            let miners = self.registered_miners.read();
+            if let Some(pk) = miners.get(&proof.validator) {
+                Some(*pk)
+            } else {
+                // Fallback: check validator set for backward compatibility
+                let validators = consensus.get_validators();
+                validators
+                    .iter()
+                    .find(|v| v.address == proof.validator)
+                    .map(|v| v.public_key)
+            }
+        };
+
+        let public_key = match miner_pubkey {
+            Some(pk) => pk,
             None => {
                 return Ok(RpcProofResult {
                     accepted: false,
                     spot_checked: false,
-                    message: "Unknown validator".to_string(),
+                    message: "Unknown miner — register first via qfc_registerMiner".to_string(),
                 });
             }
         };
 
-        // 3. Check if validator is active
-        if !validator.is_active() {
-            return Ok(RpcProofResult {
-                accepted: false,
-                spot_checked: false,
-                message: "Validator is inactive or jailed".to_string(),
-            });
+        // 3. Check if miner is also a validator and if so, verify active status
+        {
+            let validators = consensus.get_validators();
+            if let Some(v) = validators.iter().find(|v| v.address == proof.validator) {
+                if !v.is_active() {
+                    return Ok(RpcProofResult {
+                        accepted: false,
+                        spot_checked: false,
+                        message: "Validator is inactive or jailed".to_string(),
+                    });
+                }
+            }
         }
 
         // 4. Verify the proof signature
         let proof_hash = blake3_hash(&proof.to_bytes_without_signature());
-        if verify_hash_signature(&validator.public_key, &proof_hash, &proof.signature).is_err() {
+        if verify_hash_signature(&public_key, &proof_hash, &proof.signature).is_err() {
             warn!("Invalid inference proof signature from {}", proof.validator);
             return Ok(RpcProofResult {
                 accepted: false,
