@@ -99,7 +99,9 @@ impl InferenceEngine for MetalEngine {
             if let Some(model) = self.candle_models.get(model_name.as_str()) {
                 model.forward(&task.input_data)?
             } else {
-                crate::backend::cpu::deterministic_placeholder(task)
+                return Err(InferenceError::ModelNotLoaded(
+                    model_name.clone(),
+                ));
             }
         } else {
             crate::backend::cpu::deterministic_placeholder(task)

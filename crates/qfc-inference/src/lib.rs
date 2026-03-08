@@ -160,13 +160,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_engine_full_workflow() {
-        let mut engine = backend::cpu::CpuEngine::new();
+        let engine = backend::cpu::CpuEngine::new();
 
-        // Load a model (placeholder name — works without candle, skips with candle)
+        // Run inference with a model that isn't loaded — should fail
         let model_id = ModelId::new("test-model", "v1");
-        let _ = engine.load_model(&model_id).await;
-
-        // Run inference (uses deterministic placeholder if model not loaded)
         let task = InferenceTask::new(
             qfc_types::Hash::new([0x42; 32]),
             1,
@@ -179,11 +176,10 @@ mod tests {
             10000,
         );
 
-        let result = engine.run_inference(&task).await.unwrap();
-        assert!(!result.output_data.is_empty());
-        assert_ne!(result.output_hash, qfc_types::Hash::ZERO);
+        let result = engine.run_inference(&task).await;
+        assert!(result.is_err(), "Should reject inference when model not loaded");
 
-        // Benchmark
+        // Benchmark should always work
         let bench = engine.benchmark().unwrap();
         assert!(bench.flops > 0.0);
     }

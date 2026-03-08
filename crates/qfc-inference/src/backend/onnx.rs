@@ -190,7 +190,9 @@ impl InferenceEngine for OnnxEngine {
                 })?;
                 run_onnx_inference(&mut session, &task.input_data)?
             } else {
-                crate::backend::cpu::deterministic_placeholder(task)
+                return Err(InferenceError::ModelNotLoaded(
+                    model_name.clone(),
+                ));
             }
         } else {
             crate::backend::cpu::deterministic_placeholder(task)
@@ -315,7 +317,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_onnx_engine_placeholder_inference() {
+    async fn test_onnx_engine_rejects_unloaded_model() {
         let engine = OnnxEngine::new_cpu();
 
         let task = InferenceTask::new(
@@ -330,10 +332,9 @@ mod tests {
             10000,
         );
 
-        // Without a loaded model, falls back to deterministic placeholder
-        let result = engine.run_inference(&task).await.unwrap();
-        assert!(!result.output_data.is_empty());
-        assert_ne!(result.output_hash, Hash::ZERO);
+        // Without a loaded model, should return ModelNotLoaded error
+        let result = engine.run_inference(&task).await;
+        assert!(result.is_err());
     }
 
     #[test]

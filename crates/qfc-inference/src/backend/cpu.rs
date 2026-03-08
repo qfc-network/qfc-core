@@ -105,8 +105,9 @@ impl InferenceEngine for CpuEngine {
                 if let Some(model) = self.candle_models.get(model_name.as_str()) {
                     model.forward(&task.input_data)?
                 } else {
-                    // Model not loaded, fall back to deterministic placeholder
-                    compute_deterministic_output(task)
+                    return Err(InferenceError::ModelNotLoaded(
+                        model_name.clone(),
+                    ));
                 }
             } else {
                 compute_deterministic_output(task)
@@ -114,7 +115,16 @@ impl InferenceEngine for CpuEngine {
         };
 
         #[cfg(not(feature = "candle"))]
-        let output = compute_deterministic_output(task);
+        let output = {
+            if let Some(model_id) = task.task_type.model_id() {
+                if !self.loaded_models.iter().any(|m| m.name == model_id.name) {
+                    return Err(InferenceError::ModelNotLoaded(
+                        model_id.name.clone(),
+                    ));
+                }
+            }
+            compute_deterministic_output(task)
+        };
 
         let elapsed = start.elapsed().as_millis() as u64;
         let flops = estimate_flops(&task.task_type, elapsed);
@@ -224,7 +234,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cpu_deterministic_output() {
+    async fn test_cpu_rejects_unloaded_model() {
         let engine = CpuEngine::new();
 
         let task = InferenceTask::new(
@@ -239,12 +249,13 @@ mod tests {
             10000,
         );
 
-        let result1 = engine.run_inference(&task).await.unwrap();
-        let result2 = engine.run_inference(&task).await.unwrap();
-
-        // Same task should produce same output hash (deterministic)
-        assert_eq!(result1.output_hash, result2.output_hash);
-        assert_eq!(result1.output_data, result2.output_data);
+        // Should fail with ModelNotLoaded when model isn't loaded
+        let result = engine.run_inference(&task).await;
+        assert!(result.is_err());
+        assert!(
+            format!("{}", result.unwrap_err()).contains("not loaded"),
+            "Expected ModelNotLoaded error"
+        );
     }
 
     #[test]
