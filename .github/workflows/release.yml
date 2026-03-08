@@ -31,6 +31,10 @@ jobs:
             os: ubuntu-latest
             features: candle
             label: linux-x86_64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            features: candle
+            label: linux-arm64
 
     steps:
       - uses: actions/checkout@v4
@@ -111,3 +115,5 @@ jobs:
             artifacts/qfc-macos-arm64.tar.gz.sha256
             artifacts/qfc-linux-x86_64.tar.gz
             artifacts/qfc-linux-x86_64.tar.gz.sha256
+            artifacts/qfc-linux-arm64.tar.gz
+            artifacts/qfc-linux-arm64.tar.gz.sha256
