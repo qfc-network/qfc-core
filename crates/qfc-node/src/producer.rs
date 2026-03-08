@@ -417,9 +417,11 @@ impl BlockProducer {
 
     /// Distribute block rewards and fees after block production
     ///
-    /// Block rewards: 60% producer, 25% voters, 15% inference miners
-    /// If no inference proofs, the 15% miner share goes back to producer+voters (70/30).
-    /// Transaction fees: 50% producer, 30% voters, 20% burned
+    /// Block rewards: 60% producer, 25% voters, 15% inference miners (dynamically adjusted)
+    /// If no inference proofs, the miner share goes back to producer+voters (70/30).
+    /// Transaction fees: 47% producer, 28% voters, 20% burned, 5% treasury
+    /// Dynamic adjustments: burn rate scales with congestion, rewards scale with stake ratio,
+    /// inference pool scales with miner participation.
     pub fn distribute_rewards(
         &self,
         block_height: u64,
@@ -428,21 +430,43 @@ impl BlockProducer {
         voters: &[(qfc_types::Address, u64)], // (voter_address, contribution_score)
         inference_proofs: &[InferenceProof],
     ) -> anyhow::Result<RewardDistribution> {
-        use qfc_types::INFERENCE_MINERS_REWARD_PERCENT;
-
         let state = self.chain.state();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64;
 
-        // Calculate block reward with halving
-        let year = self.calculate_year(block_height);
-        let block_reward = block_reward_for_year(year);
+        // Compute dynamic reward adjustments
+        let consensus = self.chain.consensus();
+        let network_state = consensus.get_network_state();
+        let validators = consensus.get_validators();
+        let total_staked: u128 = validators.iter().map(|v| v.total_stake().low_u128()).sum();
+        let circulating_supply = qfc_types::INITIAL_SUPPLY; // approximate
+        let active_miner_count = inference_proofs
+            .iter()
+            .map(|p| p.validator)
+            .collect::<std::collections::HashSet<_>>()
+            .len() as u64;
+        let total_validator_count = validators.len() as u64;
 
-        // Inference miner reward pool (15%)
-        let miner_pool =
-            block_reward * U256::from_u64(INFERENCE_MINERS_REWARD_PERCENT) / U256::from_u64(100);
+        let adjustments = crate::dynamic_rewards::compute_adjustments(
+            network_state,
+            total_staked,
+            circulating_supply,
+            active_miner_count,
+            total_validator_count,
+        );
+
+        // Calculate block reward with halving + dynamic multiplier
+        let year = self.calculate_year(block_height);
+        let base_reward = block_reward_for_year(year);
+        let block_reward = U256::from_u128(
+            (base_reward.low_u128() as f64 * adjustments.reward_multiplier) as u128,
+        );
+
+        // Inference miner reward pool (dynamically adjusted %)
+        let miner_pool = block_reward * U256::from_u64(adjustments.inference_miner_percent)
+            / U256::from_u64(100);
 
         // Distribute to inference miners proportional to FLOPS, or redistribute if none
         let miner_reward = if !inference_proofs.is_empty() {
@@ -482,8 +506,11 @@ impl BlockProducer {
         // Distribute voter rewards proportionally by contribution score
         let voter_reward = self.distribute_voter_rewards(&voters_reward_pool, voters)?;
 
-        // Fee burned (20%)
-        let fee_burned = total_fees * U256::from_u64(FEE_BURN_PERCENT) / U256::from_u64(100);
+        // Fee burned (20% base, scaled by congestion multiplier)
+        let base_burn = total_fees * U256::from_u64(FEE_BURN_PERCENT) / U256::from_u64(100);
+        let fee_burned = U256::from_u128(
+            (base_burn.low_u128() as f64 * adjustments.burn_rate_multiplier) as u128,
+        );
 
         // Treasury fee (5%)
         let treasury_fee = total_fees * U256::from_u64(FEE_TREASURY_PERCENT) / U256::from_u64(100);

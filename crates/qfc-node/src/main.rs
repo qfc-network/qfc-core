@@ -2,6 +2,7 @@
 //!
 //! Main entry point for running a QFC node.
 
+mod dynamic_rewards;
 mod metrics;
 mod miner;
 mod producer;
