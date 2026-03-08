@@ -1586,9 +1586,9 @@ impl QfcApiServer for RpcServer {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_millis() as u64;
-            let epoch_seed =
-                qfc_crypto::blake3_hash(now.to_le_bytes().as_ref()).as_bytes()[0] as u64;
-            pool.generate_synthetic_tasks(now / 10_000, epoch_seed, now + 30_000);
+            let current_epoch = self.chain.get_epoch();
+            let epoch_seed = u64::from_le_bytes(current_epoch.seed[..8].try_into().unwrap());
+            pool.generate_synthetic_tasks(current_epoch.number, epoch_seed, now + 30_000);
         }
 
         match pool.fetch_task(tier, request.available_memory_mb) {
