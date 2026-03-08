@@ -105,9 +105,7 @@ impl InferenceEngine for CpuEngine {
                 if let Some(model) = self.candle_models.get(model_name.as_str()) {
                     model.forward(&task.input_data)?
                 } else {
-                    return Err(InferenceError::ModelNotLoaded(
-                        model_name.clone(),
-                    ));
+                    return Err(InferenceError::ModelNotLoaded(model_name.clone()));
                 }
             } else {
                 compute_deterministic_output(task)
@@ -118,9 +116,7 @@ impl InferenceEngine for CpuEngine {
         let output = {
             if let Some(model_id) = task.task_type.model_id() {
                 if !self.loaded_models.iter().any(|m| m.name == model_id.name) {
-                    return Err(InferenceError::ModelNotLoaded(
-                        model_id.name.clone(),
-                    ));
+                    return Err(InferenceError::ModelNotLoaded(model_id.name.clone()));
                 }
             }
             compute_deterministic_output(task)

@@ -54,18 +54,13 @@ impl OnnxEngine {
     pub fn get_onnx_model_path(model_name: &str) -> Option<(&'static str, &'static str)> {
         // Returns (HuggingFace repo_id, ONNX filename)
         match model_name {
-            "qfc-embed-small" => Some((
-                "sentence-transformers/all-MiniLM-L6-v2",
-                "onnx/model.onnx",
-            )),
-            "qfc-embed-medium" => Some((
-                "sentence-transformers/all-MiniLM-L12-v2",
-                "onnx/model.onnx",
-            )),
-            "qfc-classify-small" => Some((
-                "google-bert/bert-base-uncased",
-                "onnx/model.onnx",
-            )),
+            "qfc-embed-small" => {
+                Some(("sentence-transformers/all-MiniLM-L6-v2", "onnx/model.onnx"))
+            }
+            "qfc-embed-medium" => {
+                Some(("sentence-transformers/all-MiniLM-L12-v2", "onnx/model.onnx"))
+            }
+            "qfc-classify-small" => Some(("google-bert/bert-base-uncased", "onnx/model.onnx")),
             _ => None,
         }
     }
@@ -119,26 +114,33 @@ impl OnnxEngine {
     }
 
     /// Create an ONNX Runtime session with the appropriate execution provider
-    fn create_session(&self, model_path: &PathBuf) -> Result<ort::session::Session, InferenceError> {
+    fn create_session(
+        &self,
+        model_path: &PathBuf,
+    ) -> Result<ort::session::Session, InferenceError> {
         let session = match self.backend {
             BackendType::Rocm => {
                 tracing::info!("Creating ONNX session with ROCm execution provider");
-                let mut builder = ort::session::Session::builder()
-                    .map_err(|e| InferenceError::ExecutionFailed(format!("ONNX builder error: {}", e)))?;
+                let mut builder = ort::session::Session::builder().map_err(|e| {
+                    InferenceError::ExecutionFailed(format!("ONNX builder error: {}", e))
+                })?;
                 builder = builder
                     .with_execution_providers([ort::ep::ROCm::default().build()])
-                    .map_err(|e| InferenceError::ExecutionFailed(format!("ROCm EP error: {}", e)))?;
-                builder
-                    .commit_from_file(model_path)
-                    .map_err(|e| InferenceError::ExecutionFailed(format!("ONNX model load error: {}", e)))?
+                    .map_err(|e| {
+                        InferenceError::ExecutionFailed(format!("ROCm EP error: {}", e))
+                    })?;
+                builder.commit_from_file(model_path).map_err(|e| {
+                    InferenceError::ExecutionFailed(format!("ONNX model load error: {}", e))
+                })?
             }
             _ => {
                 tracing::info!("Creating ONNX session with CPU execution provider");
-                let mut builder = ort::session::Session::builder()
-                    .map_err(|e| InferenceError::ExecutionFailed(format!("ONNX builder error: {}", e)))?;
-                builder
-                    .commit_from_file(model_path)
-                    .map_err(|e| InferenceError::ExecutionFailed(format!("ONNX model load error: {}", e)))?
+                let mut builder = ort::session::Session::builder().map_err(|e| {
+                    InferenceError::ExecutionFailed(format!("ONNX builder error: {}", e))
+                })?;
+                builder.commit_from_file(model_path).map_err(|e| {
+                    InferenceError::ExecutionFailed(format!("ONNX model load error: {}", e))
+                })?
             }
         };
         Ok(session)
@@ -185,14 +187,13 @@ impl InferenceEngine for OnnxEngine {
 
         let output = if let Some(model_name) = task.task_type.model_id().map(|m| &m.name) {
             if let Some(session_mutex) = self.sessions.get(model_name.as_str()) {
-                let mut session: std::sync::MutexGuard<'_, ort::session::Session> = session_mutex.lock().map_err(|e| {
-                    InferenceError::ExecutionFailed(format!("Session lock poisoned: {}", e))
-                })?;
+                let mut session: std::sync::MutexGuard<'_, ort::session::Session> =
+                    session_mutex.lock().map_err(|e| {
+                        InferenceError::ExecutionFailed(format!("Session lock poisoned: {}", e))
+                    })?;
                 run_onnx_inference(&mut session, &task.input_data)?
             } else {
-                return Err(InferenceError::ModelNotLoaded(
-                    model_name.clone(),
-                ));
+                return Err(InferenceError::ModelNotLoaded(model_name.clone()));
             }
         } else {
             crate::backend::cpu::deterministic_placeholder(task)
@@ -264,14 +265,17 @@ fn run_onnx_inference(
         tokens
     };
 
-    let map_err =
-        |e: ort::Error| InferenceError::ExecutionFailed(format!("ONNX error: {}", e));
+    let map_err = |e: ort::Error| InferenceError::ExecutionFailed(format!("ONNX error: {}", e));
 
     let shape = vec![1usize, seq_len];
 
-    let input_ids = Tensor::from_array((shape.clone(), tokens.into_boxed_slice())).map_err(map_err)?;
-    let attention_mask = Tensor::from_array((shape.clone(), vec![1i64; seq_len].into_boxed_slice())).map_err(map_err)?;
-    let token_type_ids = Tensor::from_array((shape, vec![0i64; seq_len].into_boxed_slice())).map_err(map_err)?;
+    let input_ids =
+        Tensor::from_array((shape.clone(), tokens.into_boxed_slice())).map_err(map_err)?;
+    let attention_mask =
+        Tensor::from_array((shape.clone(), vec![1i64; seq_len].into_boxed_slice()))
+            .map_err(map_err)?;
+    let token_type_ids =
+        Tensor::from_array((shape, vec![0i64; seq_len].into_boxed_slice())).map_err(map_err)?;
 
     let outputs = session
         .run(ort::inputs![input_ids, attention_mask, token_type_ids])
@@ -282,10 +286,7 @@ fn run_onnx_inference(
     let (_, output_data) = output_value.try_extract_tensor::<f32>().map_err(map_err)?;
 
     // Convert f32 values to little-endian bytes
-    let output_bytes: Vec<u8> = output_data
-        .iter()
-        .flat_map(|v| v.to_le_bytes())
-        .collect();
+    let output_bytes: Vec<u8> = output_data.iter().flat_map(|v| v.to_le_bytes()).collect();
 
     Ok(output_bytes)
 }

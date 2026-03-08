@@ -177,7 +177,10 @@ mod tests {
         );
 
         let result = engine.run_inference(&task).await;
-        assert!(result.is_err(), "Should reject inference when model not loaded");
+        assert!(
+            result.is_err(),
+            "Should reject inference when model not loaded"
+        );
 
         // Benchmark should always work
         let bench = engine.benchmark().unwrap();
