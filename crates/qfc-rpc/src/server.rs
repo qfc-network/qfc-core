@@ -85,6 +85,12 @@ pub struct RpcServer {
     ipfs_client: Option<Arc<qfc_ai_coordinator::ipfs::IpfsClient>>,
     /// Registered miners (address → public key) — miners don't need to be validators
     registered_miners: Arc<RwLock<std::collections::HashMap<Address, qfc_types::PublicKey>>>,
+    /// v2.0: Inference stats — total FLOPS accumulated from verified proofs
+    total_flops: Arc<std::sync::atomic::AtomicU64>,
+    /// v2.0: Inference stats — total inference time in ms
+    total_inference_time_ms: Arc<std::sync::atomic::AtomicU64>,
+    /// v2.0: Inference stats — total verified proof count (for averaging)
+    verified_proof_count: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Clone for RpcServer {
@@ -105,6 +111,9 @@ impl Clone for RpcServer {
             task_router: self.task_router.clone(),
             ipfs_client: self.ipfs_client.clone(),
             registered_miners: self.registered_miners.clone(),
+            total_flops: self.total_flops.clone(),
+            total_inference_time_ms: self.total_inference_time_ms.clone(),
+            verified_proof_count: self.verified_proof_count.clone(),
         }
     }
 }
@@ -136,6 +145,9 @@ impl RpcServer {
             task_router: None,
             ipfs_client: None,
             registered_miners: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            total_flops: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            total_inference_time_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            verified_proof_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -1327,7 +1339,12 @@ impl QfcApiServer for RpcServer {
                     .collect(),
                 gpu_memory_mb: v.gpu_memory_mb,
                 inference_score: format!("0x{:x}", v.inference_score),
-                gpu_tier: "unknown".to_string(), // TODO: derive from hardware
+                gpu_tier: match v.gpu_tier {
+                    1 => "T1".to_string(),
+                    2 => "T2".to_string(),
+                    3 => "T3".to_string(),
+                    _ => "unknown".to_string(),
+                },
                 provides_compute: true,
             }),
             None => Ok(RpcComputeInfo {
@@ -1380,10 +1397,23 @@ impl QfcApiServer for RpcServer {
             0.0
         };
 
+        let proof_count = self
+            .verified_proof_count
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let total_time = self
+            .total_inference_time_ms
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let avg_time = if proof_count > 0 {
+            total_time / proof_count
+        } else {
+            0
+        };
+        let flops = self.total_flops.load(std::sync::atomic::Ordering::Relaxed);
+
         Ok(RpcInferenceStats {
             tasks_completed: total_tasks.to_string(),
-            avg_time_ms: "0".to_string(), // TODO: track average
-            flops_total: "0".to_string(), // TODO: accumulate
+            avg_time_ms: avg_time.to_string(),
+            flops_total: format!("0x{:x}", flops),
             pass_rate: format!("{:.2}", avg_pass_rate * 100.0),
         })
     }
@@ -1635,8 +1665,16 @@ impl QfcApiServer for RpcServer {
             }
         }
 
-        // 8. Proof passed — update inference score
+        // 8. Proof passed — update inference score and track stats
         consensus.update_inference_score(&proof.validator, proof.flops_estimated, 1);
+        self.total_flops
+            .fetch_add(proof.flops_estimated, std::sync::atomic::Ordering::Relaxed);
+        self.total_inference_time_ms.fetch_add(
+            proof.execution_time_ms as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self.verified_proof_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // 9. Push to proof pool for block inclusion (v2.0)
         // Convert qfc_inference::InferenceProof → qfc_types::InferenceProof via borsh roundtrip
