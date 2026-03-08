@@ -2,7 +2,7 @@
 
 use crate::types::{
     BridgeDeposit, BridgeError, BridgeStatus, BridgeWithdrawal, DepositStatus, WithdrawalStatus,
-    DEFAULT_ETH_CONFIRMATIONS, DEFAULT_THRESHOLD,
+    DEFAULT_ETH_CONFIRMATIONS,
 };
 use crate::validator::BridgeValidatorSet;
 use qfc_types::{Address, Hash};
@@ -25,7 +25,7 @@ impl Default for RelayerConfig {
         Self {
             eth_confirmations: DEFAULT_ETH_CONFIRMATIONS,
             validators: vec![],
-            threshold: DEFAULT_THRESHOLD,
+            threshold: 0, // No validators configured = bridge disabled
         }
     }
 }

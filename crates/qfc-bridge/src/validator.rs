@@ -22,15 +22,23 @@ pub struct BridgeValidatorSet {
 
 impl BridgeValidatorSet {
     pub fn new(validators: Vec<Address>, threshold: usize) -> Self {
-        assert!(
-            threshold <= validators.len(),
-            "Threshold cannot exceed validator count"
-        );
-        assert!(threshold > 0, "Threshold must be at least 1");
+        // When no validators are configured (bridge disabled), allow threshold=0
+        let effective_threshold = if validators.is_empty() {
+            0
+        } else {
+            assert!(
+                threshold <= validators.len(),
+                "Threshold ({}) cannot exceed validator count ({})",
+                threshold,
+                validators.len()
+            );
+            assert!(threshold > 0, "Threshold must be at least 1");
+            threshold
+        };
 
         Self {
             validators: validators.into_iter().collect(),
-            threshold,
+            threshold: effective_threshold,
         }
     }
 
@@ -164,6 +172,21 @@ mod tests {
     fn make_validators() -> BridgeValidatorSet {
         let validators = (1..=7).map(test_address).collect();
         BridgeValidatorSet::new(validators, 5)
+    }
+
+    #[test]
+    fn test_empty_validators() {
+        // Bridge with no validators should not panic
+        let vs = BridgeValidatorSet::new(vec![], 0);
+        assert_eq!(vs.validator_count(), 0);
+        assert_eq!(vs.threshold(), 0);
+    }
+
+    #[test]
+    fn test_default_config_no_panic() {
+        // RelayerConfig::default() should not panic when creating BridgeRelayer
+        let config = crate::relayer::RelayerConfig::default();
+        let _ = crate::relayer::BridgeRelayer::new(config);
     }
 
     #[test]
