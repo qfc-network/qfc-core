@@ -87,7 +87,8 @@ async fn test_stress_concurrent_score_updates_many_validators() {
         let expected_tasks = 4u64;
         assert_eq!(
             v.tasks_completed, expected_tasks,
-            "Validator {} expected {} tasks", idx, expected_tasks
+            "Validator {} expected {} tasks",
+            idx, expected_tasks
         );
 
         // Expected FLOPS: sum of (i+1)*100 for i in {idx, idx+50, idx+100, idx+150}

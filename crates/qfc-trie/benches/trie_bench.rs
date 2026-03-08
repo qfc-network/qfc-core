@@ -21,26 +21,22 @@ fn bench_trie_insert(c: &mut Criterion) {
 
     for count in [100, 1000, 5000] {
         group.throughput(Throughput::Elements(count));
-        group.bench_with_input(
-            BenchmarkId::new("keys", count),
-            &count,
-            |b, &size| {
-                b.iter_custom(|iters| {
-                    let mut total = std::time::Duration::ZERO;
-                    for _ in 0..iters {
-                        let db = Database::open_temp().unwrap();
-                        let mut trie = Trie::new(db);
+        group.bench_with_input(BenchmarkId::new("keys", count), &count, |b, &size| {
+            b.iter_custom(|iters| {
+                let mut total = std::time::Duration::ZERO;
+                for _ in 0..iters {
+                    let db = Database::open_temp().unwrap();
+                    let mut trie = Trie::new(db);
 
-                        let start = std::time::Instant::now();
-                        for i in 0..size {
-                            trie.insert(&make_key(i), make_value(i)).unwrap();
-                        }
-                        total += start.elapsed();
+                    let start = std::time::Instant::now();
+                    for i in 0..size {
+                        trie.insert(&make_key(i), make_value(i)).unwrap();
                     }
-                    total
-                })
-            },
-        );
+                    total += start.elapsed();
+                }
+                total
+            })
+        });
     }
 
     group.finish();
@@ -108,33 +104,29 @@ fn bench_trie_delete(c: &mut Criterion) {
 
     for count in [100, 500] {
         group.throughput(Throughput::Elements(count));
-        group.bench_with_input(
-            BenchmarkId::new("keys", count),
-            &count,
-            |b, &size| {
-                b.iter_custom(|iters| {
-                    let mut total = std::time::Duration::ZERO;
-                    for _ in 0..iters {
-                        let db = Database::open_temp().unwrap();
-                        let mut trie = Trie::new(db);
+        group.bench_with_input(BenchmarkId::new("keys", count), &count, |b, &size| {
+            b.iter_custom(|iters| {
+                let mut total = std::time::Duration::ZERO;
+                for _ in 0..iters {
+                    let db = Database::open_temp().unwrap();
+                    let mut trie = Trie::new(db);
 
-                        // Insert first
-                        for i in 0..size {
-                            trie.insert(&make_key(i), make_value(i)).unwrap();
-                        }
-                        trie.commit().unwrap();
-
-                        // Then delete
-                        let start = std::time::Instant::now();
-                        for i in 0..size {
-                            trie.delete(&make_key(i)).unwrap();
-                        }
-                        total += start.elapsed();
+                    // Insert first
+                    for i in 0..size {
+                        trie.insert(&make_key(i), make_value(i)).unwrap();
                     }
-                    total
-                })
-            },
-        );
+                    trie.commit().unwrap();
+
+                    // Then delete
+                    let start = std::time::Instant::now();
+                    for i in 0..size {
+                        trie.delete(&make_key(i)).unwrap();
+                    }
+                    total += start.elapsed();
+                }
+                total
+            })
+        });
     }
 
     group.finish();

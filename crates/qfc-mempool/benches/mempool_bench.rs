@@ -7,7 +7,12 @@ use qfc_types::{Address, Transaction, U256};
 
 fn create_test_tx(keypair: &Keypair, nonce: u64, gas_price: u64) -> Transaction {
     let recipient = Address::new([0x22; 20]);
-    let mut tx = Transaction::transfer(recipient, U256::from_u64(1000), nonce, U256::from_u64(gas_price));
+    let mut tx = Transaction::transfer(
+        recipient,
+        U256::from_u64(1000),
+        nonce,
+        U256::from_u64(gas_price),
+    );
     tx.public_key = keypair.public_key();
     let tx_hash = blake3_hash(&tx.to_bytes_without_signature());
     tx.signature = keypair.sign_hash(&tx_hash);
@@ -19,30 +24,26 @@ fn bench_mempool_add(c: &mut Criterion) {
 
     for count in [100, 500, 1000] {
         group.throughput(Throughput::Elements(count));
-        group.bench_with_input(
-            BenchmarkId::new("txs", count),
-            &count,
-            |b, &size| {
-                b.iter_custom(|iters| {
-                    let mut total = std::time::Duration::ZERO;
-                    for _ in 0..iters {
-                        let pool = Mempool::default_pool();
-                        let keypair = Keypair::generate();
-                        let sender = qfc_crypto::address_from_public_key(&keypair.public_key());
-                        let txs: Vec<_> = (0..size)
-                            .map(|n| create_test_tx(&keypair, n, 2_000_000_000))
-                            .collect();
+        group.bench_with_input(BenchmarkId::new("txs", count), &count, |b, &size| {
+            b.iter_custom(|iters| {
+                let mut total = std::time::Duration::ZERO;
+                for _ in 0..iters {
+                    let pool = Mempool::default_pool();
+                    let keypair = Keypair::generate();
+                    let sender = qfc_crypto::address_from_public_key(&keypair.public_key());
+                    let txs: Vec<_> = (0..size)
+                        .map(|n| create_test_tx(&keypair, n, 2_000_000_000))
+                        .collect();
 
-                        let start = std::time::Instant::now();
-                        for tx in &txs {
-                            let _ = pool.add(tx.clone(), sender);
-                        }
-                        total += start.elapsed();
+                    let start = std::time::Instant::now();
+                    for tx in &txs {
+                        let _ = pool.add(tx.clone(), sender);
                     }
-                    total
-                })
-            },
-        );
+                    total += start.elapsed();
+                }
+                total
+            })
+        });
     }
 
     group.finish();
@@ -103,34 +104,30 @@ fn bench_mempool_remove(c: &mut Criterion) {
 
     for count in [100, 500] {
         group.throughput(Throughput::Elements(count));
-        group.bench_with_input(
-            BenchmarkId::new("txs", count),
-            &count,
-            |b, &size| {
-                b.iter_custom(|iters| {
-                    let mut total = std::time::Duration::ZERO;
-                    for _ in 0..iters {
-                        let pool = Mempool::default_pool();
-                        let keypair = Keypair::generate();
-                        let sender = qfc_crypto::address_from_public_key(&keypair.public_key());
-                        let mut hashes = Vec::new();
-                        for n in 0..size {
-                            let tx = create_test_tx(&keypair, n, 2_000_000_000);
-                            if let Ok(h) = pool.add(tx, sender) {
-                                hashes.push(h);
-                            }
+        group.bench_with_input(BenchmarkId::new("txs", count), &count, |b, &size| {
+            b.iter_custom(|iters| {
+                let mut total = std::time::Duration::ZERO;
+                for _ in 0..iters {
+                    let pool = Mempool::default_pool();
+                    let keypair = Keypair::generate();
+                    let sender = qfc_crypto::address_from_public_key(&keypair.public_key());
+                    let mut hashes = Vec::new();
+                    for n in 0..size {
+                        let tx = create_test_tx(&keypair, n, 2_000_000_000);
+                        if let Ok(h) = pool.add(tx, sender) {
+                            hashes.push(h);
                         }
-
-                        let start = std::time::Instant::now();
-                        for h in &hashes {
-                            pool.remove(h);
-                        }
-                        total += start.elapsed();
                     }
-                    total
-                })
-            },
-        );
+
+                    let start = std::time::Instant::now();
+                    for h in &hashes {
+                        pool.remove(h);
+                    }
+                    total += start.elapsed();
+                }
+                total
+            })
+        });
     }
 
     group.finish();

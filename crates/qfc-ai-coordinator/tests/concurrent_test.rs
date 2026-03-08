@@ -9,8 +9,8 @@
 use std::sync::Arc;
 
 use parking_lot::RwLock;
-use qfc_ai_coordinator::task_pool::TaskPool;
 use qfc_ai_coordinator::redundant::{RedundantConfig, RedundantVerifier};
+use qfc_ai_coordinator::task_pool::TaskPool;
 use qfc_ai_coordinator::verification::should_spot_check;
 use qfc_inference::proof::InferenceProof;
 use qfc_inference::task::{ComputeTaskType, InferenceTask, ModelId};
@@ -100,7 +100,12 @@ async fn test_concurrent_task_fetch_no_double_assignment() {
     }
 
     // All 50 tasks should be fetched exactly once
-    assert_eq!(all_task_ids.len(), 50, "Expected 50 tasks fetched, got {}", all_task_ids.len());
+    assert_eq!(
+        all_task_ids.len(),
+        50,
+        "Expected 50 tasks fetched, got {}",
+        all_task_ids.len()
+    );
 
     // No duplicates
     let mut sorted = all_task_ids.clone();
@@ -139,7 +144,10 @@ async fn test_concurrent_public_task_submit_and_complete() {
     {
         let p = pool.read();
         for (task_id, _) in &submitted {
-            assert!(p.get_public_task(task_id).is_some(), "Task not found after concurrent submit");
+            assert!(
+                p.get_public_task(task_id).is_some(),
+                "Task not found after concurrent submit"
+            );
         }
     }
 
@@ -204,7 +212,11 @@ async fn test_concurrent_redundant_submissions() {
 
     // Exactly one should return Some (the last submission triggers result)
     let completed: Vec<_> = results.iter().filter(|r| r.is_some()).collect();
-    assert_eq!(completed.len(), 1, "Exactly one submission should trigger the result");
+    assert_eq!(
+        completed.len(),
+        1,
+        "Exactly one submission should trigger the result"
+    );
 
     let result = completed[0].as_ref().unwrap();
     assert_eq!(result.consensus_hash, output);
@@ -229,7 +241,11 @@ async fn test_concurrent_redundant_with_disagreement() {
     let mut handles = Vec::new();
     for miner_id in 1..=5u8 {
         let verifier = verifier.clone();
-        let output = if miner_id <= 3 { good_output } else { bad_output };
+        let output = if miner_id <= 3 {
+            good_output
+        } else {
+            bad_output
+        };
         handles.push(tokio::spawn(async move {
             let mut v = verifier.write();
             v.record_submission(task_id, addr(miner_id), output)
@@ -281,7 +297,10 @@ async fn test_concurrent_duplicate_submissions_rejected() {
     }
 
     // Should never trigger result (only 1 unique miner, need 3)
-    assert_eq!(accepted, 0, "Duplicate submissions should not trigger a result");
+    assert_eq!(
+        accepted, 0,
+        "Duplicate submissions should not trigger a result"
+    );
 
     // Task should still be pending
     assert!(verifier.read().is_pending(&task_id));
@@ -299,9 +318,7 @@ async fn test_spot_check_determinism_concurrent() {
     let mut handles = Vec::new();
     for _ in 0..100 {
         let proof = proof.clone();
-        handles.push(tokio::spawn(async move {
-            should_spot_check(&proof)
-        }));
+        handles.push(tokio::spawn(async move { should_spot_check(&proof) }));
     }
 
     let mut results = Vec::new();
@@ -311,7 +328,10 @@ async fn test_spot_check_determinism_concurrent() {
 
     // All should be identical
     let first = results[0];
-    assert!(results.iter().all(|r| *r == first), "Spot-check should be deterministic");
+    assert!(
+        results.iter().all(|r| *r == first),
+        "Spot-check should be deterministic"
+    );
     assert!(first, "0x05 < threshold (12) should trigger spot-check");
 }
 
@@ -334,7 +354,8 @@ fn test_spot_check_distribution() {
     let rate = checked as f64 / total as f64;
     assert!(
         rate > 0.03 && rate < 0.07,
-        "Spot-check rate {:.2}% should be ~5%", rate * 100.0
+        "Spot-check rate {:.2}% should be ~5%",
+        rate * 100.0
     );
 }
 
@@ -381,7 +402,10 @@ async fn test_stress_100_concurrent_task_fetches() {
         total_fetched += h.await.unwrap();
     }
 
-    assert_eq!(total_fetched, 200, "All 200 tasks should be fetched exactly once");
+    assert_eq!(
+        total_fetched, 200,
+        "All 200 tasks should be fetched exactly once"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]

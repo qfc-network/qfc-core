@@ -15,7 +15,8 @@ fn bench_storage_put(c: &mut Criterion) {
             b.iter(|| {
                 let key = i.to_be_bytes();
                 i += 1;
-                db.put(cf::STATE, black_box(&key), black_box(&value)).unwrap()
+                db.put(cf::STATE, black_box(&key), black_box(&value))
+                    .unwrap()
             })
         });
     }

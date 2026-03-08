@@ -10,7 +10,11 @@ use qfc_inference::BackendType;
 #[command(name = "qfc-miner", about = "QFC Network AI Inference Miner")]
 pub struct MinerCli {
     /// Validator/coordinator RPC endpoint
-    #[arg(long, default_value = "http://127.0.0.1:8545", env = "QFC_MINER_RPC_URL")]
+    #[arg(
+        long,
+        default_value = "http://127.0.0.1:8545",
+        env = "QFC_MINER_RPC_URL"
+    )]
     pub validator_rpc: String,
 
     /// Miner wallet address (hex, required unless --generate-wallet)
