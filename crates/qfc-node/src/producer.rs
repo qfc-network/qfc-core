@@ -470,7 +470,7 @@ impl BlockProducer {
 
         // Distribute to inference miners proportional to FLOPS, or redistribute if none
         let miner_reward = if !inference_proofs.is_empty() {
-            self.distribute_miner_rewards(&miner_pool, inference_proofs)?
+            self.distribute_miner_rewards(&miner_pool, inference_proofs, block_height, now)?
         } else {
             U256::ZERO
         };
@@ -582,6 +582,8 @@ impl BlockProducer {
         &self,
         total_reward: &U256,
         proofs: &[InferenceProof],
+        block_height: u64,
+        timestamp: u64,
     ) -> anyhow::Result<U256> {
         if proofs.is_empty() || total_reward.is_zero() {
             return Ok(U256::ZERO);
@@ -595,21 +597,42 @@ impl BlockProducer {
 
         let mut distributed = U256::ZERO;
 
-        // Aggregate FLOPS per miner (a miner may have multiple proofs)
+        // Aggregate FLOPS and task count per miner (a miner may have multiple proofs)
         let mut miner_flops: std::collections::HashMap<qfc_types::Address, u64> =
+            std::collections::HashMap::new();
+        let mut miner_task_count: std::collections::HashMap<qfc_types::Address, u32> =
             std::collections::HashMap::new();
         for proof in proofs {
             *miner_flops.entry(proof.validator).or_default() += proof.flops_estimated;
+            *miner_task_count.entry(proof.validator).or_default() += 1;
         }
+
+        let db = self.chain.db();
 
         for (miner, flops) in &miner_flops {
             let reward = *total_reward * U256::from_u64(*flops) / U256::from_u64(total_flops);
             if !reward.is_zero() {
                 state.add_balance(miner, reward)?;
                 distributed = distributed + reward;
+
+                // Store per-miner earning record
+                let task_count = miner_task_count.get(miner).copied().unwrap_or(1);
+                let earning = qfc_types::MinerEarning::new(
+                    *miner,
+                    block_height,
+                    reward,
+                    *flops,
+                    task_count,
+                    timestamp,
+                );
+                let key = qfc_types::encode_miner_earning_key(miner, block_height);
+                if let Err(e) = db.put(qfc_storage::cf::MINER_EARNINGS, &key, &earning.to_bytes()) {
+                    tracing::warn!("Failed to store miner earning record: {}", e);
+                }
+
                 debug!(
-                    "Miner {} inference reward: {} ({} FLOPS / {} total)",
-                    miner, reward, flops, total_flops
+                    "Miner {} inference reward: {} ({} FLOPS / {} total, {} tasks)",
+                    miner, reward, flops, total_flops, task_count
                 );
             }
         }

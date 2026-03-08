@@ -4,14 +4,15 @@ use crate::error::RpcError;
 use crate::eth::EthApiServer;
 use crate::qfc::{
     QfcApiServer, RpcAccountRentInfo, RpcBridgeDeposit, RpcBridgeStatus, RpcBridgeWithdrawal,
-    RpcComputeInfo, RpcEpoch, RpcEstimateInferenceFee, RpcFaucetResponse, RpcInferenceFeeEstimate,
-    RpcInferenceProofSubmission, RpcInferenceStats, RpcInferenceTask, RpcMinerStatusReport,
-    RpcModel, RpcModelProposal, RpcNodeInfo, RpcParameterOverride, RpcParameterProposal,
-    RpcProofResult, RpcProposeModelRequest, RpcProposeParameterRequest, RpcProposeSpendRequest,
-    RpcPublicTaskStatus, RpcRegisterMinerRequest, RpcRegisterMinerResult, RpcSpendProposal,
-    RpcSubmitPublicTask, RpcTaskRequest, RpcTreasuryInfo, RpcUndelegation, RpcUserOperation,
-    RpcUserOperationStatus, RpcValidator, RpcValidatorMetrics, RpcValidatorScoreBreakdown,
-    RpcVoteModelRequest, RpcVoteParameterRequest, RpcVoteSpendRequest,
+    RpcComputeInfo, RpcEarningRecord, RpcEpoch, RpcEstimateInferenceFee, RpcFaucetResponse,
+    RpcInferenceFeeEstimate, RpcInferenceProofSubmission, RpcInferenceStats, RpcInferenceTask,
+    RpcMinerEarnings, RpcMinerStatusReport, RpcModel, RpcModelProposal, RpcNodeInfo,
+    RpcParameterOverride, RpcParameterProposal, RpcProofResult, RpcProposeModelRequest,
+    RpcProposeParameterRequest, RpcProposeSpendRequest, RpcPublicTaskStatus,
+    RpcRegisterMinerRequest, RpcRegisterMinerResult, RpcSpendProposal, RpcSubmitPublicTask,
+    RpcTaskRequest, RpcTreasuryInfo, RpcUndelegation, RpcUserOperation, RpcUserOperationStatus,
+    RpcValidator, RpcValidatorMetrics, RpcValidatorScoreBreakdown, RpcVoteModelRequest,
+    RpcVoteParameterRequest, RpcVoteSpendRequest,
 };
 use crate::txpool::{TxPoolApiServer, TxPoolContent, TxPoolStatus};
 use crate::types::{BlockNumber, BlockTag, CallRequest, RpcBlock, RpcReceipt, RpcTransaction};
@@ -2268,6 +2269,98 @@ impl QfcApiServer for RpcServer {
                 value: value.to_string(),
             })
             .collect())
+    }
+
+    // ---- v2.0: Miner Earnings ----
+
+    async fn get_miner_earnings(
+        &self,
+        address: String,
+        period: String,
+    ) -> RpcResult<RpcMinerEarnings> {
+        let addr_hex = address.strip_prefix("0x").unwrap_or(&address);
+        let addr_bytes = hex::decode(addr_hex).map_err(|e| {
+            jsonrpsee::types::ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid address: {}", e),
+                None::<()>,
+            )
+        })?;
+        let miner_address = qfc_types::Address::from_slice(&addr_bytes).ok_or_else(|| {
+            jsonrpsee::types::ErrorObjectOwned::owned(
+                -32602,
+                "Address must be 20 bytes",
+                None::<()>,
+            )
+        })?;
+
+        // Determine time cutoff based on period
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let cutoff_ms = match period.as_str() {
+            "day" => now_ms.saturating_sub(24 * 3600 * 1000),
+            "week" => now_ms.saturating_sub(7 * 24 * 3600 * 1000),
+            "month" => now_ms.saturating_sub(30 * 24 * 3600 * 1000),
+            "all" | _ => 0,
+        };
+
+        // Scan MINER_EARNINGS CF for this address
+        let db = self.chain.db();
+        let start_key = qfc_types::encode_miner_earning_key(&miner_address, 0);
+
+        let mut records = Vec::new();
+        let mut total_earnings = qfc_types::U256::ZERO;
+        let mut total_flops: u64 = 0;
+        let mut total_tasks: u64 = 0;
+
+        if let Ok(iter) = db.iter_from("miner_earnings", &start_key) {
+            for (key, value) in iter {
+                // Stop when we leave this miner's prefix
+                if key.len() != 28 || &key[0..20] != miner_address.as_bytes() {
+                    break;
+                }
+
+                if let Ok(earning) = qfc_types::MinerEarning::from_bytes(&value) {
+                    // Skip records before cutoff
+                    if earning.timestamp < cutoff_ms {
+                        continue;
+                    }
+
+                    total_earnings = total_earnings + earning.reward;
+                    total_flops += earning.flops;
+                    total_tasks += earning.task_count as u64;
+
+                    records.push(RpcEarningRecord {
+                        block_height: format!("0x{:x}", earning.block_height),
+                        reward: format!("0x{:x}", earning.reward.0),
+                        flops: format!("0x{:x}", earning.flops),
+                        task_count: earning.task_count,
+                        timestamp: format!("{}", earning.timestamp),
+                    });
+                }
+            }
+        }
+
+        // Reverse so newest records come first
+        records.reverse();
+
+        // Current balance
+        let balance = self
+            .chain
+            .state()
+            .get_balance(&miner_address)
+            .unwrap_or_default();
+
+        Ok(RpcMinerEarnings {
+            address: format!("0x{}", addr_hex),
+            total_earnings: format!("0x{:x}", total_earnings.0),
+            total_flops: format!("0x{:x}", total_flops),
+            total_tasks: format!("0x{:x}", total_tasks),
+            balance: format!("0x{:x}", balance.0),
+            records,
+        })
     }
 
     // ---- v2.0: Cross-chain bridge endpoints ----
