@@ -446,6 +446,11 @@ pub struct RpcProofResult {
     pub spot_checked: bool,
     /// Detail message
     pub message: String,
+    /// Estimated reward in wei (hex string). This is the miner's estimated
+    /// share based on base fee calculation. Actual reward is determined
+    /// at block production time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reward_estimate: Option<String>,
 }
 
 // ============ v2.0: Model Governance RPC Types ============
