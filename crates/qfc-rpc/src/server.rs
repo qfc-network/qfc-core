@@ -6,7 +6,7 @@ use crate::qfc::{
     QfcApiServer, RpcAccountRentInfo, RpcBridgeDeposit, RpcBridgeStatus, RpcBridgeWithdrawal,
     RpcComputeInfo, RpcEarningRecord, RpcEpoch, RpcEstimateInferenceFee, RpcFaucetResponse,
     RpcInferenceFeeEstimate, RpcInferenceProofSubmission, RpcInferenceStats, RpcInferenceTask,
-    RpcMinerEarnings, RpcMinerStatusReport, RpcModel, RpcModelProposal, RpcNodeInfo,
+    RpcMinerEarnings, RpcMinerEvent, RpcMinerStatusReport, RpcModel, RpcModelProposal, RpcNodeInfo,
     RpcParameterOverride, RpcParameterProposal, RpcProofResult, RpcProposeModelRequest,
     RpcProposeParameterRequest, RpcProposeSpendRequest, RpcPublicTaskStatus,
     RpcRegisterMinerRequest, RpcRegisterMinerResult, RpcSpendProposal, RpcSubmitPublicTask,
@@ -2843,6 +2843,123 @@ impl QfcApiServer for RpcServer {
             } else {
                 break; // Task pruned
             }
+        }
+        Ok(())
+    }
+
+    async fn subscribe_miner_events(
+        &self,
+        pending: jsonrpsee::PendingSubscriptionSink,
+        address: String,
+    ) -> SubscriptionResult {
+        use jsonrpsee::SubscriptionMessage;
+
+        let miner_address = match Self::parse_address(&address) {
+            Ok(addr) => addr,
+            Err(e) => {
+                pending.reject(e).await;
+                return Ok(());
+            }
+        };
+
+        let sink = pending.accept().await?;
+        let chain = self.chain.clone();
+        let miner_hex = hex::encode(miner_address.as_bytes());
+
+        // Track last seen block height
+        let mut last_block = chain.block_number();
+
+        // Poll every 1s for new blocks containing this miner's proofs
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            if sink.is_closed() {
+                break;
+            }
+
+            let current_block = chain.block_number();
+            if current_block <= last_block {
+                continue;
+            }
+
+            for height in (last_block + 1)..=current_block {
+                if sink.is_closed() {
+                    break;
+                }
+                let block = match chain.get_block_by_number(height) {
+                    Ok(Some(b)) => b,
+                    _ => continue,
+                };
+
+                // Count this miner's proofs in the block for reward estimation
+                let miner_proofs: Vec<_> = block
+                    .inference_proofs
+                    .iter()
+                    .filter(|p| p.validator == miner_address)
+                    .collect();
+
+                if miner_proofs.is_empty() {
+                    continue;
+                }
+
+                let total_flops_in_block: u64 = block
+                    .inference_proofs
+                    .iter()
+                    .map(|p| p.flops_estimated)
+                    .sum();
+                let miner_flops: u64 = miner_proofs.iter().map(|p| p.flops_estimated).sum();
+
+                for proof in &miner_proofs {
+                    let event = RpcMinerEvent {
+                        event_type: "proof_accepted".to_string(),
+                        miner: format!("0x{}", miner_hex),
+                        block_height: Some(format!("0x{:x}", height)),
+                        task_type: Some(format!("{:?}", proof.task_type)),
+                        flops: Some(proof.flops_estimated.to_string()),
+                        reward: None,
+                        spot_checked: None,
+                        timestamp: format!("{}", block.header.timestamp),
+                        message: format!(
+                            "Proof included in block {} ({} FLOPS)",
+                            height, proof.flops_estimated
+                        ),
+                    };
+                    let msg = SubscriptionMessage::from_json(&event)?;
+                    if sink.send(msg).await.is_err() {
+                        return Ok(());
+                    }
+                }
+
+                // Emit a reward_settled event summarizing this miner's block reward
+                if total_flops_in_block > 0 {
+                    // 15% of block reward goes to miner pool, proportional to FLOPS
+                    let block_reward = U256::from_u128(qfc_types::BLOCK_REWARD);
+                    let miner_pool = block_reward * U256::from_u128(15) / U256::from_u128(100);
+                    let miner_reward = miner_pool * U256::from_u128(miner_flops as u128)
+                        / U256::from_u128(total_flops_in_block as u128);
+
+                    let event = RpcMinerEvent {
+                        event_type: "reward_settled".to_string(),
+                        miner: format!("0x{}", miner_hex),
+                        block_height: Some(format!("0x{:x}", height)),
+                        task_type: None,
+                        flops: Some(miner_flops.to_string()),
+                        reward: Some(format!("0x{:x}", miner_reward.0)),
+                        spot_checked: None,
+                        timestamp: format!("{}", block.header.timestamp),
+                        message: format!(
+                            "Reward settled: {} proofs, {} FLOPS in block {}",
+                            miner_proofs.len(),
+                            miner_flops,
+                            height,
+                        ),
+                    };
+                    let msg = SubscriptionMessage::from_json(&event)?;
+                    if sink.send(msg).await.is_err() {
+                        return Ok(());
+                    }
+                }
+            }
+            last_block = current_block;
         }
         Ok(())
     }

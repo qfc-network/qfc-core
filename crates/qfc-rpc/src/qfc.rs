@@ -257,6 +257,10 @@ pub trait QfcApi {
         address: String,
         period: String,
     ) -> RpcResult<RpcMinerEarnings>;
+    /// Subscribe to miner earning events (WebSocket only).
+    /// Pushes RpcMinerEvent whenever the miner earns a reward or completes a task.
+    #[subscription(name = "subscribeMinerEvents" => "minerEvent", unsubscribe = "unsubscribeMinerEvents", item = RpcMinerEvent)]
+    async fn subscribe_miner_events(&self, address: String) -> SubscriptionResult;
 
     // ---- v2.0: Bridge endpoints ----
 
@@ -497,6 +501,32 @@ pub struct RpcEarningRecord {
     pub task_count: u32,
     /// Block timestamp (ms since epoch)
     pub timestamp: String,
+}
+
+// ============ v2.0: Miner Event Subscription Types ============
+
+/// Real-time miner event pushed via WebSocket subscription
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcMinerEvent {
+    /// Event type: "proof_accepted", "proof_rejected", "task_assigned", "reward_settled"
+    pub event_type: String,
+    /// Miner address
+    pub miner: String,
+    /// Block height (if applicable)
+    pub block_height: Option<String>,
+    /// Task type (e.g. "embedding", "text_generation")
+    pub task_type: Option<String>,
+    /// FLOPS contributed
+    pub flops: Option<String>,
+    /// Reward amount in wei (hex)
+    pub reward: Option<String>,
+    /// Whether spot-checked
+    pub spot_checked: Option<bool>,
+    /// Timestamp (ms since epoch)
+    pub timestamp: String,
+    /// Human-readable message
+    pub message: String,
 }
 
 // ============ v2.0: Model Governance RPC Types ============
