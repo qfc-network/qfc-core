@@ -18,9 +18,12 @@ pub struct CpuEngine {
     loaded_models: Vec<ModelId>,
     /// Available system memory in MB
     available_memory_mb: u64,
-    /// Loaded candle models (when candle feature enabled)
+    /// Loaded candle models for embedding/classification (when candle feature enabled)
     #[cfg(feature = "candle")]
     candle_models: HashMap<String, Box<dyn LoadedModel>>,
+    /// Loaded Qwen2 models for text generation (needs &mut self for KV cache)
+    #[cfg(feature = "candle")]
+    qwen_models: HashMap<String, std::sync::Mutex<crate::models::qwen2::Qwen2TextGen>>,
     #[cfg(not(feature = "candle"))]
     _models: HashMap<String, ()>,
 }
@@ -33,6 +36,8 @@ impl CpuEngine {
             available_memory_mb: mem,
             #[cfg(feature = "candle")]
             candle_models: HashMap::new(),
+            #[cfg(feature = "candle")]
+            qwen_models: HashMap::new(),
             #[cfg(not(feature = "candle"))]
             _models: HashMap::new(),
         }
@@ -63,7 +68,6 @@ impl InferenceEngine for CpuEngine {
         #[cfg(feature = "candle")]
         {
             use crate::download::download_model;
-            use crate::models::bert::BertEmbedding;
             use candle_core::Device;
 
             tracing::info!("Loading model {} on CPU backend (candle)", model_id);
@@ -71,14 +75,28 @@ impl InferenceEngine for CpuEngine {
             let downloaded = download_model(&model_id.name)?;
             let device = Device::Cpu;
 
-            let loaded: Box<dyn LoadedModel> = Box::new(BertEmbedding::load(
-                &downloaded.weights_path,
-                &downloaded.tokenizer_path,
-                &downloaded.config_path,
-                &device,
-            )?);
+            if is_text_gen_model(&model_id.name) {
+                // Load as Qwen2 text generation model
+                let qwen = crate::models::qwen2::Qwen2TextGen::load(
+                    &downloaded.weights_path,
+                    &downloaded.tokenizer_path,
+                    &downloaded.config_path,
+                    &device,
+                )?;
+                self.qwen_models
+                    .insert(model_id.name.clone(), std::sync::Mutex::new(qwen));
+            } else {
+                // Load as BERT embedding/classification model
+                let loaded: Box<dyn LoadedModel> =
+                    Box::new(crate::models::bert::BertEmbedding::load(
+                        &downloaded.weights_path,
+                        &downloaded.tokenizer_path,
+                        &downloaded.config_path,
+                        &device,
+                    )?);
+                self.candle_models.insert(model_id.name.clone(), loaded);
+            }
 
-            self.candle_models.insert(model_id.name.clone(), loaded);
             self.loaded_models.push(model_id.clone());
             tracing::info!("Model {} loaded successfully on CPU", model_id);
         }
@@ -100,15 +118,37 @@ impl InferenceEngine for CpuEngine {
 
         #[cfg(feature = "candle")]
         let output = {
-            // Try to use loaded candle model
-            if let Some(model_name) = task.task_type.model_id().map(|m| &m.name) {
-                if let Some(model) = self.candle_models.get(model_name.as_str()) {
-                    model.forward(&task.input_data)?
-                } else {
-                    return Err(InferenceError::ModelNotLoaded(model_name.clone()));
+            match &task.task_type {
+                ComputeTaskType::TextGeneration {
+                    model_id,
+                    max_tokens,
+                    ..
+                } => {
+                    // Use Qwen2 text generation model
+                    if let Some(model_mutex) = self.qwen_models.get(model_id.name.as_str()) {
+                        let mut model = model_mutex.lock().map_err(|e| {
+                            InferenceError::ExecutionFailed(format!("Model lock failed: {}", e))
+                        })?;
+                        let prompt = std::str::from_utf8(&task.input_data).map_err(|e| {
+                            InferenceError::ExecutionFailed(format!("Invalid UTF-8 input: {}", e))
+                        })?;
+                        model.generate(prompt, *max_tokens)?
+                    } else {
+                        return Err(InferenceError::ModelNotLoaded(model_id.name.clone()));
+                    }
                 }
-            } else {
-                compute_deterministic_output(task)
+                _ => {
+                    // Embedding / classification — use LoadedModel trait
+                    if let Some(model_name) = task.task_type.model_id().map(|m| &m.name) {
+                        if let Some(model) = self.candle_models.get(model_name.as_str()) {
+                            model.forward(&task.input_data)?
+                        } else {
+                            return Err(InferenceError::ModelNotLoaded(model_name.clone()));
+                        }
+                    } else {
+                        compute_deterministic_output(task)
+                    }
+                }
             }
         };
 
@@ -157,6 +197,12 @@ impl InferenceEngine for CpuEngine {
     }
 }
 
+/// Check if a model name refers to a text generation (LLM) model
+#[cfg(feature = "candle")]
+fn is_text_gen_model(model_name: &str) -> bool {
+    model_name.starts_with("qfc-llm-")
+}
+
 /// Deterministic placeholder output (used by all backends during development)
 pub fn deterministic_placeholder(task: &InferenceTask) -> Vec<u8> {
     compute_deterministic_output(task)
@@ -191,8 +237,20 @@ fn compute_deterministic_output(task: &InferenceTask) -> Vec<u8> {
 /// Estimate FLOPS for a task based on type and execution time
 fn estimate_flops(task_type: &ComputeTaskType, _elapsed_ms: u64) -> u64 {
     match task_type {
-        ComputeTaskType::TextGeneration { max_tokens, .. } => {
-            2 * 7_000_000_000u64 * (*max_tokens as u64)
+        ComputeTaskType::TextGeneration {
+            model_id,
+            max_tokens,
+            ..
+        } => {
+            // Approximate FLOPS: 2 * params * tokens
+            let params = if model_id.name.contains("0.5b") || model_id.name.contains("0.5B") {
+                500_000_000u64
+            } else if model_id.name.contains("1b") || model_id.name.contains("1B") {
+                1_000_000_000u64
+            } else {
+                7_000_000_000u64
+            };
+            2 * params * (*max_tokens as u64)
         }
         ComputeTaskType::ImageClassification { .. } => 4_000_000_000u64,
         ComputeTaskType::Embedding { .. } => 1_000_000_000u64,

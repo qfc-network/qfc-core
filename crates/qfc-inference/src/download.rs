@@ -44,6 +44,12 @@ pub fn get_hf_repo(model_name: &str) -> Option<HfModelRepo> {
             tokenizer_file: "tokenizer.json",
             config_file: "config.json",
         }),
+        "qfc-llm-0.5b" => Some(HfModelRepo {
+            repo_id: "Qwen/Qwen2.5-0.5B-Instruct",
+            weights_file: "model.safetensors",
+            tokenizer_file: "tokenizer.json",
+            config_file: "config.json",
+        }),
         _ => None,
     }
 }

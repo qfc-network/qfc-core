@@ -231,6 +231,16 @@ impl ModelRegistry {
                 size_mb: 440,
                 approved: true,
             },
+            ModelInfo {
+                id: ModelId::new("qfc-llm-0.5b", "v1.0"),
+                description:
+                    "Qwen2.5-0.5B-Instruct text generation model for Cold tier (CPU-friendly)"
+                        .to_string(),
+                min_memory_mb: 1024,
+                min_tier: GpuTier::Cold,
+                size_mb: 990,
+                approved: true,
+            },
         ];
 
         Self { models }
@@ -347,13 +357,13 @@ mod tests {
         let unknown = ModelId::new("unknown-model", "v1.0");
         assert!(!registry.is_approved(&unknown));
 
-        // Cold tier can run small and medium embedding models
+        // Cold tier can run small/medium embedding + Qwen 0.5B
         let cold_models = registry.models_for_tier(GpuTier::Cold);
-        assert_eq!(cold_models.len(), 2);
+        assert_eq!(cold_models.len(), 3);
 
         // Hot tier can run all models
         let hot_models = registry.models_for_tier(GpuTier::Hot);
-        assert_eq!(hot_models.len(), 3);
+        assert_eq!(hot_models.len(), 4);
     }
 
     #[test]
