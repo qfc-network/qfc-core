@@ -28,6 +28,7 @@ clap.workspace = true
 blake3.workspace = true
 hex.workspace = true
 anyhow.workspace = true
+reqwest.workspace = true
 ratatui = { workspace = true, optional = true }
 crossterm = { workspace = true, optional = true }
 

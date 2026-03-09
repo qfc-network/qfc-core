@@ -5,6 +5,14 @@ use qfc_inference::runtime::{BackendType, GpuTier};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
+/// Shared HTTP client (reuse connections)
+static HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .expect("Failed to create HTTP client")
+});
+
 /// Task request sent to validator
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -83,6 +91,63 @@ struct JsonRpcError {
     message: String,
 }
 
+/// Send a JSON-RPC request and parse the response
+async fn rpc_call<P: Serialize, R: for<'de> Deserialize<'de>>(
+    rpc_url: &str,
+    method: &'static str,
+    params: Vec<P>,
+) -> Result<Option<R>, SubmitError> {
+    let rpc_request = JsonRpcRequest {
+        jsonrpc: "2.0",
+        method,
+        params,
+        id: 1,
+    };
+
+    let response = HTTP_CLIENT
+        .post(rpc_url)
+        .json(&rpc_request)
+        .send()
+        .await
+        .map_err(|e| SubmitError::ConnectionFailed(format!("{}", e)))?;
+
+    let status = response.status();
+    let response_str = response
+        .text()
+        .await
+        .map_err(|e| SubmitError::ConnectionFailed(format!("Failed to read response: {}", e)))?;
+
+    if !status.is_success() {
+        return Err(SubmitError::ConnectionFailed(format!(
+            "HTTP {}: {}",
+            status,
+            &response_str[..response_str.len().min(200)]
+        )));
+    }
+
+    if response_str.is_empty() {
+        return Err(SubmitError::SerializationError(
+            "Empty response from validator".to_string(),
+        ));
+    }
+
+    debug!("RPC {} response: {}", method, &response_str[..response_str.len().min(200)]);
+
+    let rpc_response: JsonRpcResponse<R> = serde_json::from_str(&response_str).map_err(|e| {
+        SubmitError::SerializationError(format!(
+            "Parse response: {} (body: {})",
+            e,
+            &response_str[..response_str.len().min(200)]
+        ))
+    })?;
+
+    if let Some(err) = rpc_response.error {
+        return Err(SubmitError::ProofRejected(err.message));
+    }
+
+    Ok(rpc_response.result)
+}
+
 /// Fetch an inference task from the validator node
 pub async fn fetch_task(
     rpc_url: &str,
@@ -102,51 +167,12 @@ pub async fn fetch_task(
         backend: format!("{}", backend),
     };
 
-    let rpc_request = JsonRpcRequest {
-        jsonrpc: "2.0",
-        method: "qfc_getInferenceTask",
-        params: vec![request],
-        id: 1,
-    };
-
-    let body = serde_json::to_string(&rpc_request)
-        .map_err(|e| SubmitError::SerializationError(e.to_string()))?;
-
     debug!("Fetching task from {}", rpc_url);
 
-    let output = tokio::process::Command::new("curl")
-        .args([
-            "-s",
-            "-X",
-            "POST",
-            "-H",
-            "Content-Type: application/json",
-            "-d",
-            &body,
-            rpc_url,
-        ])
-        .output()
-        .await
-        .map_err(|e| SubmitError::ConnectionFailed(e.to_string()))?;
+    let result: Option<Option<InferenceTaskResponse>> =
+        rpc_call(rpc_url, "qfc_getInferenceTask", vec![request]).await?;
 
-    if !output.status.success() {
-        return Err(SubmitError::ConnectionFailed(
-            "curl request failed".to_string(),
-        ));
-    }
-
-    let response_str = String::from_utf8(output.stdout)
-        .map_err(|e| SubmitError::SerializationError(e.to_string()))?;
-
-    let response: JsonRpcResponse<Option<InferenceTaskResponse>> =
-        serde_json::from_str(&response_str)
-            .map_err(|e| SubmitError::SerializationError(format!("Parse response: {}", e)))?;
-
-    if let Some(err) = response.error {
-        return Err(SubmitError::ProofRejected(err.message));
-    }
-
-    Ok(response.result.flatten())
+    Ok(result.flatten())
 }
 
 /// Submit an inference proof to the validator node
@@ -169,51 +195,10 @@ pub async fn submit_proof(
         proof_bytes,
     };
 
-    let rpc_request = JsonRpcRequest {
-        jsonrpc: "2.0",
-        method: "qfc_submitInferenceProof",
-        params: vec![submission],
-        id: 1,
-    };
-
-    let body = serde_json::to_string(&rpc_request)
-        .map_err(|e| SubmitError::SerializationError(e.to_string()))?;
-
     info!("Submitting proof for epoch {} to {}", proof.epoch, rpc_url);
 
-    let output = tokio::process::Command::new("curl")
-        .args([
-            "-s",
-            "-X",
-            "POST",
-            "-H",
-            "Content-Type: application/json",
-            "-d",
-            &body,
-            rpc_url,
-        ])
-        .output()
-        .await
-        .map_err(|e| SubmitError::ConnectionFailed(e.to_string()))?;
-
-    if !output.status.success() {
-        return Err(SubmitError::ConnectionFailed(
-            "curl request failed".to_string(),
-        ));
-    }
-
-    let response_str = String::from_utf8(output.stdout)
-        .map_err(|e| SubmitError::SerializationError(e.to_string()))?;
-
-    let response: JsonRpcResponse<ProofResult> = serde_json::from_str(&response_str)
-        .map_err(|e| SubmitError::SerializationError(format!("Parse response: {}", e)))?;
-
-    if let Some(err) = response.error {
-        return Err(SubmitError::ProofRejected(err.message));
-    }
-
-    response
-        .result
+    rpc_call::<_, ProofResult>(rpc_url, "qfc_submitInferenceProof", vec![submission])
+        .await?
         .ok_or_else(|| SubmitError::SerializationError("No result in response".to_string()))
 }
 
@@ -263,51 +248,10 @@ pub async fn register_miner(
         signature: hex::encode(signature.as_bytes()),
     };
 
-    let rpc_request = JsonRpcRequest {
-        jsonrpc: "2.0",
-        method: "qfc_registerMiner",
-        params: vec![req],
-        id: 1,
-    };
-
-    let body = serde_json::to_string(&rpc_request)
-        .map_err(|e| SubmitError::SerializationError(e.to_string()))?;
-
     info!("Registering miner at {}", rpc_url);
 
-    let output = tokio::process::Command::new("curl")
-        .args([
-            "-s",
-            "-X",
-            "POST",
-            "-H",
-            "Content-Type: application/json",
-            "-d",
-            &body,
-            rpc_url,
-        ])
-        .output()
-        .await
-        .map_err(|e| SubmitError::ConnectionFailed(e.to_string()))?;
-
-    if !output.status.success() {
-        return Err(SubmitError::ConnectionFailed(
-            "curl request failed".to_string(),
-        ));
-    }
-
-    let response_str = String::from_utf8(output.stdout)
-        .map_err(|e| SubmitError::SerializationError(e.to_string()))?;
-
-    let response: JsonRpcResponse<RegisterMinerResult> = serde_json::from_str(&response_str)
-        .map_err(|e| SubmitError::SerializationError(format!("Parse response: {}", e)))?;
-
-    if let Some(err) = response.error {
-        return Err(SubmitError::ProofRejected(err.message));
-    }
-
-    response
-        .result
+    rpc_call::<_, RegisterMinerResult>(rpc_url, "qfc_registerMiner", vec![req])
+        .await?
         .ok_or_else(|| SubmitError::SerializationError("No result in response".to_string()))
 }
 
@@ -355,49 +299,8 @@ pub async fn report_miner_status(
         signature: hex::encode(signature.as_bytes()),
     };
 
-    let rpc_request = JsonRpcRequest {
-        jsonrpc: "2.0",
-        method: "qfc_reportMinerStatus",
-        params: vec![req],
-        id: 1,
-    };
-
-    let body = serde_json::to_string(&rpc_request)
-        .map_err(|e| SubmitError::SerializationError(e.to_string()))?;
-
-    let output = tokio::process::Command::new("curl")
-        .args([
-            "-s",
-            "-X",
-            "POST",
-            "-H",
-            "Content-Type: application/json",
-            "-d",
-            &body,
-            rpc_url,
-        ])
-        .output()
-        .await
-        .map_err(|e| SubmitError::ConnectionFailed(e.to_string()))?;
-
-    if !output.status.success() {
-        return Err(SubmitError::ConnectionFailed(
-            "curl request failed".to_string(),
-        ));
-    }
-
-    let response_str = String::from_utf8(output.stdout)
-        .map_err(|e| SubmitError::SerializationError(e.to_string()))?;
-
-    let response: JsonRpcResponse<bool> = serde_json::from_str(&response_str)
-        .map_err(|e| SubmitError::SerializationError(format!("Parse response: {}", e)))?;
-
-    if let Some(err) = response.error {
-        return Err(SubmitError::ProofRejected(err.message));
-    }
-
-    response
-        .result
+    rpc_call::<_, bool>(rpc_url, "qfc_reportMinerStatus", vec![req])
+        .await?
         .ok_or_else(|| SubmitError::SerializationError("No result in response".to_string()))
 }
 
@@ -412,56 +315,15 @@ pub struct EpochResponse {
 /// Fetch current epoch number from the validator
 #[allow(dead_code)]
 pub async fn fetch_epoch(rpc_url: &str) -> Result<u64, SubmitError> {
-    let rpc_request = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "qfc_getEpoch",
-        "params": [],
-        "id": 1
-    });
+    let result: EpochResponse =
+        rpc_call::<serde_json::Value, EpochResponse>(rpc_url, "qfc_getEpoch", vec![])
+            .await?
+            .ok_or_else(|| SubmitError::SerializationError("No result in response".to_string()))?;
 
-    let body = serde_json::to_string(&rpc_request)
-        .map_err(|e| SubmitError::SerializationError(e.to_string()))?;
-
-    let output = tokio::process::Command::new("curl")
-        .args([
-            "-s",
-            "-X",
-            "POST",
-            "-H",
-            "Content-Type: application/json",
-            "-d",
-            &body,
-            rpc_url,
-        ])
-        .output()
-        .await
-        .map_err(|e| SubmitError::ConnectionFailed(e.to_string()))?;
-
-    if !output.status.success() {
-        return Err(SubmitError::ConnectionFailed(
-            "curl request failed".to_string(),
-        ));
-    }
-
-    let response_str = String::from_utf8(output.stdout)
-        .map_err(|e| SubmitError::SerializationError(e.to_string()))?;
-
-    let response: JsonRpcResponse<EpochResponse> = serde_json::from_str(&response_str)
-        .map_err(|e| SubmitError::SerializationError(format!("Parse response: {}", e)))?;
-
-    if let Some(err) = response.error {
-        return Err(SubmitError::ProofRejected(err.message));
-    }
-
-    let epoch_resp = response
-        .result
-        .ok_or_else(|| SubmitError::SerializationError("No result in response".to_string()))?;
-
-    // Parse hex epoch number (strip 0x prefix)
-    let hex_str = epoch_resp
+    let hex_str = result
         .number
         .strip_prefix("0x")
-        .unwrap_or(&epoch_resp.number);
+        .unwrap_or(&result.number);
     u64::from_str_radix(hex_str, 16)
         .map_err(|e| SubmitError::SerializationError(format!("Invalid epoch hex: {}", e)))
 }
