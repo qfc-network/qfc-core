@@ -329,6 +329,20 @@ pub trait QfcApi {
     /// Get the EntryPoint supported by this node
     #[method(name = "supportedEntryPoints")]
     async fn supported_entry_points(&self) -> RpcResult<Vec<String>>;
+
+    // ---- v2.0: Agent Registry endpoints ----
+
+    /// Get agent info from the AgentRegistry contract
+    #[method(name = "getAgentInfo")]
+    async fn get_agent_info(&self, agent_id: String) -> RpcResult<RpcAgentInfo>;
+
+    /// List agents owned by a given address
+    #[method(name = "listAgentsByOwner")]
+    async fn list_agents_by_owner(&self, owner_address: String) -> RpcResult<Vec<RpcAgentInfo>>;
+
+    /// Validate a session key against the AgentRegistry contract
+    #[method(name = "validateSessionKey")]
+    async fn validate_session_key(&self, key_address: String) -> RpcResult<RpcSessionKeyInfo>;
 }
 
 /// Faucet response
@@ -1123,4 +1137,32 @@ pub struct RpcUserOperationStatus {
     pub nonce: u64,
     pub status: String,
     pub paymaster: Option<String>,
+}
+
+// ============ v2.0: Agent Registry RPC Types ============
+
+/// Agent information from the AgentRegistry contract
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcAgentInfo {
+    pub agent_id: String,
+    pub owner: String,
+    pub agent_address: String,
+    pub permissions: Vec<u8>,
+    pub daily_limit: String,
+    pub max_per_tx: String,
+    pub deposit: String,
+    pub spent_today: String,
+    pub last_reset: String,
+    pub nonce: String,
+    pub active: bool,
+}
+
+/// Session key validation result
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcSessionKeyInfo {
+    pub valid: bool,
+    pub agent_id: String,
+    pub expires_at: String,
 }
