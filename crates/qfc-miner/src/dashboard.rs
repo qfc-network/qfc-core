@@ -217,7 +217,7 @@ pub mod tui {
         let mut last_tick = Instant::now();
         let mut log_scroll: usize = 0;
         let mut log_follow = true; // auto-scroll to newest
-        let mut log_height: u16 = 8; // default log panel height
+        let mut log_pct: u16 = 60; // log panel percentage of body area
         let mut log_visible = true;
         let mut task_log_scroll: usize = 0;
         // Track panel areas for mouse-aware scrolling
@@ -227,12 +227,12 @@ pub mod tui {
         loop {
             let total_logs = stats.lock().unwrap().log_lines.len();
             let total_tasks = stats.lock().unwrap().task_log.len();
-            let effective_log_height = if log_visible { log_height } else { 0 };
+            let effective_log_pct = if log_visible { log_pct } else { 0 };
 
             terminal.draw(|f| {
                 let s = stats.lock().unwrap();
                 let areas =
-                    draw_ui(f, &s, log_scroll, task_log_scroll, effective_log_height);
+                    draw_ui(f, &s, log_scroll, task_log_scroll, effective_log_pct);
                 task_log_area = areas.0;
                 log_panel_area = areas.1;
             })?;
@@ -246,15 +246,15 @@ pub mod tui {
                         KeyCode::Char('l') | KeyCode::Char('L') => {
                             log_visible = !log_visible;
                         }
-                        // Resize log panel
+                        // Resize log panel (±5% each step, 20%–80%)
                         KeyCode::Char('+') | KeyCode::Char('=') => {
                             if log_visible {
-                                log_height = log_height.saturating_add(3).min(30);
+                                log_pct = log_pct.saturating_add(5).min(80);
                             }
                         }
                         KeyCode::Char('-') | KeyCode::Char('_') => {
                             if log_visible {
-                                log_height = log_height.saturating_sub(3).max(5);
+                                log_pct = log_pct.saturating_sub(5).max(20);
                             }
                         }
                         // Log scroll (keyboard)
@@ -357,12 +357,13 @@ pub mod tui {
     }
 
     /// Draw the full UI. Returns (task_log_area, log_panel_area) for mouse hit-testing.
+    /// `log_pct` is the percentage of body area for the log panel (0 = collapsed).
     fn draw_ui(
         f: &mut Frame,
         stats: &MinerStats,
         log_scroll: usize,
         task_log_scroll: usize,
-        log_height: u16,
+        log_pct: u16,
     ) -> (Rect, Rect) {
         let size = f.area();
 
@@ -377,8 +378,8 @@ pub mod tui {
             .split(size);
 
         draw_header(f, main_chunks[0], stats);
-        let areas = draw_body(f, main_chunks[1], stats, log_scroll, task_log_scroll, log_height);
-        draw_footer(f, main_chunks[2], stats, log_height > 0);
+        let areas = draw_body(f, main_chunks[1], stats, log_scroll, task_log_scroll, log_pct);
+        draw_footer(f, main_chunks[2], stats, log_pct > 0);
         areas
     }
 
@@ -422,17 +423,21 @@ pub mod tui {
     }
 
     /// Draw the body. Returns (task_log_area, log_panel_area).
+    /// `log_pct` is the percentage of body area for the log panel (0 = collapsed).
     fn draw_body(
         f: &mut Frame,
         area: Rect,
         stats: &MinerStats,
         log_scroll: usize,
         task_log_scroll: usize,
-        log_height: u16,
+        log_pct: u16,
     ) -> (Rect, Rect) {
         // Body: upper (stats + task log) | lower (logs, if visible)
-        let constraints = if log_height > 0 {
-            vec![Constraint::Min(10), Constraint::Length(log_height)]
+        let constraints = if log_pct > 0 {
+            vec![
+                Constraint::Percentage(100 - log_pct),
+                Constraint::Percentage(log_pct),
+            ]
         } else {
             vec![Constraint::Min(10)]
         };
@@ -466,7 +471,7 @@ pub mod tui {
         draw_task_log(f, task_log_rect, stats, task_log_scroll);
 
         // Lower: log panel (if visible)
-        let log_panel_rect = if log_height > 0 && vert_chunks.len() > 1 {
+        let log_panel_rect = if log_pct > 0 && vert_chunks.len() > 1 {
             let r = vert_chunks[1];
             draw_log_panel(f, r, stats, log_scroll);
             r
