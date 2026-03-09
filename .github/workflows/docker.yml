@@ -96,6 +96,8 @@ jobs:
           tags: |
             type=ref,event=branch
             type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
             type=sha
             type=sha,prefix=${{ github.ref_name }}-sha-,enable=${{ github.ref_type == 'branch' }}
 
