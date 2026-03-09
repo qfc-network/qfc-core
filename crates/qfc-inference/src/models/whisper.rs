@@ -10,7 +10,7 @@
 use std::path::Path;
 
 #[cfg(feature = "candle")]
-use candle_core::{Device, Tensor};
+use candle_core::{Device, IndexOp, Tensor};
 #[cfg(feature = "candle")]
 use candle_nn::VarBuilder;
 #[cfg(feature = "candle")]
