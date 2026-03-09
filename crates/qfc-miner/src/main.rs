@@ -9,8 +9,8 @@
 mod config;
 pub mod dashboard;
 mod gpu;
-mod submit;
 mod storage;
+mod submit;
 mod worker;
 
 use clap::Parser;
@@ -231,7 +231,12 @@ async fn main() -> anyhow::Result<()> {
     let earnings_store = Arc::new(Mutex::new(earnings_store));
 
     let mut worker = worker::InferenceWorker::new(
-        config, engine, scheduler, stats.clone(), earnings_store, store_path,
+        config,
+        engine,
+        scheduler,
+        stats.clone(),
+        earnings_store,
+        store_path,
     );
 
     info!("Connecting to validator at {}...", validator_rpc);
