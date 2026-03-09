@@ -68,6 +68,12 @@ struct MinerProfile {
     vram_mb: u64,
     backend: String,
     registered_at: u64, // unix timestamp
+    os: String,
+    arch: String,
+    cpu_model: String,
+    cpu_cores: u32,
+    total_memory_mb: u64,
+    version: String,
 }
 
 /// RPC server
@@ -1419,6 +1425,12 @@ impl QfcApiServer for RpcServer {
                 vram_mb: req.vram_mb,
                 backend: req.backend.clone(),
                 registered_at: now,
+                os: req.os.clone(),
+                arch: req.arch.clone(),
+                cpu_model: req.cpu_model.clone(),
+                cpu_cores: req.cpu_cores,
+                total_memory_mb: req.total_memory_mb,
+                version: req.version.clone(),
             },
         );
 
@@ -1458,6 +1470,12 @@ impl QfcApiServer for RpcServer {
                 vram_mb: profile.vram_mb,
                 backend: profile.backend.clone(),
                 registered_at: profile.registered_at.to_string(),
+                os: profile.os.clone(),
+                arch: profile.arch.clone(),
+                cpu_model: profile.cpu_model.clone(),
+                cpu_cores: profile.cpu_cores,
+                total_memory_mb: profile.total_memory_mb,
+                version: profile.version.clone(),
             })
             .collect();
         // Sort by tier desc, then benchmark_score desc

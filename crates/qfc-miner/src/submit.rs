@@ -217,6 +217,12 @@ struct RegisterMinerReq {
     benchmark_score: u32,
     backend: String,
     signature: String,
+    os: String,
+    arch: String,
+    cpu_model: String,
+    cpu_cores: u32,
+    total_memory_mb: u64,
+    version: String,
 }
 
 /// Register miner result
@@ -250,6 +256,14 @@ pub async fn register_miner(
         benchmark_score,
         backend: format!("{}", backend),
         signature: hex::encode(signature.as_bytes()),
+        os: std::env::consts::OS.to_string(),
+        arch: std::env::consts::ARCH.to_string(),
+        cpu_model: get_cpu_model(),
+        cpu_cores: std::thread::available_parallelism()
+            .map(|n| n.get() as u32)
+            .unwrap_or(1),
+        total_memory_mb: get_total_memory_mb(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
     };
 
     info!("Registering miner at {}", rpc_url);
@@ -327,6 +341,69 @@ pub async fn fetch_epoch(rpc_url: &str) -> Result<u64, SubmitError> {
     let hex_str = result.number.strip_prefix("0x").unwrap_or(&result.number);
     u64::from_str_radix(hex_str, 16)
         .map_err(|e| SubmitError::SerializationError(format!("Invalid epoch hex: {}", e)))
+}
+
+/// Get CPU model name from the system
+fn get_cpu_model() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("sysctl")
+            .args(["-n", "machdep.cpu.brand_string"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string("/proc/cpuinfo")
+            .ok()
+            .and_then(|s| {
+                s.lines()
+                    .find(|l| l.starts_with("model name"))
+                    .and_then(|l| l.split(':').nth(1))
+                    .map(|s| s.trim().to_string())
+            })
+            .unwrap_or_default()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        String::new()
+    }
+}
+
+/// Get total system memory in MB
+fn get_total_memory_mb() -> u64 {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("sysctl")
+            .args(["-n", "hw.memsize"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .map(|bytes| bytes / (1024 * 1024))
+            .unwrap_or(0)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string("/proc/meminfo")
+            .ok()
+            .and_then(|s| {
+                s.lines().find(|l| l.starts_with("MemTotal")).and_then(|l| {
+                    l.split_whitespace()
+                        .nth(1)
+                        .and_then(|v| v.parse::<u64>().ok())
+                })
+            })
+            .map(|kb| kb / 1024)
+            .unwrap_or(0)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        0
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
