@@ -1,7 +1,8 @@
 //! Inference worker loop
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use qfc_inference::proof::InferenceProof;
@@ -24,6 +25,8 @@ pub struct InferenceWorker {
     scheduler: ModelScheduler,
     stop_flag: Arc<AtomicBool>,
     stats: SharedStats,
+    earnings_store: Arc<Mutex<crate::storage::EarningsStore>>,
+    store_path: PathBuf,
 }
 
 impl InferenceWorker {
@@ -32,6 +35,8 @@ impl InferenceWorker {
         engine: Box<dyn InferenceEngine>,
         scheduler: ModelScheduler,
         stats: SharedStats,
+        earnings_store: Arc<Mutex<crate::storage::EarningsStore>>,
+        store_path: PathBuf,
     ) -> Self {
         Self {
             config,
@@ -39,6 +44,8 @@ impl InferenceWorker {
             scheduler,
             stop_flag: Arc::new(AtomicBool::new(false)),
             stats,
+            earnings_store,
+            store_path,
         }
     }
 
@@ -60,6 +67,19 @@ impl InferenceWorker {
         let mut total_flops: u64 = 0;
         let _session_earnings_wei: u128 = 0;
 
+        // Start a new persistent session
+        {
+            let session_now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let mut store = self.earnings_store.lock().unwrap();
+            store.start_session(session_now);
+            if let Err(e) = store.save(&self.store_path) {
+                warn!("Failed to save earnings on session start: {}", e);
+            }
+        }
+
         // Update dashboard status
         if let Ok(mut s) = self.stats.lock() {
             s.status = "Waiting for tasks...".to_string();
@@ -77,6 +97,18 @@ impl InferenceWorker {
 
             if self.stop_flag.load(Ordering::Relaxed) {
                 info!("Inference worker stopped");
+                // End persistent session
+                {
+                    let end_now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let mut store = self.earnings_store.lock().unwrap();
+                    store.end_session(end_now);
+                    if let Err(e) = store.save(&self.store_path) {
+                        warn!("Failed to save earnings on shutdown: {}", e);
+                    }
+                }
                 break;
             }
 
@@ -324,8 +356,62 @@ impl InferenceWorker {
                                 s.earning_history.remove(0);
                             }
                         }
+
+                        // Persist task record to disk
+                        {
+                            let mut store = self.earnings_store.lock().unwrap();
+                            store.record_task(crate::storage::TaskRecord {
+                                timestamp: now,
+                                task_id: task_response.task_id.clone(),
+                                task_type: task_response.task_type.clone(),
+                                model: task_response.model_name.clone(),
+                                duration_ms: task_duration_ms,
+                                reward_wei: reward_wei,
+                                accepted: true,
+                                epoch: task_response.epoch,
+                            });
+                            store.update_session(
+                                tasks_completed,
+                                tasks_failed,
+                                total_earnings_wei,
+                                total_flops,
+                            );
+                            if let Err(e) = store.save(&self.store_path) {
+                                warn!("Failed to save earnings: {}", e);
+                            }
+
+                            // Update dashboard lifetime stats
+                            if let Ok(mut s) = self.stats.lock() {
+                                s.lifetime_earnings_wei = store.lifetime_earnings_wei;
+                                s.lifetime_tasks = store.lifetime_tasks_completed;
+                                s.earnings_24h_wei = store.earnings_last_hours(24);
+                            }
+                        }
                     } else {
                         warn!("Proof rejected: {}", result.message);
+                        // Persist rejected task record
+                        {
+                            let mut store = self.earnings_store.lock().unwrap();
+                            store.record_task(crate::storage::TaskRecord {
+                                timestamp: now,
+                                task_id: task_response.task_id.clone(),
+                                task_type: task_response.task_type.clone(),
+                                model: task_response.model_name.clone(),
+                                duration_ms: task_duration_ms,
+                                reward_wei: 0,
+                                accepted: false,
+                                epoch: task_response.epoch,
+                            });
+                            store.update_session(
+                                tasks_completed,
+                                tasks_failed,
+                                total_earnings_wei,
+                                total_flops,
+                            );
+                            if let Err(e) = store.save(&self.store_path) {
+                                warn!("Failed to save earnings: {}", e);
+                            }
+                        }
                         if let Ok(mut s) = self.stats.lock() {
                             s.status = format!("Proof rejected: {}", result.message);
                         }

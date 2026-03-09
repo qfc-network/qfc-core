@@ -44,6 +44,13 @@ pub mod tui {
         /// Current balance in wei (from last RPC query)
         pub balance_wei: u128,
 
+        /// Lifetime earnings in wei (persisted across restarts)
+        pub lifetime_earnings_wei: u128,
+        /// Lifetime tasks completed (persisted)
+        pub lifetime_tasks: u64,
+        /// 24h rolling earnings in wei
+        pub earnings_24h_wei: u128,
+
         /// Recent earning amounts in micro-QFC for sparkline
         pub earning_history: Vec<u64>,
 
@@ -207,7 +214,7 @@ pub mod tui {
         let left_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(7), // Earnings
+                Constraint::Length(9), // Earnings
                 Constraint::Length(6), // Performance
                 Constraint::Min(4),    // GPU / Sparkline
             ])
@@ -223,8 +230,10 @@ pub mod tui {
 
     fn draw_earnings_panel(f: &mut Frame, area: Rect, stats: &MinerStats) {
         let session_qfc = stats.session_earnings_wei as f64 / 1e18;
-        let balance_qfc = stats.balance_wei as f64 / 1e18;
+        let _balance_qfc = stats.balance_wei as f64 / 1e18;
         let per_hour = stats.earnings_per_hour();
+        let lifetime_qfc = stats.lifetime_earnings_wei as f64 / 1e18;
+        let earnings_24h_qfc = stats.earnings_24h_wei as f64 / 1e18;
 
         let text = vec![
             Line::from(vec![
@@ -244,10 +253,17 @@ pub mod tui {
                 ),
             ]),
             Line::from(vec![
-                Span::styled("  Balance:  ", Style::default().fg(Color::DarkGray)),
+                Span::styled("  Lifetime: ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
-                    format!("{:.6} QFC", balance_qfc),
+                    format!("{:.6} QFC ({} tasks)", lifetime_qfc, stats.lifetime_tasks),
                     Style::default().fg(Color::Cyan),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("  24h:      ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{:.6} QFC", earnings_24h_qfc),
+                    Style::default().fg(Color::White),
                 ),
             ]),
             Line::from(""),
@@ -454,6 +470,9 @@ pub mod tui {
         pub total_flops: u64,
         pub session_earnings_wei: u128,
         pub balance_wei: u128,
+        pub lifetime_earnings_wei: u128,
+        pub lifetime_tasks: u64,
+        pub earnings_24h_wei: u128,
         pub earning_history: Vec<u64>,
         pub task_log: Vec<TaskLogEntry>,
         pub status: String,
