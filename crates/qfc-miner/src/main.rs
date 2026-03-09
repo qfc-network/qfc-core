@@ -109,6 +109,9 @@ async fn main() -> anyhow::Result<()> {
         hw.memory_mb
     };
 
+    // Create inference engine (with auto-fallback to CPU on failure)
+    let (engine, actual_backend) = create_engine_with_fallback(backend)?;
+    let backend = actual_backend;
     info!("Using backend: {}, max memory: {} MB", backend, max_memory);
 
     // Create config
@@ -121,9 +124,6 @@ async fn main() -> anyhow::Result<()> {
         max_memory_mb: max_memory,
         secret_key,
     };
-
-    // Create inference engine (with auto-fallback to CPU on failure)
-    let (engine, backend) = create_engine_with_fallback(backend)?;
 
     // Run benchmark
     info!("Running hardware benchmark...");
@@ -283,10 +283,10 @@ fn create_engine_with_fallback(
     match qfc_inference::create_engine_for_backend(backend) {
         Ok(engine) => Ok((engine, backend)),
         Err(e) if backend != BackendType::Cpu => {
-            tracing::warn!(
-                "{} backend unavailable: {}. Falling back to CPU.",
+            tracing::info!(
+                "{} backend not available, using CPU instead (compile with --features {} for GPU acceleration)",
                 backend,
-                e
+                format!("{}", backend).to_lowercase()
             );
             let engine = qfc_inference::create_engine_for_backend(BackendType::Cpu)?;
             Ok((engine, BackendType::Cpu))

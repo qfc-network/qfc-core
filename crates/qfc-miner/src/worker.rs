@@ -307,31 +307,14 @@ impl InferenceWorker {
                         let reward_display = format_wei_as_qfc(reward_wei);
                         let total_display = format_wei_as_qfc(total_earnings_wei);
 
-                        info!("╔══════════════════════════════════════════════════════╗");
-                        info!("║  ✅ PROOF ACCEPTED — REWARD EARNED                  ║");
-                        info!("║                                                      ║");
                         info!(
-                            "║  This task:  +{} QFC{}",
+                            "PROOF ACCEPTED | +{} QFC | session: {} QFC | {}/{} tasks{}",
                             reward_display,
-                            " ".repeat(36_usize.saturating_sub(reward_display.len()))
-                        );
-                        info!(
-                            "║  Session total: {} QFC{}",
                             total_display,
-                            " ".repeat(33_usize.saturating_sub(total_display.len()))
-                        );
-                        info!(
-                            "║  Tasks: {} completed, {} failed{}",
                             tasks_completed,
-                            tasks_failed,
-                            " ".repeat(24_usize.saturating_sub(
-                                format!("{}{}", tasks_completed, tasks_failed).len()
-                            ))
+                            tasks_completed + tasks_failed,
+                            if result.spot_checked { " | spot-check: PASSED" } else { "" }
                         );
-                        if result.spot_checked {
-                            info!("║  🔍 Spot-check: PASSED                              ║");
-                        }
-                        info!("╚══════════════════════════════════════════════════════╝");
 
                         // Update dashboard stats
                         if let Ok(mut s) = self.stats.lock() {
