@@ -34,7 +34,7 @@ pub use param_governance::{
     ParamGovernanceError, ParamProposalStatus, ParameterGovernance, ParameterKey, ParameterProposal,
 };
 pub use proof_pool::ProofPool;
-pub use task_pool::TaskPool;
+pub use task_pool::{PublicTaskFilter, TaskPool};
 pub use task_types::estimate_base_fee;
 pub use treasury::{SpendProposal, SpendStatus, Treasury, TreasuryError};
 pub use verification::{

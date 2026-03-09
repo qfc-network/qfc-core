@@ -35,6 +35,19 @@ pub enum PublicTaskStatus {
     Expired,
 }
 
+/// Filter for listing public tasks
+#[derive(Clone, Debug, Default)]
+pub struct PublicTaskFilter {
+    /// Filter by submitter address
+    pub submitter: Option<Address>,
+    /// Filter by status name (e.g. "Pending", "Completed")
+    pub status: Option<String>,
+    /// Max number of results (default 50, max 200)
+    pub limit: usize,
+    /// Offset for pagination
+    pub offset: usize,
+}
+
 /// A publicly submitted inference task (paid)
 #[derive(Clone, Debug)]
 pub struct PublicTask {
@@ -249,6 +262,38 @@ impl TaskPool {
         // Also add to the pending queue so miners can pick it up
         self.pending.push_back(task);
         task_id
+    }
+
+    /// List public tasks with optional filtering and pagination
+    pub fn list_public_tasks(&self, filter: &PublicTaskFilter) -> Vec<&PublicTask> {
+        let limit = filter.limit.min(200).max(1);
+        let mut tasks: Vec<&PublicTask> = self
+            .public_tasks
+            .values()
+            .filter(|t| {
+                if let Some(ref submitter) = filter.submitter {
+                    if &t.submitter != submitter {
+                        return false;
+                    }
+                }
+                if let Some(ref status) = filter.status {
+                    let task_status = match &t.status {
+                        PublicTaskStatus::Pending => "Pending",
+                        PublicTaskStatus::Assigned => "Assigned",
+                        PublicTaskStatus::Completed { .. } => "Completed",
+                        PublicTaskStatus::Failed => "Failed",
+                        PublicTaskStatus::Expired => "Expired",
+                    };
+                    if task_status != status.as_str() {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect();
+        // Sort by submission time descending (newest first)
+        tasks.sort_by(|a, b| b.submitted_at.cmp(&a.submitted_at));
+        tasks.into_iter().skip(filter.offset).take(limit).collect()
     }
 
     /// Get a public task by task ID (checks active tasks, then retained completed tasks)
