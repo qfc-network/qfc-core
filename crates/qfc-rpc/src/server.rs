@@ -1392,6 +1392,7 @@ impl QfcApiServer for RpcServer {
         let backend = match req.backend.to_uppercase().as_str() {
             "CUDA" => Some(qfc_types::BackendType::Cuda),
             "METAL" => Some(qfc_types::BackendType::Metal),
+            "ROCM" => Some(qfc_types::BackendType::Rocm),
             "CPU" => Some(qfc_types::BackendType::Cpu),
             _ => None,
         };
