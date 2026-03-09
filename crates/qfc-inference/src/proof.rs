@@ -219,6 +219,44 @@ mod tests {
         assert!(bytes.len() < proof.to_bytes().len());
     }
 
+    /// Verify that qfc_inference::InferenceProof and qfc_types::InferenceProof
+    /// have identical Borsh layout. A failure here means the types have drifted
+    /// and proof deserialization will break on the network.
+    #[test]
+    fn test_borsh_compat_with_qfc_types() {
+        let proof = InferenceProof::new(
+            Address::default(),
+            42,
+            ComputeTaskType::Embedding {
+                model_id: ModelId::new("bert-base", "v1"),
+                input_hash: Hash::ZERO,
+            },
+            Hash::ZERO,
+            Hash::new([0xab; 32]),
+            150,
+            5000,
+            BackendType::Cpu,
+            CanonicalFormat::SafetensorsFp32,
+            1234567890,
+        );
+
+        let bytes = proof.to_bytes();
+
+        // Deserialize as qfc_types::InferenceProof — must succeed
+        let types_proof: qfc_types::InferenceProof = borsh::from_slice(&bytes)
+            .expect("qfc_types::InferenceProof should deserialize from qfc_inference bytes");
+
+        assert_eq!(types_proof.epoch, 42);
+        assert_eq!(types_proof.execution_time_ms, 150);
+        assert_eq!(types_proof.timestamp, 1234567890);
+
+        // Round-trip: qfc_types → bytes → qfc_inference
+        let types_bytes = types_proof.to_bytes();
+        let roundtrip = InferenceProof::from_bytes(&types_bytes)
+            .expect("qfc_inference::InferenceProof should deserialize from qfc_types bytes");
+        assert_eq!(proof, roundtrip);
+    }
+
     #[test]
     fn test_compute_proof_enum() {
         let pow_proof =
