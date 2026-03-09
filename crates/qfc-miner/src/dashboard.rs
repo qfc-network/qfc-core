@@ -5,7 +5,10 @@
 #[cfg(feature = "tui")]
 pub mod tui {
     use crossterm::{
-        event::{self, Event, KeyCode, KeyEventKind},
+        event::{
+            self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind,
+            MouseEventKind,
+        },
         terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
         ExecutableCommand,
     };
@@ -206,6 +209,7 @@ pub mod tui {
     pub fn run_dashboard(stats: SharedStats) -> std::io::Result<()> {
         enable_raw_mode()?;
         stdout().execute(EnterAlternateScreen)?;
+        stdout().execute(EnableMouseCapture)?;
         let backend = ratatui::backend::CrosstermBackend::new(stdout());
         let mut terminal = Terminal::new(backend)?;
 
@@ -213,58 +217,126 @@ pub mod tui {
         let mut last_tick = Instant::now();
         let mut log_scroll: usize = 0;
         let mut log_follow = true; // auto-scroll to newest
+        let mut log_height: u16 = 8; // default log panel height
+        let mut log_visible = true;
+        let mut task_log_scroll: usize = 0;
+        // Track panel areas for mouse-aware scrolling
+        let mut task_log_area = Rect::default();
+        let mut log_panel_area = Rect::default();
 
         loop {
             let total_logs = stats.lock().unwrap().log_lines.len();
+            let total_tasks = stats.lock().unwrap().task_log.len();
+            let effective_log_height = if log_visible { log_height } else { 0 };
 
             terminal.draw(|f| {
                 let s = stats.lock().unwrap();
-                draw_ui(f, &s, log_scroll);
+                let areas =
+                    draw_ui(f, &s, log_scroll, task_log_scroll, effective_log_height);
+                task_log_area = areas.0;
+                log_panel_area = areas.1;
             })?;
 
             let timeout = tick_rate.saturating_sub(last_tick.elapsed());
             if event::poll(timeout)? {
-                if let Event::Key(key) = event::read()? {
-                    if key.kind == KeyEventKind::Press {
-                        match key.code {
-                            KeyCode::Char('q') | KeyCode::Char('Q') => break,
-                            KeyCode::Esc => break,
-                            // Log scroll
-                            KeyCode::Up | KeyCode::Char('k') => {
-                                if log_scroll + 1 < total_logs {
-                                    log_scroll += 1;
-                                    log_follow = false;
-                                }
+                match event::read()? {
+                    Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
+                        KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => break,
+                        // Toggle log panel
+                        KeyCode::Char('l') | KeyCode::Char('L') => {
+                            log_visible = !log_visible;
+                        }
+                        // Resize log panel
+                        KeyCode::Char('+') | KeyCode::Char('=') => {
+                            if log_visible {
+                                log_height = log_height.saturating_add(3).min(30);
                             }
-                            KeyCode::Down | KeyCode::Char('j') => {
-                                if log_scroll > 0 {
-                                    log_scroll -= 1;
-                                }
-                                if log_scroll == 0 {
-                                    log_follow = true;
-                                }
+                        }
+                        KeyCode::Char('-') | KeyCode::Char('_') => {
+                            if log_visible {
+                                log_height = log_height.saturating_sub(3).max(5);
                             }
-                            KeyCode::PageUp => {
+                        }
+                        // Log scroll (keyboard)
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            if log_visible && log_scroll + 1 < total_logs {
+                                log_scroll += 1;
+                                log_follow = false;
+                            }
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            if log_visible && log_scroll > 0 {
+                                log_scroll -= 1;
+                            }
+                            if log_scroll == 0 {
+                                log_follow = true;
+                            }
+                        }
+                        KeyCode::PageUp => {
+                            if log_visible {
                                 log_scroll = (log_scroll + 5).min(total_logs.saturating_sub(1));
                                 log_follow = false;
                             }
-                            KeyCode::PageDown => {
+                        }
+                        KeyCode::PageDown => {
+                            if log_visible {
                                 log_scroll = log_scroll.saturating_sub(5);
                                 if log_scroll == 0 {
                                     log_follow = true;
                                 }
                             }
-                            KeyCode::Home => {
+                        }
+                        KeyCode::Home => {
+                            if log_visible {
                                 log_scroll = total_logs.saturating_sub(1);
                                 log_follow = false;
                             }
-                            KeyCode::End => {
-                                log_scroll = 0;
-                                log_follow = true;
+                        }
+                        KeyCode::End => {
+                            log_scroll = 0;
+                            log_follow = true;
+                        }
+                        _ => {}
+                    },
+                    // Mouse scroll — region-aware
+                    Event::Mouse(mouse) => {
+                        let col = mouse.column;
+                        let row = mouse.row;
+                        let in_task_log = col >= task_log_area.x
+                            && col < task_log_area.x + task_log_area.width
+                            && row >= task_log_area.y
+                            && row < task_log_area.y + task_log_area.height;
+                        let in_log_panel = col >= log_panel_area.x
+                            && col < log_panel_area.x + log_panel_area.width
+                            && row >= log_panel_area.y
+                            && row < log_panel_area.y + log_panel_area.height;
+
+                        match mouse.kind {
+                            MouseEventKind::ScrollUp => {
+                                if in_task_log {
+                                    task_log_scroll =
+                                        task_log_scroll.saturating_add(1).min(total_tasks.saturating_sub(1));
+                                } else if in_log_panel && log_visible {
+                                    log_scroll = log_scroll
+                                        .saturating_add(1)
+                                        .min(total_logs.saturating_sub(1));
+                                    log_follow = false;
+                                }
+                            }
+                            MouseEventKind::ScrollDown => {
+                                if in_task_log {
+                                    task_log_scroll = task_log_scroll.saturating_sub(1);
+                                } else if in_log_panel && log_visible {
+                                    log_scroll = log_scroll.saturating_sub(1);
+                                    if log_scroll == 0 {
+                                        log_follow = true;
+                                    }
+                                }
                             }
                             _ => {}
                         }
                     }
+                    _ => {}
                 }
             }
 
@@ -279,11 +351,19 @@ pub mod tui {
         }
 
         disable_raw_mode()?;
+        stdout().execute(DisableMouseCapture)?;
         stdout().execute(LeaveAlternateScreen)?;
         Ok(())
     }
 
-    fn draw_ui(f: &mut Frame, stats: &MinerStats, log_scroll: usize) {
+    /// Draw the full UI. Returns (task_log_area, log_panel_area) for mouse hit-testing.
+    fn draw_ui(
+        f: &mut Frame,
+        stats: &MinerStats,
+        log_scroll: usize,
+        task_log_scroll: usize,
+        log_height: u16,
+    ) -> (Rect, Rect) {
         let size = f.area();
 
         // Main layout: header, body, footer
@@ -297,8 +377,9 @@ pub mod tui {
             .split(size);
 
         draw_header(f, main_chunks[0], stats);
-        draw_body(f, main_chunks[1], stats, log_scroll);
-        draw_footer(f, main_chunks[2], stats);
+        let areas = draw_body(f, main_chunks[1], stats, log_scroll, task_log_scroll, log_height);
+        draw_footer(f, main_chunks[2], stats, log_height > 0);
+        areas
     }
 
     fn draw_header(f: &mut Frame, area: Rect, stats: &MinerStats) {
@@ -340,11 +421,24 @@ pub mod tui {
         f.render_widget(header, area);
     }
 
-    fn draw_body(f: &mut Frame, area: Rect, stats: &MinerStats, log_scroll: usize) {
-        // Body: upper (stats + task log) | lower (logs)
+    /// Draw the body. Returns (task_log_area, log_panel_area).
+    fn draw_body(
+        f: &mut Frame,
+        area: Rect,
+        stats: &MinerStats,
+        log_scroll: usize,
+        task_log_scroll: usize,
+        log_height: u16,
+    ) -> (Rect, Rect) {
+        // Body: upper (stats + task log) | lower (logs, if visible)
+        let constraints = if log_height > 0 {
+            vec![Constraint::Min(10), Constraint::Length(log_height)]
+        } else {
+            vec![Constraint::Min(10)]
+        };
         let vert_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(10), Constraint::Length(8)])
+            .constraints(constraints)
             .split(area);
 
         // Upper: left (stats + earnings) | right (task log)
@@ -368,10 +462,19 @@ pub mod tui {
         draw_gpu_panel(f, left_chunks[2], stats);
 
         // Right: task log
-        draw_task_log(f, body_chunks[1], stats);
+        let task_log_rect = body_chunks[1];
+        draw_task_log(f, task_log_rect, stats, task_log_scroll);
 
-        // Lower: log panel
-        draw_log_panel(f, vert_chunks[1], stats, log_scroll);
+        // Lower: log panel (if visible)
+        let log_panel_rect = if log_height > 0 && vert_chunks.len() > 1 {
+            let r = vert_chunks[1];
+            draw_log_panel(f, r, stats, log_scroll);
+            r
+        } else {
+            Rect::default()
+        };
+
+        (task_log_rect, log_panel_rect)
     }
 
     fn draw_earnings_panel(f: &mut Frame, area: Rect, stats: &MinerStats) {
@@ -507,7 +610,14 @@ pub mod tui {
         }
     }
 
-    fn draw_task_log(f: &mut Frame, area: Rect, stats: &MinerStats) {
+    fn draw_task_log(f: &mut Frame, area: Rect, stats: &MinerStats, scroll: usize) {
+        let total = stats.task_log.len();
+        let title = if scroll > 0 {
+            format!(" Task Log [{}/{}] ", scroll, total)
+        } else {
+            " Task Log ".to_string()
+        };
+
         let header_cells = ["Time", "Type", "Model", "Duration", "Reward"]
             .iter()
             .map(|h| {
@@ -519,7 +629,7 @@ pub mod tui {
             });
         let header = Row::new(header_cells).height(1);
 
-        let rows = stats.task_log.iter().map(|entry| {
+        let rows = stats.task_log.iter().skip(scroll).map(|entry| {
             let color = if entry.accepted {
                 Color::Green
             } else {
@@ -550,7 +660,7 @@ pub mod tui {
         .block(
             Block::default()
                 .title(Span::styled(
-                    " Task Log ",
+                    title,
                     Style::default()
                         .fg(Color::Magenta)
                         .add_modifier(Modifier::BOLD),
@@ -562,12 +672,16 @@ pub mod tui {
         f.render_widget(table, area);
     }
 
-    fn draw_footer(f: &mut Frame, area: Rect, stats: &MinerStats) {
+    fn draw_footer(f: &mut Frame, area: Rect, stats: &MinerStats, log_visible: bool) {
+        let log_hint = if log_visible { "l:hide logs" } else { "l:show logs" };
         let footer_text = Line::from(vec![
             Span::styled(" Status: ", Style::default().fg(Color::DarkGray)),
             Span::styled(&stats.status, Style::default().fg(Color::White)),
             Span::raw("  "),
-            Span::styled("Press 'q' to quit", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("q:quit  {}  +/-:resize  scroll:mouse/↑↓", log_hint),
+                Style::default().fg(Color::DarkGray),
+            ),
         ]);
 
         let footer = Paragraph::new(footer_text).block(
