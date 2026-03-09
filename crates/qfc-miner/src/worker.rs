@@ -313,7 +313,11 @@ impl InferenceWorker {
                             total_display,
                             tasks_completed,
                             tasks_completed + tasks_failed,
-                            if result.spot_checked { " | spot-check: PASSED" } else { "" }
+                            if result.spot_checked {
+                                " | spot-check: PASSED"
+                            } else {
+                                ""
+                            }
                         );
 
                         // Update dashboard stats

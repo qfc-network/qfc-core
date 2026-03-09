@@ -231,8 +231,7 @@ pub mod tui {
 
             terminal.draw(|f| {
                 let s = stats.lock().unwrap();
-                let areas =
-                    draw_ui(f, &s, log_scroll, task_log_scroll, effective_log_pct);
+                let areas = draw_ui(f, &s, log_scroll, task_log_scroll, effective_log_pct);
                 task_log_area = areas.0;
                 log_panel_area = areas.1;
             })?;
@@ -314,8 +313,9 @@ pub mod tui {
                         match mouse.kind {
                             MouseEventKind::ScrollUp => {
                                 if in_task_log {
-                                    task_log_scroll =
-                                        task_log_scroll.saturating_add(1).min(total_tasks.saturating_sub(1));
+                                    task_log_scroll = task_log_scroll
+                                        .saturating_add(1)
+                                        .min(total_tasks.saturating_sub(1));
                                 } else if in_log_panel && log_visible {
                                     log_scroll = log_scroll
                                         .saturating_add(1)
@@ -378,7 +378,14 @@ pub mod tui {
             .split(size);
 
         draw_header(f, main_chunks[0], stats);
-        let areas = draw_body(f, main_chunks[1], stats, log_scroll, task_log_scroll, log_pct);
+        let areas = draw_body(
+            f,
+            main_chunks[1],
+            stats,
+            log_scroll,
+            task_log_scroll,
+            log_pct,
+        );
         draw_footer(f, main_chunks[2], stats, log_pct > 0);
         areas
     }
@@ -678,7 +685,11 @@ pub mod tui {
     }
 
     fn draw_footer(f: &mut Frame, area: Rect, stats: &MinerStats, log_visible: bool) {
-        let log_hint = if log_visible { "l:hide logs" } else { "l:show logs" };
+        let log_hint = if log_visible {
+            "l:hide logs"
+        } else {
+            "l:show logs"
+        };
         let footer_text = Line::from(vec![
             Span::styled(" Status: ", Style::default().fg(Color::DarkGray)),
             Span::styled(&stats.status, Style::default().fg(Color::White)),
