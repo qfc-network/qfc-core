@@ -46,6 +46,17 @@ pub struct WebhookPayload {
 /// Thread-safe webhook store: miner_address -> Vec<Webhook>
 pub type WebhookStore = Arc<RwLock<HashMap<qfc_types::Address, Vec<Webhook>>>>;
 
+/// All valid webhook event types that can be subscribed to
+pub const VALID_WEBHOOK_EVENTS: &[&str] = &[
+    "all",
+    "proof_accepted",
+    "proof_rejected",
+    "reward_settled",
+    "slashing_applied",
+    "score_changed",
+    "daily_summary",
+];
+
 /// Create a new empty webhook store
 pub fn new_store() -> WebhookStore {
     Arc::new(RwLock::new(HashMap::new()))
@@ -106,6 +117,48 @@ pub fn deliver(store: &WebhookStore, miner: &qfc_types::Address, payload: Webhoo
         tokio::spawn(async move {
             deliver_single(&url, &json, &hook_id).await;
         });
+    }
+}
+
+/// Format a u128 wei value as a human-readable QFC string (1 QFC = 1e18 wei)
+pub fn format_wei(wei: u128) -> String {
+    let s = format!("{}", wei);
+    if s.len() <= 18 {
+        format!("0.{:0>18} QFC", s)
+    } else {
+        let (whole, frac) = s.split_at(s.len() - 18);
+        format!("{}.{} QFC", whole, &frac[..4])
+    }
+}
+
+/// Build a daily summary payload for a miner.
+/// Can be called periodically to send daily digest webhooks.
+pub fn build_daily_summary(
+    miner_hex: &str,
+    tasks_completed: u64,
+    tasks_failed: u64,
+    earnings_wei: u128,
+    score: f64,
+) -> WebhookPayload {
+    WebhookPayload {
+        event_type: "daily_summary".to_string(),
+        miner: miner_hex.to_string(),
+        block_height: None,
+        task_type: None,
+        flops: None,
+        reward_wei: None,
+        spot_checked: None,
+        timestamp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        message: format!(
+            "Daily summary: {} tasks completed, {} failed, earned {}, score {:.2}",
+            tasks_completed,
+            tasks_failed,
+            format_wei(earnings_wei),
+            score,
+        ),
     }
 }
 

@@ -530,7 +530,8 @@ pub struct RpcEarningRecord {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RpcMinerEvent {
-    /// Event type: "proof_accepted", "proof_rejected", "task_assigned", "reward_settled"
+    /// Event type: "proof_accepted", "proof_rejected", "task_assigned",
+    /// "reward_settled", "slashing_applied", "score_changed", "daily_summary"
     pub event_type: String,
     /// Miner address
     pub miner: String,
@@ -804,7 +805,8 @@ pub struct RpcRegisterWebhookRequest {
     pub miner_address: String,
     /// Webhook URL (must be HTTPS, or Discord/Telegram webhook URL)
     pub url: String,
-    /// Event types to receive: "all", "proof_accepted", "proof_rejected", "reward_settled"
+    /// Event types to receive: "all", "proof_accepted", "proof_rejected",
+    /// "reward_settled", "slashing_applied", "score_changed", "daily_summary"
     #[serde(default = "default_events")]
     pub events: Vec<String>,
     /// Ed25519 signature of the URL for authentication

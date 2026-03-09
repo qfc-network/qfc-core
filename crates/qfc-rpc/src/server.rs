@@ -1743,6 +1743,27 @@ impl QfcApiServer for RpcServer {
                                 hex::encode(&got.as_bytes()[..8]),
                             );
                             consensus.slash_validator(&proof.validator, 5, 6 * 60 * 60 * 1000);
+
+                            // Deliver slashing webhook notification
+                            crate::webhook::deliver(
+                                &self.webhook_store,
+                                &proof.validator,
+                                crate::webhook::WebhookPayload {
+                                    event_type: "slashing_applied".to_string(),
+                                    miner: hex::encode(proof.validator.as_bytes()),
+                                    block_height: None,
+                                    task_type: Some(format!("{:?}", proof.task_type)),
+                                    flops: None,
+                                    reward_wei: None,
+                                    spot_checked: Some(true),
+                                    timestamp: proof.timestamp,
+                                    message: format!(
+                                        "Slashing applied: 5% stake penalty, 6h jail. Reason: spot-check output hash mismatch (task {})",
+                                        hex::encode(&proof.input_hash.as_bytes()[..8]),
+                                    ),
+                                },
+                            );
+
                             return Ok(RpcProofResult {
                                 accepted: false,
                                 spot_checked: true,
@@ -1784,6 +1805,28 @@ impl QfcApiServer for RpcServer {
                                 &proof.validator,
                                 penalty.slash_percent,
                                 penalty.jail_duration_ms,
+                            );
+
+                            // Deliver slashing webhook for challenge failure
+                            crate::webhook::deliver(
+                                &self.webhook_store,
+                                &proof.validator,
+                                crate::webhook::WebhookPayload {
+                                    event_type: "slashing_applied".to_string(),
+                                    miner: hex::encode(proof.validator.as_bytes()),
+                                    block_height: None,
+                                    task_type: Some(format!("{:?}", proof.task_type)),
+                                    flops: None,
+                                    reward_wei: None,
+                                    spot_checked: Some(true),
+                                    timestamp: proof.timestamp,
+                                    message: format!(
+                                        "Slashing applied: {}% stake penalty, {}h jail. Reason: challenge verification failed (task {})",
+                                        penalty.slash_percent,
+                                        penalty.jail_duration_ms / (60 * 60 * 1000),
+                                        hex::encode(&proof.input_hash.as_bytes()[..8]),
+                                    ),
+                                },
                             );
                         }
                     }
@@ -2535,6 +2578,18 @@ impl QfcApiServer for RpcServer {
                 .ok_or_else(|| RpcError::Execution("Invalid signature length".to_string()))?;
             qfc_crypto::verify_hash_signature(public_key, &url_hash, &signature)
                 .map_err(|_| RpcError::Execution("Signature verification failed".to_string()))?;
+        }
+
+        // Validate event types
+        for event in &request.events {
+            if !crate::webhook::VALID_WEBHOOK_EVENTS.contains(&event.as_str()) {
+                return Err(RpcError::Execution(format!(
+                    "Invalid event type '{}'. Valid types: {}",
+                    event,
+                    crate::webhook::VALID_WEBHOOK_EVENTS.join(", "),
+                ))
+                .into());
+            }
         }
 
         // Validate URL
