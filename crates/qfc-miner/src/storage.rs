@@ -52,8 +52,7 @@ impl EarningsStore {
         let data = serde_json::to_string_pretty(self)
             .map_err(|e| format!("Failed to serialize earnings: {}", e))?;
         let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, &data)
-            .map_err(|e| format!("Failed to write earnings file: {}", e))?;
+        std::fs::write(&tmp, &data).map_err(|e| format!("Failed to write earnings file: {}", e))?;
         std::fs::rename(&tmp, path)
             .map_err(|e| format!("Failed to rename earnings file: {}", e))?;
         Ok(())
