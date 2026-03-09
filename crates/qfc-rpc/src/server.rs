@@ -10,10 +10,10 @@ use crate::qfc::{
     RpcModelProposal, RpcNodeInfo, RpcParameterOverride, RpcParameterProposal, RpcProofResult,
     RpcProposeModelRequest, RpcProposeParameterRequest, RpcProposeSpendRequest,
     RpcPublicTaskStatus, RpcRegisterMinerRequest, RpcRegisterMinerResult,
-    RpcRegisterWebhookRequest, RpcRemoveWebhookRequest, RpcSpendProposal, RpcSubmitPublicTask,
-    RpcTaskRequest, RpcTreasuryInfo, RpcUndelegation, RpcUserOperation, RpcUserOperationStatus,
-    RpcValidator, RpcValidatorMetrics, RpcValidatorScoreBreakdown, RpcVoteModelRequest,
-    RpcVoteParameterRequest, RpcVoteSpendRequest, RpcWebhook,
+    RpcRegisterWebhookRequest, RpcRegisteredMiner, RpcRemoveWebhookRequest, RpcSpendProposal,
+    RpcSubmitPublicTask, RpcTaskRequest, RpcTreasuryInfo, RpcUndelegation, RpcUserOperation,
+    RpcUserOperationStatus, RpcValidator, RpcValidatorMetrics, RpcValidatorScoreBreakdown,
+    RpcVoteModelRequest, RpcVoteParameterRequest, RpcVoteSpendRequest, RpcWebhook,
 };
 use crate::txpool::{TxPoolApiServer, TxPoolContent, TxPoolStatus};
 use crate::types::{BlockNumber, BlockTag, CallRequest, RpcBlock, RpcReceipt, RpcTransaction};
@@ -58,6 +58,18 @@ impl Default for RpcConfig {
     }
 }
 
+/// Registered miner profile stored in memory
+#[derive(Clone, Debug)]
+struct MinerProfile {
+    public_key: qfc_types::PublicKey,
+    gpu_model: String,
+    benchmark_score: u32,
+    tier: u8,
+    vram_mb: u64,
+    backend: String,
+    registered_at: u64, // unix timestamp
+}
+
 /// RPC server
 pub struct RpcServer {
     /// Chain
@@ -94,8 +106,8 @@ pub struct RpcServer {
     task_router: Option<Arc<RwLock<qfc_ai_coordinator::router::TaskRouter>>>,
     /// B2: IPFS client for large result storage (optional)
     ipfs_client: Option<Arc<qfc_ai_coordinator::ipfs::IpfsClient>>,
-    /// Registered miners (address → public key) — miners don't need to be validators
-    registered_miners: Arc<RwLock<std::collections::HashMap<Address, qfc_types::PublicKey>>>,
+    /// Registered miners (address → profile) — miners don't need to be validators
+    registered_miners: Arc<RwLock<std::collections::HashMap<Address, MinerProfile>>>,
     /// v2.0: Inference stats — total FLOPS accumulated from verified proofs
     total_flops: Arc<std::sync::atomic::AtomicU64>,
     /// v2.0: Inference stats — total inference time in ms
@@ -1367,11 +1379,6 @@ impl QfcApiServer for RpcServer {
             });
         }
 
-        // Store the miner's public key for future proof verification
-        self.registered_miners
-            .write()
-            .insert(miner_address, public_key);
-
         // Validate GPU claim
         if !qfc_inference::validate_gpu_claim(&req.gpu_model, req.benchmark_score) {
             return Ok(RpcRegisterMinerResult {
@@ -1397,6 +1404,24 @@ impl QfcApiServer for RpcServer {
             _ => None,
         };
 
+        // Store the miner profile for future proof verification and listing
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.registered_miners.write().insert(
+            miner_address,
+            MinerProfile {
+                public_key,
+                gpu_model: req.gpu_model.clone(),
+                benchmark_score: req.benchmark_score,
+                tier,
+                vram_mb: req.vram_mb,
+                backend: req.backend.clone(),
+                registered_at: now,
+            },
+        );
+
         let consensus = self.chain.consensus();
 
         // Update validator state if this miner is also a validator
@@ -1419,6 +1444,29 @@ impl QfcApiServer for RpcServer {
             assigned_tier: tier,
             message: format!("Registered as T{}", tier),
         })
+    }
+
+    async fn get_registered_miners(&self) -> RpcResult<Vec<RpcRegisteredMiner>> {
+        let miners = self.registered_miners.read();
+        let mut result: Vec<RpcRegisteredMiner> = miners
+            .iter()
+            .map(|(addr, profile)| RpcRegisteredMiner {
+                address: format!("0x{}", hex::encode(addr.as_bytes())),
+                gpu_model: profile.gpu_model.clone(),
+                benchmark_score: profile.benchmark_score,
+                tier: profile.tier,
+                vram_mb: profile.vram_mb,
+                backend: profile.backend.clone(),
+                registered_at: profile.registered_at.to_string(),
+            })
+            .collect();
+        // Sort by tier desc, then benchmark_score desc
+        result.sort_by(|a, b| {
+            b.tier
+                .cmp(&a.tier)
+                .then(b.benchmark_score.cmp(&a.benchmark_score))
+        });
+        Ok(result)
     }
 
     async fn report_miner_status(&self, req: RpcMinerStatusReport) -> RpcResult<bool> {
@@ -1635,8 +1683,8 @@ impl QfcApiServer for RpcServer {
         // 2. Find the miner's public key (check registered miners first, then validators)
         let miner_pubkey = {
             let miners = self.registered_miners.read();
-            if let Some(pk) = miners.get(&proof.validator) {
-                Some(*pk)
+            if let Some(profile) = miners.get(&proof.validator) {
+                Some(profile.public_key)
             } else {
                 // Fallback: check validator set for backward compatibility
                 let validators = consensus.get_validators();
@@ -2562,7 +2610,7 @@ impl QfcApiServer for RpcServer {
         // Verify miner is registered
         {
             let miners = self.registered_miners.read();
-            let public_key = miners
+            let profile = miners
                 .get(&miner_address)
                 .ok_or_else(|| RpcError::Execution("Miner not registered".to_string()))?;
 
@@ -2577,7 +2625,7 @@ impl QfcApiServer for RpcServer {
             .map_err(|e| RpcError::Execution(format!("Invalid signature hex: {}", e)))?;
             let signature = qfc_types::Signature::from_slice(&sig_bytes)
                 .ok_or_else(|| RpcError::Execution("Invalid signature length".to_string()))?;
-            qfc_crypto::verify_hash_signature(public_key, &url_hash, &signature)
+            qfc_crypto::verify_hash_signature(&profile.public_key, &url_hash, &signature)
                 .map_err(|_| RpcError::Execution("Signature verification failed".to_string()))?;
         }
 
@@ -2642,7 +2690,7 @@ impl QfcApiServer for RpcServer {
         // Verify miner is registered and signature is valid
         {
             let miners = self.registered_miners.read();
-            let public_key = miners
+            let profile = miners
                 .get(&miner_address)
                 .ok_or_else(|| RpcError::Execution("Miner not registered".to_string()))?;
 
@@ -2656,7 +2704,7 @@ impl QfcApiServer for RpcServer {
             .map_err(|e| RpcError::Execution(format!("Invalid signature hex: {}", e)))?;
             let signature = qfc_types::Signature::from_slice(&sig_bytes)
                 .ok_or_else(|| RpcError::Execution("Invalid signature length".to_string()))?;
-            qfc_crypto::verify_hash_signature(public_key, &msg_hash, &signature)
+            qfc_crypto::verify_hash_signature(&profile.public_key, &msg_hash, &signature)
                 .map_err(|_| RpcError::Execution("Signature verification failed".to_string()))?;
         }
 

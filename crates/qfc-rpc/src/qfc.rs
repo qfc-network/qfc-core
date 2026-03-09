@@ -138,6 +138,10 @@ pub trait QfcApi {
         req: RpcRegisterMinerRequest,
     ) -> RpcResult<RpcRegisterMinerResult>;
 
+    /// List all registered miners with their profiles
+    #[method(name = "getRegisteredMiners")]
+    async fn get_registered_miners(&self) -> RpcResult<Vec<RpcRegisteredMiner>>;
+
     /// Report miner status (loaded models, pending tasks)
     #[method(name = "reportMinerStatus")]
     async fn report_miner_status(&self, req: RpcMinerStatusReport) -> RpcResult<bool>;
@@ -695,6 +699,21 @@ pub struct RpcInferenceFeeEstimate {
     pub min_memory_mb: u64,
     /// Estimated FLOPS
     pub estimated_flops: u64,
+}
+
+// ============ v2.0 P2: Miner List ============
+
+/// Summary of a registered miner for the miners list
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcRegisteredMiner {
+    pub address: String,
+    pub gpu_model: String,
+    pub benchmark_score: u32,
+    pub tier: u8,
+    pub vram_mb: u64,
+    pub backend: String,
+    pub registered_at: String,
 }
 
 // ============ v2.0 P2: Miner Registration & Status Report Types ============
