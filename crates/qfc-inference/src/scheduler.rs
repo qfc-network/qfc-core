@@ -97,6 +97,12 @@ impl ModelScheduler {
         }
     }
 
+    /// Clear all loaded model state (call when switching engines)
+    pub fn clear_loaded(&mut self) {
+        self.hot_models.clear();
+        self.warm_model = None;
+    }
+
     /// Get the layer of a model (None if not tracked)
     pub fn model_layer(&self, model_id: &ModelId) -> Option<ModelLayer> {
         if self.hot_models.iter().any(|m| m.model_id == *model_id) {

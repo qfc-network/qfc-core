@@ -205,6 +205,7 @@ impl InferenceWorker {
                         ) {
                             Ok(cpu_engine) => {
                                 self.engine = cpu_engine;
+                                self.scheduler.clear_loaded(); // old engine's models are gone
                                 info!("Switched to CPU backend. Reloading model and retrying...");
                                 // Reload model on the new CPU engine
                                 if let Err(e2) = self
