@@ -28,6 +28,7 @@ fn make_proof(output_byte: u8, flops: u64) -> InferenceProof {
         100,
         flops,
         BackendType::Cpu,
+        qfc_inference::CanonicalFormat::SafetensorsFp32,
         now_secs(),
     )
 }

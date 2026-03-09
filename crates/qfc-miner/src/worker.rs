@@ -1,7 +1,8 @@
 //! Inference worker loop
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use qfc_inference::proof::InferenceProof;
@@ -14,6 +15,7 @@ use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
 use crate::config::MinerConfig;
+use crate::dashboard::tui::SharedStats;
 use crate::submit::{self, InferenceTaskResponse};
 
 /// Inference worker that fetches tasks and submits proofs
@@ -22,6 +24,9 @@ pub struct InferenceWorker {
     engine: Box<dyn InferenceEngine>,
     scheduler: ModelScheduler,
     stop_flag: Arc<AtomicBool>,
+    stats: SharedStats,
+    earnings_store: Arc<Mutex<crate::storage::EarningsStore>>,
+    store_path: PathBuf,
 }
 
 impl InferenceWorker {
@@ -29,12 +34,18 @@ impl InferenceWorker {
         config: MinerConfig,
         engine: Box<dyn InferenceEngine>,
         scheduler: ModelScheduler,
+        stats: SharedStats,
+        earnings_store: Arc<Mutex<crate::storage::EarningsStore>>,
+        store_path: PathBuf,
     ) -> Self {
         Self {
             config,
             engine,
             scheduler,
             stop_flag: Arc::new(AtomicBool::new(false)),
+            stats,
+            earnings_store,
+            store_path,
         }
     }
 
@@ -52,6 +63,27 @@ impl InferenceWorker {
         let mut status_timer = interval(Duration::from_secs(30));
         let mut tasks_completed: u64 = 0;
         let mut tasks_failed: u64 = 0;
+        let mut total_earnings_wei: u128 = 0;
+        let mut total_flops: u64 = 0;
+        let _session_earnings_wei: u128 = 0;
+
+        // Start a new persistent session
+        {
+            let session_now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let mut store = self.earnings_store.lock().unwrap();
+            store.start_session(session_now);
+            if let Err(e) = store.save(&self.store_path) {
+                warn!("Failed to save earnings on session start: {}", e);
+            }
+        }
+
+        // Update dashboard status
+        if let Ok(mut s) = self.stats.lock() {
+            s.status = "Waiting for tasks...".to_string();
+        }
 
         loop {
             tokio::select! {
@@ -65,6 +97,18 @@ impl InferenceWorker {
 
             if self.stop_flag.load(Ordering::Relaxed) {
                 info!("Inference worker stopped");
+                // End persistent session
+                {
+                    let end_now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let mut store = self.earnings_store.lock().unwrap();
+                    store.end_session(end_now);
+                    if let Err(e) = store.save(&self.store_path) {
+                        warn!("Failed to save earnings on shutdown: {}", e);
+                    }
+                }
                 break;
             }
 
@@ -80,6 +124,15 @@ impl InferenceWorker {
                     continue;
                 }
             };
+
+            // Update dashboard status
+            if let Ok(mut s) = self.stats.lock() {
+                s.status = format!(
+                    "Processing task {} ({})",
+                    &task_response.task_id[..8.min(task_response.task_id.len())],
+                    task_response.model_name
+                );
+            }
 
             info!(
                 "Received task {} (epoch {}, model: {})",
@@ -177,10 +230,14 @@ impl InferenceWorker {
                 }
             };
 
+            let task_flops = result.flops_estimated;
+            let task_duration_ms = result.execution_time_ms;
+            total_flops += task_flops;
+
             info!(
                 "Inference complete: {} ms, {} FLOPS, output hash: {}",
-                result.execution_time_ms,
-                result.flops_estimated,
+                task_duration_ms,
+                task_flops,
                 hex::encode(&result.output_hash.as_bytes()[..8])
             );
 
@@ -189,6 +246,15 @@ impl InferenceWorker {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
+
+            // Determine canonical format from model registry
+            let canonical_format = task
+                .task_type
+                .model_id()
+                .and_then(|mid| {
+                    qfc_inference::model::ModelRegistry::default_v2().canonical_format(mid)
+                })
+                .unwrap_or(qfc_inference::CanonicalFormat::SafetensorsFp32);
 
             let mut proof = InferenceProof::new(
                 self.config.wallet_address,
@@ -199,6 +265,7 @@ impl InferenceWorker {
                 result.execution_time_ms,
                 result.flops_estimated,
                 self.engine.backend_type(),
+                canonical_format,
                 now,
             );
 
@@ -212,21 +279,151 @@ impl InferenceWorker {
             // 6. Submit proof to validator
             let rpc_url = &self.config.validator_rpc;
             let miner_addr = hex::encode(self.config.wallet_address.as_bytes());
+            let task_type_name = task_response.task_type.clone();
+            let model_name = task_response.model_name.clone();
+
             match submit::submit_proof(rpc_url, &miner_addr, &proof).await {
                 Ok(result) => {
                     tasks_completed += 1;
                     if result.accepted {
+                        // Parse reward estimate and accumulate
+                        let reward_wei = result
+                            .reward_estimate
+                            .as_deref()
+                            .and_then(parse_hex_u128)
+                            .unwrap_or(0);
+                        total_earnings_wei += reward_wei;
+
+                        let reward_display = format_wei_as_qfc(reward_wei);
+                        let total_display = format_wei_as_qfc(total_earnings_wei);
+
+                        info!("╔══════════════════════════════════════════════════════╗");
+                        info!("║  ✅ PROOF ACCEPTED — REWARD EARNED                  ║");
+                        info!("║                                                      ║");
                         info!(
-                            "Proof accepted! (spot_checked: {}, total: {}, failed: {})",
-                            result.spot_checked, tasks_completed, tasks_failed
+                            "║  This task:  +{} QFC{}",
+                            reward_display,
+                            " ".repeat(36_usize.saturating_sub(reward_display.len()))
                         );
+                        info!(
+                            "║  Session total: {} QFC{}",
+                            total_display,
+                            " ".repeat(33_usize.saturating_sub(total_display.len()))
+                        );
+                        info!(
+                            "║  Tasks: {} completed, {} failed{}",
+                            tasks_completed,
+                            tasks_failed,
+                            " ".repeat(24_usize.saturating_sub(
+                                format!("{}{}", tasks_completed, tasks_failed).len()
+                            ))
+                        );
+                        if result.spot_checked {
+                            info!("║  🔍 Spot-check: PASSED                              ║");
+                        }
+                        info!("╚══════════════════════════════════════════════════════╝");
+
+                        // Update dashboard stats
+                        if let Ok(mut s) = self.stats.lock() {
+                            s.tasks_completed = tasks_completed;
+                            s.tasks_failed = tasks_failed;
+                            s.total_flops = total_flops;
+                            s.status = "Waiting for tasks...".to_string();
+
+                            // Add task log entry
+                            let now = chrono_now_hms();
+                            let reward_str = "accepted".to_string();
+                            s.task_log.insert(
+                                0,
+                                crate::dashboard::tui::TaskLogEntry {
+                                    timestamp: now,
+                                    task_type: task_type_name,
+                                    model: model_name,
+                                    duration_ms: task_duration_ms,
+                                    reward_qfc: reward_str,
+                                    accepted: true,
+                                },
+                            );
+                            if s.task_log.len() > 20 {
+                                s.task_log.truncate(20);
+                            }
+
+                            // Add to earning sparkline (micro-QFC units)
+                            // For now use FLOPS as proxy since reward_estimate
+                            // may not be present on staging
+                            s.earning_history.push((task_flops / 1_000_000).max(1));
+                            if s.earning_history.len() > 60 {
+                                s.earning_history.remove(0);
+                            }
+                        }
+
+                        // Persist task record to disk
+                        {
+                            let mut store = self.earnings_store.lock().unwrap();
+                            store.record_task(crate::storage::TaskRecord {
+                                timestamp: now,
+                                task_id: task_response.task_id.clone(),
+                                task_type: task_response.task_type.clone(),
+                                model: task_response.model_name.clone(),
+                                duration_ms: task_duration_ms,
+                                reward_wei: reward_wei,
+                                accepted: true,
+                                epoch: task_response.epoch,
+                            });
+                            store.update_session(
+                                tasks_completed,
+                                tasks_failed,
+                                total_earnings_wei,
+                                total_flops,
+                            );
+                            if let Err(e) = store.save(&self.store_path) {
+                                warn!("Failed to save earnings: {}", e);
+                            }
+
+                            // Update dashboard lifetime stats
+                            if let Ok(mut s) = self.stats.lock() {
+                                s.lifetime_earnings_wei = store.lifetime_earnings_wei;
+                                s.lifetime_tasks = store.lifetime_tasks_completed;
+                                s.earnings_24h_wei = store.earnings_last_hours(24);
+                            }
+                        }
                     } else {
                         warn!("Proof rejected: {}", result.message);
+                        // Persist rejected task record
+                        {
+                            let mut store = self.earnings_store.lock().unwrap();
+                            store.record_task(crate::storage::TaskRecord {
+                                timestamp: now,
+                                task_id: task_response.task_id.clone(),
+                                task_type: task_response.task_type.clone(),
+                                model: task_response.model_name.clone(),
+                                duration_ms: task_duration_ms,
+                                reward_wei: 0,
+                                accepted: false,
+                                epoch: task_response.epoch,
+                            });
+                            store.update_session(
+                                tasks_completed,
+                                tasks_failed,
+                                total_earnings_wei,
+                                total_flops,
+                            );
+                            if let Err(e) = store.save(&self.store_path) {
+                                warn!("Failed to save earnings: {}", e);
+                            }
+                        }
+                        if let Ok(mut s) = self.stats.lock() {
+                            s.status = format!("Proof rejected: {}", result.message);
+                        }
                     }
                 }
                 Err(e) => {
                     error!("Failed to submit proof: {}", e);
                     tasks_failed += 1;
+                    if let Ok(mut s) = self.stats.lock() {
+                        s.tasks_failed = tasks_failed;
+                        s.status = format!("Submit failed: {}", e);
+                    }
                 }
             }
         }
@@ -279,6 +476,20 @@ impl InferenceWorker {
                 temperature_fp: 0,
                 seed: resp.epoch,
             },
+            "speech_to_text" => ComputeTaskType::SpeechToText {
+                model_id,
+                audio_hash: input_hash,
+                language: resp.language.clone().unwrap_or_default(),
+            },
+            "image_generation" => ComputeTaskType::ImageGeneration {
+                model_id,
+                prompt_hash: input_hash,
+                negative_prompt_hash: qfc_types::Hash::ZERO,
+                width: 512,
+                height: 512,
+                steps: 20,
+                seed: resp.epoch,
+            },
             other => return Err(format!("Unknown task type: {}", other)),
         };
 
@@ -328,4 +539,32 @@ impl InferenceWorker {
     pub fn stop(&self) {
         self.stop_flag.store(true, Ordering::Relaxed);
     }
+}
+
+/// Parse a hex string like "0x1a2b" into u128
+fn parse_hex_u128(s: &str) -> Option<u128> {
+    let hex_str = s.strip_prefix("0x").unwrap_or(s);
+    u128::from_str_radix(hex_str, 16).ok()
+}
+
+/// Format wei amount as human-readable QFC (1 QFC = 1e18 wei)
+fn format_wei_as_qfc(wei: u128) -> String {
+    if wei == 0 {
+        return "0.000000".to_string();
+    }
+    let whole = wei / 1_000_000_000_000_000_000;
+    let frac = wei % 1_000_000_000_000_000_000;
+    format!("{}.{:06}", whole, frac / 1_000_000_000_000)
+}
+
+/// Get current time as HH:MM:SS string
+fn chrono_now_hms() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let h = (secs % 86400) / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    format!("{:02}:{:02}:{:02}", h, m, s)
 }

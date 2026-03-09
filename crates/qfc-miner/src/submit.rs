@@ -26,6 +26,9 @@ pub struct InferenceTaskResponse {
     pub model_version: String,
     pub input_data: String,
     pub deadline: u64,
+    /// Language code for speech_to_text tasks (e.g. "en", "zh")
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 /// Proof submission sent to validator
@@ -49,6 +52,9 @@ pub struct ProofResult {
     pub accepted: bool,
     pub spot_checked: bool,
     pub message: String,
+    /// Estimated reward in wei (hex string), returned by validator on acceptance
+    #[serde(default)]
+    pub reward_estimate: Option<String>,
 }
 
 /// JSON-RPC request/response types

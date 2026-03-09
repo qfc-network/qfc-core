@@ -248,6 +248,41 @@ pub trait QfcApi {
     #[subscription(name = "subscribeTaskStatus" => "taskStatus", unsubscribe = "unsubscribeTaskStatus", item = RpcPublicTaskStatus)]
     async fn subscribe_task_status(&self, task_id: String) -> SubscriptionResult;
 
+    /// Get miner vesting schedule — locked vs available balance.
+    /// Miner rewards vest linearly over 30 days with a 7-day cliff.
+    #[method(name = "getMinerVesting")]
+    async fn get_miner_vesting(&self, address: String) -> RpcResult<RpcMinerVesting>;
+
+    /// Get miner earnings history.
+    /// Returns per-block earning records for a miner address.
+    /// `period` can be: "day" (last 24h), "week", "month", or "all".
+    #[method(name = "getMinerEarnings")]
+    async fn get_miner_earnings(
+        &self,
+        address: String,
+        period: String,
+    ) -> RpcResult<RpcMinerEarnings>;
+    /// Subscribe to miner earning events (WebSocket only).
+    /// Pushes RpcMinerEvent whenever the miner earns a reward or completes a task.
+    #[subscription(name = "subscribeMinerEvents" => "minerEvent", unsubscribe = "unsubscribeMinerEvents", item = RpcMinerEvent)]
+    async fn subscribe_miner_events(&self, address: String) -> SubscriptionResult;
+
+    // ---- v2.0: Miner notification endpoints ----
+
+    /// Register a webhook URL for miner event notifications.
+    /// Supports Discord, Telegram bot, or any custom HTTPS endpoint.
+    /// Requires miner signature for authentication.
+    #[method(name = "registerWebhook")]
+    async fn register_webhook(&self, request: RpcRegisterWebhookRequest) -> RpcResult<String>;
+
+    /// Remove a previously registered webhook.
+    #[method(name = "removeWebhook")]
+    async fn remove_webhook(&self, request: RpcRemoveWebhookRequest) -> RpcResult<bool>;
+
+    /// List active webhooks for a miner address.
+    #[method(name = "getWebhooks")]
+    async fn get_webhooks(&self, address: String) -> RpcResult<Vec<RpcWebhook>>;
+
     // ---- v2.0: Bridge endpoints ----
 
     /// Get bridge status (validators, TVL, pending operations)
@@ -446,6 +481,74 @@ pub struct RpcProofResult {
     pub spot_checked: bool,
     /// Detail message
     pub message: String,
+    /// Estimated reward in wei (hex string). This is the miner's estimated
+    /// share based on base fee calculation. Actual reward is determined
+    /// at block production time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reward_estimate: Option<String>,
+}
+
+// ============ v2.0: Miner Earnings RPC Types ============
+
+/// Miner earnings summary and history
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcMinerEarnings {
+    /// Miner address
+    pub address: String,
+    /// Total earnings in wei (hex string)
+    pub total_earnings: String,
+    /// Total FLOPS contributed
+    pub total_flops: String,
+    /// Total tasks completed
+    pub total_tasks: String,
+    /// Current balance in wei (hex string)
+    pub balance: String,
+    /// Earning records (newest first)
+    pub records: Vec<RpcEarningRecord>,
+}
+
+/// A single earning record for one block
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcEarningRecord {
+    /// Block height
+    pub block_height: String,
+    /// Reward earned in wei (hex string)
+    pub reward: String,
+    /// FLOPS contributed
+    pub flops: String,
+    /// Number of tasks in this block
+    pub task_count: u32,
+    /// Block timestamp (ms since epoch)
+    pub timestamp: String,
+}
+
+// ============ v2.0: Miner Event Subscription Types ============
+
+/// Real-time miner event pushed via WebSocket subscription
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcMinerEvent {
+    /// Event type: "proof_accepted", "proof_rejected", "task_assigned",
+    /// "reward_settled", "slashing_applied", "score_changed", "daily_summary"
+    pub event_type: String,
+    /// Miner address
+    pub miner: String,
+    /// Block height (if applicable)
+    pub block_height: Option<String>,
+    /// Task type (e.g. "embedding", "text_generation")
+    pub task_type: Option<String>,
+    /// FLOPS contributed
+    pub flops: Option<String>,
+    /// Reward amount in wei (hex)
+    pub reward: Option<String>,
+    /// Whether spot-checked
+    pub spot_checked: Option<bool>,
+    /// Timestamp (ms since epoch)
+    pub timestamp: String,
+    /// Human-readable message
+    pub message: String,
 }
 
 // ============ v2.0: Model Governance RPC Types ============
@@ -505,6 +608,9 @@ pub struct RpcSubmitPublicTask {
     pub submitter: String,
     /// Ed25519 signature over (task_type || model_id || input_data || max_fee) hex
     pub signature: String,
+    /// Language code for speech_to_text tasks (e.g. "en", "zh")
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 /// Status of a public inference task (B1: structured result envelope)
@@ -646,6 +752,97 @@ pub struct RpcModelStatus {
     pub model_version: String,
     /// Layer: "hot", "warm", "cold"
     pub layer: String,
+}
+
+// ============ v2.0: Miner Vesting Types ============
+
+/// Miner vesting schedule — shows locked vs available mining rewards.
+/// Rewards vest linearly over 30 days with a 7-day cliff.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcMinerVesting {
+    /// Miner address
+    pub miner: String,
+    /// Total lifetime earnings (hex wei)
+    pub total_earned: String,
+    /// Currently vesting / locked amount (hex wei)
+    pub locked: String,
+    /// Available to withdraw (hex wei)
+    pub available: String,
+    /// Number of vesting tranches still active
+    pub active_tranches: u64,
+    /// Detailed vesting tranches (most recent first)
+    pub tranches: Vec<RpcVestingTranche>,
+}
+
+/// A single vesting tranche from a block reward
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcVestingTranche {
+    /// Block height where reward was earned
+    pub block_height: String,
+    /// Total reward amount in this tranche (hex wei)
+    pub amount: String,
+    /// Amount already vested / unlocked (hex wei)
+    pub vested: String,
+    /// Timestamp when vesting started (seconds)
+    pub start_time: String,
+    /// Timestamp when cliff ends (seconds)
+    pub cliff_end: String,
+    /// Timestamp when fully vested (seconds)
+    pub end_time: String,
+    /// Vesting progress percentage (0-100)
+    pub percent_vested: u8,
+}
+
+// ============ v2.0: Miner Notification/Webhook Types ============
+
+/// Request to register a webhook for miner event notifications
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcRegisterWebhookRequest {
+    /// Miner address (hex)
+    pub miner_address: String,
+    /// Webhook URL (must be HTTPS, or Discord/Telegram webhook URL)
+    pub url: String,
+    /// Event types to receive: "all", "proof_accepted", "proof_rejected",
+    /// "reward_settled", "slashing_applied", "score_changed", "daily_summary"
+    #[serde(default = "default_events")]
+    pub events: Vec<String>,
+    /// Ed25519 signature of the URL for authentication
+    pub signature: String,
+}
+
+fn default_events() -> Vec<String> {
+    vec!["all".to_string()]
+}
+
+/// Request to remove a webhook
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcRemoveWebhookRequest {
+    /// Miner address (hex)
+    pub miner_address: String,
+    /// Webhook ID to remove
+    pub webhook_id: String,
+    /// Ed25519 signature for authentication
+    pub signature: String,
+}
+
+/// Registered webhook info
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcWebhook {
+    /// Unique webhook ID
+    pub id: String,
+    /// Webhook URL (partially masked for security)
+    pub url: String,
+    /// Subscribed event types
+    pub events: Vec<String>,
+    /// Registration timestamp (seconds)
+    pub created_at: String,
+    /// Whether the webhook is active
+    pub active: bool,
 }
 
 // ============ v2.0: Parameter Governance RPC Types ============

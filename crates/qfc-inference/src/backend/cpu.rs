@@ -24,6 +24,13 @@ pub struct CpuEngine {
     /// Loaded Qwen2 models for text generation (needs &mut self for KV cache)
     #[cfg(feature = "candle")]
     qwen_models: HashMap<String, std::sync::Mutex<crate::models::qwen2::Qwen2TextGen>>,
+    /// Loaded quantized Qwen2 models (GGUF format)
+    #[cfg(feature = "candle")]
+    quantized_models:
+        HashMap<String, std::sync::Mutex<crate::models::quantized_qwen2::QuantizedQwen2TextGen>>,
+    /// Loaded Whisper models for speech-to-text
+    #[cfg(feature = "candle")]
+    whisper_models: HashMap<String, std::sync::Mutex<crate::models::whisper::WhisperModel>>,
     #[cfg(not(feature = "candle"))]
     _models: HashMap<String, ()>,
 }
@@ -38,6 +45,10 @@ impl CpuEngine {
             candle_models: HashMap::new(),
             #[cfg(feature = "candle")]
             qwen_models: HashMap::new(),
+            #[cfg(feature = "candle")]
+            quantized_models: HashMap::new(),
+            #[cfg(feature = "candle")]
+            whisper_models: HashMap::new(),
             #[cfg(not(feature = "candle"))]
             _models: HashMap::new(),
         }
@@ -67,7 +78,7 @@ impl InferenceEngine for CpuEngine {
     async fn load_model(&mut self, model_id: &ModelId) -> Result<(), InferenceError> {
         #[cfg(feature = "candle")]
         {
-            use crate::download::download_model;
+            use crate::download::{download_model, get_hf_repo, ModelFormat};
             use candle_core::Device;
 
             tracing::info!("Loading model {} on CPU backend (candle)", model_id);
@@ -75,16 +86,56 @@ impl InferenceEngine for CpuEngine {
             let downloaded = download_model(&model_id.name)?;
             let device = Device::Cpu;
 
-            if is_text_gen_model(&model_id.name) {
-                // Load as Qwen2 text generation model
-                let qwen = crate::models::qwen2::Qwen2TextGen::load(
+            // Determine model format from registry
+            let format = get_hf_repo(&model_id.name)
+                .map(|r| r.format)
+                .unwrap_or(ModelFormat::Safetensors);
+
+            if is_whisper_model(&model_id.name) {
+                // Load as Whisper speech-to-text model
+                let mel_path = downloaded
+                    .extra_paths
+                    .iter()
+                    .find(|(name, _)| name.contains("mel_filters"))
+                    .map(|(_, p)| p.clone())
+                    .ok_or_else(|| {
+                        InferenceError::ExecutionFailed(
+                            "mel_filters file not found in download".to_string(),
+                        )
+                    })?;
+                let whisper = crate::models::whisper::WhisperModel::load(
                     &downloaded.weights_path,
                     &downloaded.tokenizer_path,
                     &downloaded.config_path,
+                    &mel_path,
                     &device,
                 )?;
-                self.qwen_models
-                    .insert(model_id.name.clone(), std::sync::Mutex::new(qwen));
+                self.whisper_models
+                    .insert(model_id.name.clone(), std::sync::Mutex::new(whisper));
+            } else if is_text_gen_model(&model_id.name) {
+                match format {
+                    ModelFormat::Gguf => {
+                        // Load as quantized GGUF model
+                        let qmodel = crate::models::quantized_qwen2::QuantizedQwen2TextGen::load(
+                            &downloaded.weights_path,
+                            &downloaded.tokenizer_path,
+                            &device,
+                        )?;
+                        self.quantized_models
+                            .insert(model_id.name.clone(), std::sync::Mutex::new(qmodel));
+                    }
+                    ModelFormat::Safetensors => {
+                        // Load as Qwen2 FP32 text generation model
+                        let qwen = crate::models::qwen2::Qwen2TextGen::load(
+                            &downloaded.weights_path,
+                            &downloaded.tokenizer_path,
+                            &downloaded.config_path,
+                            &device,
+                        )?;
+                        self.qwen_models
+                            .insert(model_id.name.clone(), std::sync::Mutex::new(qwen));
+                    }
+                }
             } else {
                 // Load as BERT embedding/classification model
                 let loaded: Box<dyn LoadedModel> =
@@ -124,15 +175,47 @@ impl InferenceEngine for CpuEngine {
                     max_tokens,
                     ..
                 } => {
-                    // Use Qwen2 text generation model
-                    if let Some(model_mutex) = self.qwen_models.get(model_id.name.as_str()) {
+                    let prompt = std::str::from_utf8(&task.input_data).map_err(|e| {
+                        InferenceError::ExecutionFailed(format!("Invalid UTF-8 input: {}", e))
+                    })?;
+
+                    // Try quantized (GGUF) models first, then FP32 models
+                    if let Some(model_mutex) = self.quantized_models.get(model_id.name.as_str()) {
                         let mut model = model_mutex.lock().map_err(|e| {
                             InferenceError::ExecutionFailed(format!("Model lock failed: {}", e))
                         })?;
-                        let prompt = std::str::from_utf8(&task.input_data).map_err(|e| {
-                            InferenceError::ExecutionFailed(format!("Invalid UTF-8 input: {}", e))
+                        model.generate(prompt, *max_tokens)?
+                    } else if let Some(model_mutex) = self.qwen_models.get(model_id.name.as_str()) {
+                        let mut model = model_mutex.lock().map_err(|e| {
+                            InferenceError::ExecutionFailed(format!("Model lock failed: {}", e))
                         })?;
                         model.generate(prompt, *max_tokens)?
+                    } else {
+                        return Err(InferenceError::ModelNotLoaded(model_id.name.clone()));
+                    }
+                }
+                ComputeTaskType::SpeechToText {
+                    model_id, language, ..
+                } => {
+                    // Use Whisper speech-to-text model
+                    if let Some(model_mutex) = self.whisper_models.get(model_id.name.as_str()) {
+                        let mut model = model_mutex.lock().map_err(|e| {
+                            InferenceError::ExecutionFailed(format!("Model lock failed: {}", e))
+                        })?;
+                        // Input data is raw PCM f32 samples (4 bytes per sample, little-endian)
+                        let pcm_samples: Vec<f32> = task
+                            .input_data
+                            .chunks_exact(4)
+                            .map(|chunk| {
+                                f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+                            })
+                            .collect();
+                        let lang = if language.is_empty() {
+                            None
+                        } else {
+                            Some(language.as_str())
+                        };
+                        model.transcribe(&pcm_samples, lang)?
                     } else {
                         return Err(InferenceError::ModelNotLoaded(model_id.name.clone()));
                     }
@@ -203,6 +286,12 @@ fn is_text_gen_model(model_name: &str) -> bool {
     model_name.starts_with("qfc-llm-")
 }
 
+/// Check if a model name refers to a Whisper speech-to-text model
+#[cfg(feature = "candle")]
+fn is_whisper_model(model_name: &str) -> bool {
+    model_name.starts_with("qfc-whisper-")
+}
+
 /// Deterministic placeholder output (used by all backends during development)
 pub fn deterministic_placeholder(task: &InferenceTask) -> Vec<u8> {
     compute_deterministic_output(task)
@@ -247,6 +336,10 @@ fn estimate_flops(task_type: &ComputeTaskType, _elapsed_ms: u64) -> u64 {
                 500_000_000u64
             } else if model_id.name.contains("1b") || model_id.name.contains("1B") {
                 1_000_000_000u64
+            } else if model_id.name.contains("3b") || model_id.name.contains("3B") {
+                3_000_000_000u64
+            } else if model_id.name.contains("7b") || model_id.name.contains("7B") {
+                7_000_000_000u64
             } else {
                 7_000_000_000u64
             };
@@ -254,6 +347,18 @@ fn estimate_flops(task_type: &ComputeTaskType, _elapsed_ms: u64) -> u64 {
         }
         ComputeTaskType::ImageClassification { .. } => 4_000_000_000u64,
         ComputeTaskType::Embedding { .. } => 1_000_000_000u64,
+        ComputeTaskType::SpeechToText { model_id, .. } => {
+            // Whisper base: ~74M params, large: ~1.5B params
+            if model_id.name.contains("large") {
+                30_000_000_000u64
+            } else {
+                4_000_000_000u64
+            }
+        }
+        ComputeTaskType::ImageGeneration { steps, .. } => {
+            // ~2 GFLOPS per step for SD 1.5 U-Net + text encoder + VAE
+            2_000_000_000u64 * (*steps as u64) + 5_000_000_000u64
+        }
         ComputeTaskType::OnnxInference { .. } => 2_000_000_000u64,
     }
 }

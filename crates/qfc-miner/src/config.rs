@@ -53,6 +53,10 @@ pub struct MinerCli {
     #[arg(short, long)]
     pub verbose: bool,
 
+    /// Enable TUI dashboard (requires --features tui)
+    #[arg(long)]
+    pub dashboard: bool,
+
     /// Generate a new Ed25519 miner wallet and exit
     #[arg(long)]
     pub generate_wallet: bool,

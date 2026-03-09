@@ -7,14 +7,18 @@
 //!   qfc-miner --wallet 0x... --backend auto --model-dir ./models
 
 mod config;
+pub mod dashboard;
 mod gpu;
 mod submit;
+mod storage;
 mod worker;
 
 use clap::Parser;
 use config::{MinerCli, MinerConfig};
 use qfc_inference::{BackendType, InferenceEngine};
 use qfc_types::Address;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use tracing::info;
 
 #[tokio::main]
@@ -179,11 +183,81 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Initialize shared stats for dashboard
+    let stats = dashboard::tui::new_shared_stats();
+    {
+        let tier_str = bench_score
+            .map(|(_, t)| format!("{}", t))
+            .unwrap_or_else(|| "?".to_string());
+        let mut s = stats.lock().unwrap();
+        s.address = format!("0x{}", wallet_hex);
+        s.backend = format!("{}", backend);
+        s.tier = tier_str;
+        s.rpc_url = validator_rpc.clone();
+        s.session_start = Some(std::time::Instant::now());
+        s.status = "Starting...".to_string();
+    }
+
     // Start worker
-    let mut worker = worker::InferenceWorker::new(config, engine, scheduler);
+    // Setup persistent earnings storage
+    let store_dir = std::env::var("HOME")
+        .map(|h| PathBuf::from(h).join(".qfc-miner"))
+        .unwrap_or_else(|_| PathBuf::from(".qfc-miner"));
+    if let Err(e) = std::fs::create_dir_all(&store_dir) {
+        tracing::warn!("Failed to create earnings dir {:?}: {}", store_dir, e);
+    }
+    let store_path = store_dir.join("earnings.json");
+    let earnings_store = storage::EarningsStore::load(&store_path);
+
+    // Log lifetime stats
+    if earnings_store.lifetime_tasks_completed > 0 {
+        let lifetime_qfc = earnings_store.lifetime_earnings_wei as f64 / 1e18;
+        info!(
+            "Lifetime: {} tasks completed, {:.6} QFC earned across {} sessions",
+            earnings_store.lifetime_tasks_completed,
+            lifetime_qfc,
+            earnings_store.sessions.len()
+        );
+    }
+
+    // Update dashboard with lifetime stats
+    {
+        let mut s = stats.lock().unwrap();
+        s.lifetime_earnings_wei = earnings_store.lifetime_earnings_wei;
+        s.lifetime_tasks = earnings_store.lifetime_tasks_completed;
+        s.earnings_24h_wei = earnings_store.earnings_last_hours(24);
+    }
+
+    let earnings_store = Arc::new(Mutex::new(earnings_store));
+
+    let mut worker = worker::InferenceWorker::new(
+        config, engine, scheduler, stats.clone(), earnings_store, store_path,
+    );
 
     info!("Connecting to validator at {}...", validator_rpc);
-    worker.run().await;
+
+    // Launch TUI dashboard if enabled
+    #[cfg(feature = "tui")]
+    if cli.dashboard {
+        let dashboard_stats = stats.clone();
+        let dashboard_handle =
+            std::thread::spawn(move || dashboard::tui::run_dashboard(dashboard_stats));
+
+        worker.run().await;
+
+        // Wait for dashboard thread
+        let _ = dashboard_handle.join();
+    } else {
+        worker.run().await;
+    }
+
+    #[cfg(not(feature = "tui"))]
+    {
+        if cli.dashboard {
+            tracing::warn!("TUI dashboard requires --features tui. Running without dashboard.");
+        }
+        worker.run().await;
+    }
 
     Ok(())
 }

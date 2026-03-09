@@ -4,14 +4,16 @@ use crate::error::RpcError;
 use crate::eth::EthApiServer;
 use crate::qfc::{
     QfcApiServer, RpcAccountRentInfo, RpcBridgeDeposit, RpcBridgeStatus, RpcBridgeWithdrawal,
-    RpcComputeInfo, RpcEpoch, RpcEstimateInferenceFee, RpcFaucetResponse, RpcInferenceFeeEstimate,
-    RpcInferenceProofSubmission, RpcInferenceStats, RpcInferenceTask, RpcMinerStatusReport,
-    RpcModel, RpcModelProposal, RpcNodeInfo, RpcParameterOverride, RpcParameterProposal,
-    RpcProofResult, RpcProposeModelRequest, RpcProposeParameterRequest, RpcProposeSpendRequest,
-    RpcPublicTaskStatus, RpcRegisterMinerRequest, RpcRegisterMinerResult, RpcSpendProposal,
-    RpcSubmitPublicTask, RpcTaskRequest, RpcTreasuryInfo, RpcUndelegation, RpcUserOperation,
-    RpcUserOperationStatus, RpcValidator, RpcValidatorMetrics, RpcValidatorScoreBreakdown,
-    RpcVoteModelRequest, RpcVoteParameterRequest, RpcVoteSpendRequest,
+    RpcComputeInfo, RpcEarningRecord, RpcEpoch, RpcEstimateInferenceFee, RpcFaucetResponse,
+    RpcInferenceFeeEstimate, RpcInferenceProofSubmission, RpcInferenceStats, RpcInferenceTask,
+    RpcMinerEarnings, RpcMinerEvent, RpcMinerStatusReport, RpcMinerVesting, RpcModel,
+    RpcModelProposal, RpcNodeInfo, RpcParameterOverride, RpcParameterProposal, RpcProofResult,
+    RpcProposeModelRequest, RpcProposeParameterRequest, RpcProposeSpendRequest,
+    RpcPublicTaskStatus, RpcRegisterMinerRequest, RpcRegisterMinerResult,
+    RpcRegisterWebhookRequest, RpcRemoveWebhookRequest, RpcSpendProposal, RpcSubmitPublicTask,
+    RpcTaskRequest, RpcTreasuryInfo, RpcUndelegation, RpcUserOperation, RpcUserOperationStatus,
+    RpcValidator, RpcValidatorMetrics, RpcValidatorScoreBreakdown, RpcVoteModelRequest,
+    RpcVoteParameterRequest, RpcVoteSpendRequest, RpcWebhook,
 };
 use crate::txpool::{TxPoolApiServer, TxPoolContent, TxPoolStatus};
 use crate::types::{BlockNumber, BlockTag, CallRequest, RpcBlock, RpcReceipt, RpcTransaction};
@@ -104,6 +106,8 @@ pub struct RpcServer {
     entry_point: Arc<RwLock<qfc_executor::account_abstraction::EntryPoint>>,
     /// v2.0: UserOperation mempool
     user_op_pool: Arc<RwLock<qfc_executor::account_abstraction::UserOpPool>>,
+    /// v2.0: Miner webhook notification store
+    webhook_store: crate::webhook::WebhookStore,
 }
 
 impl Clone for RpcServer {
@@ -132,6 +136,7 @@ impl Clone for RpcServer {
             verified_proof_count: self.verified_proof_count.clone(),
             entry_point: self.entry_point.clone(),
             user_op_pool: self.user_op_pool.clone(),
+            webhook_store: self.webhook_store.clone(),
         }
     }
 }
@@ -177,6 +182,7 @@ impl RpcServer {
             user_op_pool: Arc::new(RwLock::new(
                 qfc_executor::account_abstraction::UserOpPool::new(1000, 16),
             )),
+            webhook_store: crate::webhook::new_store(),
         }
     }
 
@@ -1647,6 +1653,7 @@ impl QfcApiServer for RpcServer {
                     accepted: false,
                     spot_checked: false,
                     message: "Unknown miner — register first via qfc_registerMiner".to_string(),
+                    reward_estimate: None,
                 });
             }
         };
@@ -1660,6 +1667,7 @@ impl QfcApiServer for RpcServer {
                         accepted: false,
                         spot_checked: false,
                         message: "Validator is inactive or jailed".to_string(),
+                        reward_estimate: None,
                     });
                 }
             }
@@ -1673,6 +1681,7 @@ impl QfcApiServer for RpcServer {
                 accepted: false,
                 spot_checked: false,
                 message: "Invalid proof signature".to_string(),
+                reward_estimate: None,
             });
         }
 
@@ -1687,6 +1696,7 @@ impl QfcApiServer for RpcServer {
                 accepted: false,
                 spot_checked: false,
                 message: format!("Proof rejected: {}", e),
+                reward_estimate: None,
             });
         }
 
@@ -1733,11 +1743,33 @@ impl QfcApiServer for RpcServer {
                                 hex::encode(&got.as_bytes()[..8]),
                             );
                             consensus.slash_validator(&proof.validator, 5, 6 * 60 * 60 * 1000);
+
+                            // Deliver slashing webhook notification
+                            crate::webhook::deliver(
+                                &self.webhook_store,
+                                &proof.validator,
+                                crate::webhook::WebhookPayload {
+                                    event_type: "slashing_applied".to_string(),
+                                    miner: hex::encode(proof.validator.as_bytes()),
+                                    block_height: None,
+                                    task_type: Some(format!("{:?}", proof.task_type)),
+                                    flops: None,
+                                    reward_wei: None,
+                                    spot_checked: Some(true),
+                                    timestamp: proof.timestamp,
+                                    message: format!(
+                                        "Slashing applied: 5% stake penalty, 6h jail. Reason: spot-check output hash mismatch (task {})",
+                                        hex::encode(&proof.input_hash.as_bytes()[..8]),
+                                    ),
+                                },
+                            );
+
                             return Ok(RpcProofResult {
                                 accepted: false,
                                 spot_checked: true,
                                 message: "Proof rejected: spot-check failed (output hash mismatch)"
                                     .to_string(),
+                                reward_estimate: None,
                             });
                         }
                         Err(e) => {
@@ -1774,6 +1806,28 @@ impl QfcApiServer for RpcServer {
                                 penalty.slash_percent,
                                 penalty.jail_duration_ms,
                             );
+
+                            // Deliver slashing webhook for challenge failure
+                            crate::webhook::deliver(
+                                &self.webhook_store,
+                                &proof.validator,
+                                crate::webhook::WebhookPayload {
+                                    event_type: "slashing_applied".to_string(),
+                                    miner: hex::encode(proof.validator.as_bytes()),
+                                    block_height: None,
+                                    task_type: Some(format!("{:?}", proof.task_type)),
+                                    flops: None,
+                                    reward_wei: None,
+                                    spot_checked: Some(true),
+                                    timestamp: proof.timestamp,
+                                    message: format!(
+                                        "Slashing applied: {}% stake penalty, {}h jail. Reason: challenge verification failed (task {})",
+                                        penalty.slash_percent,
+                                        penalty.jail_duration_ms / (60 * 60 * 1000),
+                                        hex::encode(&proof.input_hash.as_bytes()[..8]),
+                                    ),
+                                },
+                            );
                         }
                     }
                     let passed = matches!(
@@ -1784,6 +1838,7 @@ impl QfcApiServer for RpcServer {
                         accepted: passed,
                         spot_checked: true,
                         message: format!("Challenge result: {:?}", verdict),
+                        reward_estimate: None,
                     });
                 }
             }
@@ -1804,6 +1859,7 @@ impl QfcApiServer for RpcServer {
                             accepted: false,
                             spot_checked: false,
                             message: "Redundant verification: inconsistent output".to_string(),
+                            reward_estimate: None,
                         });
                     }
                 } else {
@@ -1811,6 +1867,7 @@ impl QfcApiServer for RpcServer {
                         accepted: true,
                         spot_checked: false,
                         message: "Redundant verification: waiting for more submissions".to_string(),
+                        reward_estimate: None,
                     });
                 }
             }
@@ -1911,6 +1968,48 @@ impl QfcApiServer for RpcServer {
             spot_checked
         );
 
+        // Compute estimated miner reward based on base fee (15% miner pool)
+        let reward_est = {
+            let base_fee = qfc_ai_coordinator::estimate_base_fee(&proof.task_type);
+            // Miner gets ~15% of base fee per the reward distribution formula
+            let miner_share = base_fee * 15 / 100;
+            format!("0x{:x}", miner_share)
+        };
+
+        // Also query miner's current balance for the response
+        let balance = self
+            .chain
+            .state()
+            .get_balance(&proof.validator)
+            .unwrap_or_default();
+
+        info!(
+            "Miner {} reward estimate: {} wei (balance: {} QFC)",
+            proof.validator,
+            reward_est,
+            format_qfc_balance(balance),
+        );
+
+        // Deliver webhook notification for accepted proof
+        crate::webhook::deliver(
+            &self.webhook_store,
+            &proof.validator,
+            crate::webhook::WebhookPayload {
+                event_type: "proof_accepted".to_string(),
+                miner: hex::encode(proof.validator.as_bytes()),
+                block_height: None,
+                task_type: Some(format!("{:?}", proof.task_type)),
+                flops: Some(proof.flops_estimated),
+                reward_wei: Some(reward_est.clone()),
+                spot_checked: Some(spot_checked),
+                timestamp: proof.timestamp,
+                message: format!(
+                    "Proof accepted: {} FLOPS, est. reward {}",
+                    proof.flops_estimated, reward_est
+                ),
+            },
+        );
+
         Ok(RpcProofResult {
             accepted: true,
             spot_checked,
@@ -1919,6 +2018,7 @@ impl QfcApiServer for RpcServer {
             } else {
                 "Proof accepted".to_string()
             },
+            reward_estimate: Some(reward_est),
         })
     }
 
@@ -1939,6 +2039,8 @@ impl QfcApiServer for RpcServer {
             min_tier,
             size_mb: request.size_mb,
             approved: false,
+            canonical_format: qfc_inference::CanonicalFormat::SafetensorsFp32,
+            weights_hash: None,
         };
 
         let now = std::time::SystemTime::now()
@@ -2237,6 +2339,360 @@ impl QfcApiServer for RpcServer {
             .collect())
     }
 
+    // ---- v2.0: Miner vesting endpoint ----
+
+    async fn get_miner_vesting(&self, address: String) -> RpcResult<RpcMinerVesting> {
+        use crate::qfc::RpcVestingTranche;
+
+        let miner_address = Self::parse_address(&address)?;
+        let miner_hex = hex::encode(miner_address.as_bytes());
+
+        // Vesting constants: 7-day cliff, 30-day linear vest
+        const CLIFF_SECS: u64 = 7 * 24 * 3600;
+        const VEST_SECS: u64 = 30 * 24 * 3600;
+
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        // Scan blocks for this miner's inference proofs to build vesting tranches.
+        // In production this would read from MINER_EARNINGS CF; for now we scan
+        // recent blocks (last 30 days worth ≈ 777,600 blocks at 3.3s/block).
+        let current_height = self.chain.block_number();
+        let blocks_per_day = 24 * 3600 * 1000 / qfc_types::BLOCK_TIME_MS;
+        let scan_start = current_height.saturating_sub(blocks_per_day * 31);
+
+        let mut total_earned = U256::zero();
+        let mut total_locked = U256::zero();
+        let mut total_available = U256::zero();
+        let mut tranches = Vec::new();
+
+        let mut height = scan_start;
+        while height <= current_height {
+            let block = match self.chain.get_block_by_number(height) {
+                Ok(Some(b)) => b,
+                _ => {
+                    height += 1;
+                    continue;
+                }
+            };
+
+            let miner_flops: u64 = block
+                .inference_proofs
+                .iter()
+                .filter(|p| p.validator == miner_address)
+                .map(|p| p.flops_estimated)
+                .sum();
+
+            if miner_flops == 0 {
+                height += 1;
+                continue;
+            }
+
+            let total_flops: u64 = block
+                .inference_proofs
+                .iter()
+                .map(|p| p.flops_estimated)
+                .sum();
+
+            if total_flops == 0 {
+                height += 1;
+                continue;
+            }
+
+            // 15% of block reward → miner pool, proportional to FLOPS
+            let block_reward = U256::from_u128(qfc_types::BLOCK_REWARD);
+            let miner_pool = block_reward * U256::from_u128(15) / U256::from_u128(100);
+            let reward = miner_pool * U256::from_u128(miner_flops as u128)
+                / U256::from_u128(total_flops as u128);
+
+            let start_time = block.header.timestamp;
+            let cliff_end = start_time + CLIFF_SECS;
+            let end_time = start_time + VEST_SECS;
+
+            // Calculate vested amount
+            let (vested, percent) = if now_secs < cliff_end {
+                // Before cliff: nothing vested
+                (U256::zero(), 0u8)
+            } else if now_secs >= end_time {
+                // Fully vested
+                (reward, 100u8)
+            } else {
+                // Linear vesting between cliff and end
+                let elapsed = now_secs - start_time;
+                let v =
+                    reward * U256::from_u128(elapsed as u128) / U256::from_u128(VEST_SECS as u128);
+                let pct = (elapsed * 100 / VEST_SECS) as u8;
+                (v, pct)
+            };
+
+            total_earned = total_earned + reward;
+            let locked = reward - vested;
+            total_locked = total_locked + locked;
+            total_available = total_available + vested;
+
+            if percent < 100 {
+                tranches.push(RpcVestingTranche {
+                    block_height: format!("0x{:x}", height),
+                    amount: format!("0x{:x}", reward.0),
+                    vested: format!("0x{:x}", vested.0),
+                    start_time: format!("{}", start_time),
+                    cliff_end: format!("{}", cliff_end),
+                    end_time: format!("{}", end_time),
+                    percent_vested: percent,
+                });
+            }
+
+            height += 1;
+        }
+
+        let active_tranches = tranches.len() as u64;
+        // Return most recent tranches first
+        tranches.reverse();
+
+        Ok(RpcMinerVesting {
+            miner: format!("0x{}", miner_hex),
+            total_earned: format!("0x{:x}", total_earned.0),
+            locked: format!("0x{:x}", total_locked.0),
+            available: format!("0x{:x}", total_available.0),
+            active_tranches,
+            tranches,
+        })
+    }
+
+    // ---- v2.0: Miner Earnings ----
+
+    async fn get_miner_earnings(
+        &self,
+        address: String,
+        period: String,
+    ) -> RpcResult<RpcMinerEarnings> {
+        let addr_hex = address.strip_prefix("0x").unwrap_or(&address);
+        let addr_bytes = hex::decode(addr_hex).map_err(|e| {
+            jsonrpsee::types::ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid address: {}", e),
+                None::<()>,
+            )
+        })?;
+        let miner_address = qfc_types::Address::from_slice(&addr_bytes).ok_or_else(|| {
+            jsonrpsee::types::ErrorObjectOwned::owned(
+                -32602,
+                "Address must be 20 bytes",
+                None::<()>,
+            )
+        })?;
+
+        // Determine time cutoff based on period
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let cutoff_ms = match period.as_str() {
+            "day" => now_ms.saturating_sub(24 * 3600 * 1000),
+            "week" => now_ms.saturating_sub(7 * 24 * 3600 * 1000),
+            "month" => now_ms.saturating_sub(30 * 24 * 3600 * 1000),
+            "all" | _ => 0,
+        };
+
+        // Scan MINER_EARNINGS CF for this address
+        let db = self.chain.db();
+        let start_key = qfc_types::encode_miner_earning_key(&miner_address, 0);
+
+        let mut records = Vec::new();
+        let mut total_earnings = qfc_types::U256::ZERO;
+        let mut total_flops: u64 = 0;
+        let mut total_tasks: u64 = 0;
+
+        if let Ok(iter) = db.iter_from("miner_earnings", &start_key) {
+            for (key, value) in iter {
+                // Stop when we leave this miner's prefix
+                if key.len() != 28 || &key[0..20] != miner_address.as_bytes() {
+                    break;
+                }
+
+                if let Ok(earning) = qfc_types::MinerEarning::from_bytes(&value) {
+                    // Skip records before cutoff
+                    if earning.timestamp < cutoff_ms {
+                        continue;
+                    }
+
+                    total_earnings = total_earnings + earning.reward;
+                    total_flops += earning.flops;
+                    total_tasks += earning.task_count as u64;
+
+                    records.push(RpcEarningRecord {
+                        block_height: format!("0x{:x}", earning.block_height),
+                        reward: format!("0x{:x}", earning.reward.0),
+                        flops: format!("0x{:x}", earning.flops),
+                        task_count: earning.task_count,
+                        timestamp: format!("{}", earning.timestamp),
+                    });
+                }
+            }
+        }
+
+        // Reverse so newest records come first
+        records.reverse();
+
+        // Current balance
+        let balance = self
+            .chain
+            .state()
+            .get_balance(&miner_address)
+            .unwrap_or_default();
+
+        Ok(RpcMinerEarnings {
+            address: format!("0x{}", addr_hex),
+            total_earnings: format!("0x{:x}", total_earnings.0),
+            total_flops: format!("0x{:x}", total_flops),
+            total_tasks: format!("0x{:x}", total_tasks),
+            balance: format!("0x{:x}", balance.0),
+            records,
+        })
+    }
+
+    // ---- v2.0: Miner notification endpoints ----
+
+    async fn register_webhook(&self, request: RpcRegisterWebhookRequest) -> RpcResult<String> {
+        let miner_address = Self::parse_address(&request.miner_address)?;
+
+        // Verify miner is registered
+        {
+            let miners = self.registered_miners.read();
+            let public_key = miners
+                .get(&miner_address)
+                .ok_or_else(|| RpcError::Execution("Miner not registered".to_string()))?;
+
+            // Verify signature over the URL
+            let url_hash = qfc_crypto::blake3_hash(request.url.as_bytes());
+            let sig_bytes = hex::decode(
+                request
+                    .signature
+                    .strip_prefix("0x")
+                    .unwrap_or(&request.signature),
+            )
+            .map_err(|e| RpcError::Execution(format!("Invalid signature hex: {}", e)))?;
+            let signature = qfc_types::Signature::from_slice(&sig_bytes)
+                .ok_or_else(|| RpcError::Execution("Invalid signature length".to_string()))?;
+            qfc_crypto::verify_hash_signature(public_key, &url_hash, &signature)
+                .map_err(|_| RpcError::Execution("Signature verification failed".to_string()))?;
+        }
+
+        // Validate event types
+        for event in &request.events {
+            if !crate::webhook::VALID_WEBHOOK_EVENTS.contains(&event.as_str()) {
+                return Err(RpcError::Execution(format!(
+                    "Invalid event type '{}'. Valid types: {}",
+                    event,
+                    crate::webhook::VALID_WEBHOOK_EVENTS.join(", "),
+                ))
+                .into());
+            }
+        }
+
+        // Validate URL
+        if !request.url.starts_with("https://") && !request.url.starts_with("http://localhost") {
+            return Err(RpcError::Execution("Webhook URL must use HTTPS".to_string()).into());
+        }
+
+        // Generate webhook ID
+        let id_input = format!("{}{}", request.miner_address, request.url);
+        let id = hex::encode(&qfc_crypto::blake3_hash(id_input.as_bytes()).as_bytes()[..8]);
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let webhook = crate::webhook::Webhook {
+            id: id.clone(),
+            url: request.url.clone(),
+            events: request.events,
+            created_at: now,
+            active: true,
+        };
+
+        // Store webhook (max 5 per miner)
+        {
+            let mut store = self.webhook_store.write();
+            let hooks = store.entry(miner_address).or_default();
+            if hooks.len() >= 5 {
+                return Err(RpcError::Execution("Maximum 5 webhooks per miner".to_string()).into());
+            }
+            // Replace if same ID exists
+            hooks.retain(|h| h.id != id);
+            hooks.push(webhook);
+        }
+
+        info!(
+            "Webhook registered for miner {}: {}",
+            request.miner_address,
+            crate::webhook::mask_url(&request.url)
+        );
+
+        Ok(id)
+    }
+
+    async fn remove_webhook(&self, request: RpcRemoveWebhookRequest) -> RpcResult<bool> {
+        let miner_address = Self::parse_address(&request.miner_address)?;
+
+        // Verify miner is registered and signature is valid
+        {
+            let miners = self.registered_miners.read();
+            let public_key = miners
+                .get(&miner_address)
+                .ok_or_else(|| RpcError::Execution("Miner not registered".to_string()))?;
+
+            let msg_hash = qfc_crypto::blake3_hash(request.webhook_id.as_bytes());
+            let sig_bytes = hex::decode(
+                request
+                    .signature
+                    .strip_prefix("0x")
+                    .unwrap_or(&request.signature),
+            )
+            .map_err(|e| RpcError::Execution(format!("Invalid signature hex: {}", e)))?;
+            let signature = qfc_types::Signature::from_slice(&sig_bytes)
+                .ok_or_else(|| RpcError::Execution("Invalid signature length".to_string()))?;
+            qfc_crypto::verify_hash_signature(public_key, &msg_hash, &signature)
+                .map_err(|_| RpcError::Execution("Signature verification failed".to_string()))?;
+        }
+
+        let mut store = self.webhook_store.write();
+        if let Some(hooks) = store.get_mut(&miner_address) {
+            let before = hooks.len();
+            hooks.retain(|h| h.id != request.webhook_id);
+            let removed = hooks.len() < before;
+            if removed {
+                info!(
+                    "Webhook {} removed for miner {}",
+                    request.webhook_id, request.miner_address
+                );
+            }
+            Ok(removed)
+        } else {
+            Ok(false)
+        }
+    }
+
+    async fn get_webhooks(&self, address: String) -> RpcResult<Vec<RpcWebhook>> {
+        let miner_address = Self::parse_address(&address)?;
+        let store = self.webhook_store.read();
+        let hooks = store.get(&miner_address).cloned().unwrap_or_default();
+
+        Ok(hooks
+            .into_iter()
+            .map(|h| RpcWebhook {
+                id: h.id,
+                url: crate::webhook::mask_url(&h.url),
+                events: h.events,
+                created_at: format!("{}", h.created_at),
+                active: h.active,
+            })
+            .collect())
+    }
+
     // ---- v2.0: Cross-chain bridge endpoints ----
 
     async fn get_bridge_status(&self) -> RpcResult<RpcBridgeStatus> {
@@ -2504,14 +2960,20 @@ impl QfcApiServer for RpcServer {
             .unwrap()
             .as_millis() as u64;
 
+        let input_hash = qfc_crypto::blake3_hash(&input_data);
         let task_type = match request.task_type.as_str() {
             "embedding" => qfc_inference::task::ComputeTaskType::Embedding {
                 model_id,
-                input_hash: qfc_crypto::blake3_hash(&input_data),
+                input_hash,
+            },
+            "speech_to_text" => qfc_inference::task::ComputeTaskType::SpeechToText {
+                model_id,
+                audio_hash: input_hash,
+                language: request.language.clone().unwrap_or_default(),
             },
             _ => qfc_inference::task::ComputeTaskType::Embedding {
                 model_id,
-                input_hash: qfc_crypto::blake3_hash(&input_data),
+                input_hash,
             },
         };
 
@@ -2592,6 +3054,20 @@ impl QfcApiServer for RpcServer {
             "ImageClassification" => ComputeTaskType::ImageClassification {
                 model_id,
                 input_hash: qfc_types::Hash::ZERO,
+            },
+            "SpeechToText" => ComputeTaskType::SpeechToText {
+                model_id,
+                audio_hash: qfc_types::Hash::ZERO,
+                language: String::new(),
+            },
+            "ImageGeneration" => ComputeTaskType::ImageGeneration {
+                model_id,
+                prompt_hash: qfc_types::Hash::ZERO,
+                negative_prompt_hash: qfc_types::Hash::ZERO,
+                width: 512,
+                height: 512,
+                steps: 20,
+                seed: 0,
             },
             "OnnxInference" => ComputeTaskType::OnnxInference {
                 model_hash: qfc_types::Hash::ZERO,
@@ -2697,6 +3173,123 @@ impl QfcApiServer for RpcServer {
             } else {
                 break; // Task pruned
             }
+        }
+        Ok(())
+    }
+
+    async fn subscribe_miner_events(
+        &self,
+        pending: jsonrpsee::PendingSubscriptionSink,
+        address: String,
+    ) -> SubscriptionResult {
+        use jsonrpsee::SubscriptionMessage;
+
+        let miner_address = match Self::parse_address(&address) {
+            Ok(addr) => addr,
+            Err(e) => {
+                pending.reject(e).await;
+                return Ok(());
+            }
+        };
+
+        let sink = pending.accept().await?;
+        let chain = self.chain.clone();
+        let miner_hex = hex::encode(miner_address.as_bytes());
+
+        // Track last seen block height
+        let mut last_block = chain.block_number();
+
+        // Poll every 1s for new blocks containing this miner's proofs
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            if sink.is_closed() {
+                break;
+            }
+
+            let current_block = chain.block_number();
+            if current_block <= last_block {
+                continue;
+            }
+
+            for height in (last_block + 1)..=current_block {
+                if sink.is_closed() {
+                    break;
+                }
+                let block = match chain.get_block_by_number(height) {
+                    Ok(Some(b)) => b,
+                    _ => continue,
+                };
+
+                // Count this miner's proofs in the block for reward estimation
+                let miner_proofs: Vec<_> = block
+                    .inference_proofs
+                    .iter()
+                    .filter(|p| p.validator == miner_address)
+                    .collect();
+
+                if miner_proofs.is_empty() {
+                    continue;
+                }
+
+                let total_flops_in_block: u64 = block
+                    .inference_proofs
+                    .iter()
+                    .map(|p| p.flops_estimated)
+                    .sum();
+                let miner_flops: u64 = miner_proofs.iter().map(|p| p.flops_estimated).sum();
+
+                for proof in &miner_proofs {
+                    let event = RpcMinerEvent {
+                        event_type: "proof_accepted".to_string(),
+                        miner: format!("0x{}", miner_hex),
+                        block_height: Some(format!("0x{:x}", height)),
+                        task_type: Some(format!("{:?}", proof.task_type)),
+                        flops: Some(proof.flops_estimated.to_string()),
+                        reward: None,
+                        spot_checked: None,
+                        timestamp: format!("{}", block.header.timestamp),
+                        message: format!(
+                            "Proof included in block {} ({} FLOPS)",
+                            height, proof.flops_estimated
+                        ),
+                    };
+                    let msg = SubscriptionMessage::from_json(&event)?;
+                    if sink.send(msg).await.is_err() {
+                        return Ok(());
+                    }
+                }
+
+                // Emit a reward_settled event summarizing this miner's block reward
+                if total_flops_in_block > 0 {
+                    // 15% of block reward goes to miner pool, proportional to FLOPS
+                    let block_reward = U256::from_u128(qfc_types::BLOCK_REWARD);
+                    let miner_pool = block_reward * U256::from_u128(15) / U256::from_u128(100);
+                    let miner_reward = miner_pool * U256::from_u128(miner_flops as u128)
+                        / U256::from_u128(total_flops_in_block as u128);
+
+                    let event = RpcMinerEvent {
+                        event_type: "reward_settled".to_string(),
+                        miner: format!("0x{}", miner_hex),
+                        block_height: Some(format!("0x{:x}", height)),
+                        task_type: None,
+                        flops: Some(miner_flops.to_string()),
+                        reward: Some(format!("0x{:x}", miner_reward.0)),
+                        spot_checked: None,
+                        timestamp: format!("{}", block.header.timestamp),
+                        message: format!(
+                            "Reward settled: {} proofs, {} FLOPS in block {}",
+                            miner_proofs.len(),
+                            miner_flops,
+                            height,
+                        ),
+                    };
+                    let msg = SubscriptionMessage::from_json(&event)?;
+                    if sink.send(msg).await.is_err() {
+                        return Ok(());
+                    }
+                }
+            }
+            last_block = current_block;
         }
         Ok(())
     }
@@ -2824,5 +3417,21 @@ impl TxPoolApiServer for RpcServer {
             pending: format!("0x{:x}", size),
             queued: "0x0".to_string(),
         })
+    }
+}
+
+/// Format a U256 balance as human-readable QFC (1 QFC = 1e18 wei)
+fn format_qfc_balance(balance: qfc_types::U256) -> String {
+    let wei_str = format!("{}", balance);
+    if wei_str.len() <= 18 {
+        format!("0.{:0>18}", wei_str)
+    } else {
+        let (whole, frac) = wei_str.split_at(wei_str.len() - 18);
+        let frac_trimmed = frac.trim_end_matches('0');
+        if frac_trimmed.is_empty() {
+            whole.to_string()
+        } else {
+            format!("{}.{}", whole, &frac[..6.min(frac.len())])
+        }
     }
 }

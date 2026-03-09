@@ -5,8 +5,40 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use borsh::{BorshDeserialize, BorshSerialize};
+
 use crate::runtime::GpuTier;
 use crate::task::ModelId;
+
+/// Canonical format that ALL nodes must use for a given model.
+///
+/// This ensures deterministic output across different hardware:
+/// - Same quantization → same integer arithmetic → same argmax → same tokens
+/// - Eliminates FP16 vs FP32 divergence by mandating one format per model
+///
+/// Nodes that use a non-canonical format will produce different output hashes
+/// and fail spot-check verification.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize, Serialize, Deserialize,
+)]
+pub enum CanonicalFormat {
+    /// FP32 safetensors on CPU (fully deterministic, for small models ≤1B)
+    SafetensorsFp32,
+    /// GGUF Q4_K_M quantized (deterministic integer math, for larger models)
+    GgufQ4KM,
+    /// GGUF Q5_K_M quantized (higher quality, for models where Q4 isn't sufficient)
+    GgufQ5KM,
+}
+
+impl std::fmt::Display for CanonicalFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CanonicalFormat::SafetensorsFp32 => write!(f, "safetensors-fp32"),
+            CanonicalFormat::GgufQ4KM => write!(f, "gguf-q4_k_m"),
+            CanonicalFormat::GgufQ5KM => write!(f, "gguf-q5_k_m"),
+        }
+    }
+}
 
 /// Model metadata in the registry
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -23,6 +55,13 @@ pub struct ModelInfo {
     pub size_mb: u64,
     /// Whether this model is approved by governance
     pub approved: bool,
+    /// Canonical format for deterministic verification.
+    /// All nodes MUST use this format for spot-check to pass.
+    pub canonical_format: CanonicalFormat,
+    /// Blake3 hash of the model weight file (for integrity verification).
+    /// If set, downloaded weights are verified against this hash.
+    /// Prevents supply-chain attacks and ensures all miners use identical weights.
+    pub weights_hash: Option<qfc_types::Hash>,
 }
 
 /// Local model cache with LRU eviction and auto-download
@@ -159,6 +198,12 @@ impl ModelCache {
 
         // Download the model
         let downloaded = crate::download::download_model(&model_id.name)?;
+
+        // Verify weight file integrity if registry has an expected hash
+        let registry = ModelRegistry::default_v2();
+        let expected_hash = registry.get_model(model_id).and_then(|m| m.weights_hash);
+        crate::download::verify_weights_hash(&downloaded.weights_path, expected_hash)?;
+
         let size_bytes = [
             &downloaded.weights_path,
             &downloaded.tokenizer_path,
@@ -212,6 +257,8 @@ impl ModelRegistry {
                 min_tier: GpuTier::Cold,
                 size_mb: 80,
                 approved: true,
+                canonical_format: CanonicalFormat::SafetensorsFp32,
+                weights_hash: None,
             },
             ModelInfo {
                 id: ModelId::new("qfc-embed-medium", "v1.0"),
@@ -221,6 +268,8 @@ impl ModelRegistry {
                 min_tier: GpuTier::Cold,
                 size_mb: 120,
                 approved: true,
+                canonical_format: CanonicalFormat::SafetensorsFp32,
+                weights_hash: None,
             },
             ModelInfo {
                 id: ModelId::new("qfc-classify-small", "v1.0"),
@@ -230,6 +279,8 @@ impl ModelRegistry {
                 min_tier: GpuTier::Warm,
                 size_mb: 440,
                 approved: true,
+                canonical_format: CanonicalFormat::SafetensorsFp32,
+                weights_hash: None,
             },
             ModelInfo {
                 id: ModelId::new("qfc-llm-0.5b", "v1.0"),
@@ -240,6 +291,66 @@ impl ModelRegistry {
                 min_tier: GpuTier::Cold,
                 size_mb: 990,
                 approved: true,
+                canonical_format: CanonicalFormat::SafetensorsFp32,
+                weights_hash: None,
+            },
+            ModelInfo {
+                id: ModelId::new("qfc-llm-3b", "v1.0"),
+                description:
+                    "Qwen2.5-3B-Instruct-GGUF (Q4_K_M) quantized text generation for Warm tier"
+                        .to_string(),
+                min_memory_mb: 4096,
+                min_tier: GpuTier::Warm,
+                size_mb: 2200,
+                approved: true,
+                canonical_format: CanonicalFormat::GgufQ4KM,
+                weights_hash: None,
+            },
+            ModelInfo {
+                id: ModelId::new("qfc-llm-7b", "v1.0"),
+                description:
+                    "Qwen2.5-7B-Instruct-GGUF (Q4_K_M) quantized text generation for Hot tier"
+                        .to_string(),
+                min_memory_mb: 8192,
+                min_tier: GpuTier::Hot,
+                size_mb: 4700,
+                approved: true,
+                canonical_format: CanonicalFormat::GgufQ4KM,
+                weights_hash: None,
+            },
+            ModelInfo {
+                id: ModelId::new("qfc-whisper-base", "v1.0"),
+                description: "Whisper base speech-to-text model (~150MB, Cold tier, CPU-capable)"
+                    .to_string(),
+                min_memory_mb: 512,
+                min_tier: GpuTier::Cold,
+                size_mb: 150,
+                approved: true,
+                canonical_format: CanonicalFormat::SafetensorsFp32,
+                weights_hash: None,
+            },
+            ModelInfo {
+                id: ModelId::new("qfc-whisper-large", "v1.0"),
+                description: "Whisper large-v3 speech-to-text model (~1.5GB, Warm tier)"
+                    .to_string(),
+                min_memory_mb: 3072,
+                min_tier: GpuTier::Warm,
+                size_mb: 1500,
+                approved: true,
+                canonical_format: CanonicalFormat::SafetensorsFp32,
+                weights_hash: None,
+            },
+            ModelInfo {
+                id: ModelId::new("qfc-sd-1.5", "v1.0"),
+                description:
+                    "Stable Diffusion 1.5 image generation model (~4GB, Warm tier, GPU required)"
+                        .to_string(),
+                min_memory_mb: 6144,
+                min_tier: GpuTier::Warm,
+                size_mb: 4000,
+                approved: true,
+                canonical_format: CanonicalFormat::SafetensorsFp32,
+                weights_hash: None,
             },
         ];
 
@@ -259,6 +370,11 @@ impl ModelRegistry {
     /// Get all approved models
     pub fn approved_models(&self) -> Vec<&ModelInfo> {
         self.models.iter().filter(|m| m.approved).collect()
+    }
+
+    /// Get the canonical format for a model (required for deterministic verification)
+    pub fn canonical_format(&self, model_id: &ModelId) -> Option<CanonicalFormat> {
+        self.get_model(model_id).map(|m| m.canonical_format)
     }
 
     /// Get models suitable for a given tier
@@ -357,13 +473,17 @@ mod tests {
         let unknown = ModelId::new("unknown-model", "v1.0");
         assert!(!registry.is_approved(&unknown));
 
-        // Cold tier can run small/medium embedding + Qwen 0.5B
+        // Cold tier: embed-small, embed-medium, llm-0.5b, whisper-base
         let cold_models = registry.models_for_tier(GpuTier::Cold);
-        assert_eq!(cold_models.len(), 3);
+        assert_eq!(cold_models.len(), 4);
 
-        // Hot tier can run all models
+        // Warm tier: Cold + classify-small, llm-3b, whisper-large, sd-1.5
+        let warm_models = registry.models_for_tier(GpuTier::Warm);
+        assert_eq!(warm_models.len(), 8);
+
+        // Hot tier: all models (Warm + llm-7b)
         let hot_models = registry.models_for_tier(GpuTier::Hot);
-        assert_eq!(hot_models.len(), 4);
+        assert_eq!(hot_models.len(), 9);
     }
 
     #[test]

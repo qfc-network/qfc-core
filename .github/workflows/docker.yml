@@ -117,5 +117,5 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer ${{ secrets.TESTNET_DISPATCH_TOKEN }}" \
             https://api.github.com/repos/qfc-network/qfc-testnet/dispatches \
-            -d "{\"event_type\":\"image-published\",\"client_payload\":{\"tag\":\"${TAG}\",\"branch\":\"${BRANCH}\",\"sha\":\"${{ github.sha }}\"}}"
+            -d "{\"event_type\":\"image-published\",\"client_payload\":{\"service\":\"qfc-core\",\"tag\":\"${TAG}\",\"branch\":\"${BRANCH}\",\"sha\":\"${{ github.sha }}\"}}"
           echo "Dispatched qfc-testnet update: ${TAG}"

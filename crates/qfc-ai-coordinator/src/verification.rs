@@ -38,6 +38,13 @@ pub enum VerificationError {
     #[error("Model not in approved registry: {0}")]
     UnapprovedModel(String),
 
+    #[error("Non-canonical format: model {model} requires {expected}, proof used {got}")]
+    NonCanonicalFormat {
+        model: String,
+        expected: String,
+        got: String,
+    },
+
     #[error("Output hash mismatch: expected {expected}, got {got}")]
     OutputHashMismatch { expected: Hash, got: Hash },
 
@@ -97,6 +104,17 @@ pub fn verify_basic(
     if let Some(model_id) = proof.task_type.model_id() {
         if !approved_models.is_approved(model_id) {
             return Err(VerificationError::UnapprovedModel(model_id.to_string()));
+        }
+
+        // 2b. Verify proof uses the canonical format for this model
+        if let Some(expected_format) = approved_models.canonical_format(model_id) {
+            if proof.canonical_format != expected_format {
+                return Err(VerificationError::NonCanonicalFormat {
+                    model: model_id.to_string(),
+                    expected: expected_format.to_string(),
+                    got: proof.canonical_format.to_string(),
+                });
+            }
         }
     }
 
@@ -184,6 +202,7 @@ mod tests {
             150,
             1_000_000_000, // 1 GFLOPS — reasonable for embedding
             BackendType::Cpu,
+            qfc_inference::CanonicalFormat::SafetensorsFp32,
             now,
         );
 
@@ -210,6 +229,7 @@ mod tests {
             150,
             1_000_000_000,
             BackendType::Cpu,
+            qfc_inference::CanonicalFormat::SafetensorsFp32,
             old_timestamp,
         );
 
@@ -232,6 +252,7 @@ mod tests {
             150,
             1_000_000_000,
             BackendType::Cpu,
+            qfc_inference::CanonicalFormat::SafetensorsFp32,
             now - 60,
         );
         let result_recent = verify_basic(&recent_proof, now, &registry);
@@ -256,6 +277,7 @@ mod tests {
             150,
             1_000_000_000,
             BackendType::Cpu,
+            qfc_inference::CanonicalFormat::SafetensorsFp32,
             future_timestamp,
         );
 
@@ -282,6 +304,7 @@ mod tests {
             150,
             1_000_000_000,
             BackendType::Cpu,
+            qfc_inference::CanonicalFormat::SafetensorsFp32,
             now,
         );
 
@@ -305,6 +328,7 @@ mod tests {
             150,
             1_000_000_000,
             BackendType::Cpu,
+            qfc_inference::CanonicalFormat::SafetensorsFp32,
             now,
         );
 
@@ -353,6 +377,7 @@ mod tests {
             150,
             1_000_000_000,
             BackendType::Cpu,
+            qfc_inference::CanonicalFormat::SafetensorsFp32,
             now,
         );
 
@@ -400,6 +425,7 @@ mod tests {
             150,
             1_000_000_000,
             BackendType::Cpu,
+            qfc_inference::CanonicalFormat::SafetensorsFp32,
             now,
         );
 
