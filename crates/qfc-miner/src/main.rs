@@ -25,9 +25,19 @@ use tracing::info;
 async fn main() -> anyhow::Result<()> {
     let cli = MinerCli::parse();
 
-    // Setup logging
+    // Setup logging — redirect to file when TUI dashboard is active
     let filter = if cli.verbose { "debug" } else { "info" };
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    if cli.dashboard {
+        let log_file = std::fs::File::create("qfc-miner.log")
+            .expect("Failed to create log file");
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(log_file)
+            .with_ansi(false)
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(filter).init();
+    }
 
     info!("QFC AI Inference Miner v{}", env!("CARGO_PKG_VERSION"));
 
