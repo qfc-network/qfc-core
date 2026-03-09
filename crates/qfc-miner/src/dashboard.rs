@@ -18,7 +18,8 @@ pub mod tui {
     };
     use std::io::stdout;
     use std::sync::{Arc, Mutex};
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime};
+    use tracing_subscriber::layer::SubscriberExt;
 
     /// Snapshot of mining stats shared between worker and dashboard
     #[derive(Clone, Debug, Default)]
@@ -70,6 +71,17 @@ pub mod tui {
         pub gpu_mem_used_mb: u64,
         /// GPU memory total MB
         pub gpu_mem_total_mb: u64,
+
+        /// Recent log lines (newest first, max 50)
+        pub log_lines: Vec<LogLine>,
+    }
+
+    /// A captured log line for TUI display
+    #[derive(Clone, Debug)]
+    pub struct LogLine {
+        pub timestamp: String,
+        pub level: String,
+        pub message: String,
     }
 
     /// A single task log entry
@@ -106,6 +118,87 @@ pub mod tui {
         Arc::new(Mutex::new(MinerStats::default()))
     }
 
+    /// Tracing layer that captures log lines into SharedStats for TUI display
+    pub struct TuiLogLayer {
+        stats: SharedStats,
+    }
+
+    impl TuiLogLayer {
+        pub fn new(stats: SharedStats) -> Self {
+            Self { stats }
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for TuiLogLayer {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let meta = event.metadata();
+            let level = meta.level().to_string();
+
+            let mut message = String::new();
+            let mut visitor = MessageVisitor(&mut message);
+            event.record(&mut visitor);
+
+            let now = format_time_hms();
+
+            if let Ok(mut s) = self.stats.lock() {
+                s.log_lines.insert(0, LogLine {
+                    timestamp: now,
+                    level,
+                    message,
+                });
+                s.log_lines.truncate(50);
+            }
+        }
+    }
+
+    struct MessageVisitor<'a>(&'a mut String);
+
+    impl<'a> tracing::field::Visit for MessageVisitor<'a> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            use std::fmt::Write;
+            if field.name() == "message" {
+                let _ = write!(self.0, "{:?}", value);
+            } else if !self.0.is_empty() {
+                let _ = write!(self.0, " {}={:?}", field.name(), value);
+            } else {
+                let _ = write!(self.0, "{}={:?}", field.name(), value);
+            }
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            use std::fmt::Write;
+            if field.name() == "message" {
+                let _ = write!(self.0, "{}", value);
+            } else if !self.0.is_empty() {
+                let _ = write!(self.0, " {}={}", field.name(), value);
+            } else {
+                let _ = write!(self.0, "{}={}", field.name(), value);
+            }
+        }
+    }
+
+    /// Initialize tracing with TUI log capture + file output.
+    /// Logs go to both qfc-miner.log and the in-TUI log panel.
+    pub fn init_tui_tracing(stats: SharedStats, verbose: bool) {
+        let filter = if verbose { "debug" } else { "info" };
+        let log_file =
+            std::fs::File::create("qfc-miner.log").expect("Failed to create log file");
+        let file_layer = tracing_subscriber::fmt::layer()
+            .with_writer(log_file)
+            .with_ansi(false);
+        let tui_layer = TuiLogLayer::new(stats);
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_subscriber::EnvFilter::new(filter))
+            .with(file_layer)
+            .with(tui_layer);
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("Failed to set tracing subscriber");
+    }
+
     /// Run the TUI dashboard (blocking). Call from a spawned task.
     /// Returns when user presses 'q' or Ctrl+C.
     pub fn run_dashboard(stats: SharedStats) -> std::io::Result<()> {
@@ -116,11 +209,15 @@ pub mod tui {
 
         let tick_rate = Duration::from_millis(250);
         let mut last_tick = Instant::now();
+        let mut log_scroll: usize = 0;
+        let mut log_follow = true; // auto-scroll to newest
 
         loop {
+            let total_logs = stats.lock().unwrap().log_lines.len();
+
             terminal.draw(|f| {
                 let s = stats.lock().unwrap();
-                draw_ui(f, &s);
+                draw_ui(f, &s, log_scroll);
             })?;
 
             let timeout = tick_rate.saturating_sub(last_tick.elapsed());
@@ -130,10 +227,48 @@ pub mod tui {
                         match key.code {
                             KeyCode::Char('q') | KeyCode::Char('Q') => break,
                             KeyCode::Esc => break,
+                            // Log scroll
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                if log_scroll + 1 < total_logs {
+                                    log_scroll += 1;
+                                    log_follow = false;
+                                }
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                if log_scroll > 0 {
+                                    log_scroll -= 1;
+                                }
+                                if log_scroll == 0 {
+                                    log_follow = true;
+                                }
+                            }
+                            KeyCode::PageUp => {
+                                log_scroll = (log_scroll + 5).min(total_logs.saturating_sub(1));
+                                log_follow = false;
+                            }
+                            KeyCode::PageDown => {
+                                log_scroll = log_scroll.saturating_sub(5);
+                                if log_scroll == 0 {
+                                    log_follow = true;
+                                }
+                            }
+                            KeyCode::Home => {
+                                log_scroll = total_logs.saturating_sub(1);
+                                log_follow = false;
+                            }
+                            KeyCode::End => {
+                                log_scroll = 0;
+                                log_follow = true;
+                            }
                             _ => {}
                         }
                     }
                 }
+            }
+
+            // Auto-follow: reset scroll when new logs arrive
+            if log_follow {
+                log_scroll = 0;
             }
 
             if last_tick.elapsed() >= tick_rate {
@@ -146,7 +281,7 @@ pub mod tui {
         Ok(())
     }
 
-    fn draw_ui(f: &mut Frame, stats: &MinerStats) {
+    fn draw_ui(f: &mut Frame, stats: &MinerStats, log_scroll: usize) {
         let size = f.area();
 
         // Main layout: header, body, footer
@@ -160,7 +295,7 @@ pub mod tui {
             .split(size);
 
         draw_header(f, main_chunks[0], stats);
-        draw_body(f, main_chunks[1], stats);
+        draw_body(f, main_chunks[1], stats, log_scroll);
         draw_footer(f, main_chunks[2], stats);
     }
 
@@ -203,12 +338,18 @@ pub mod tui {
         f.render_widget(header, area);
     }
 
-    fn draw_body(f: &mut Frame, area: Rect, stats: &MinerStats) {
-        // Body: left (stats + earnings) | right (task log)
+    fn draw_body(f: &mut Frame, area: Rect, stats: &MinerStats, log_scroll: usize) {
+        // Body: upper (stats + task log) | lower (logs)
+        let vert_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(10), Constraint::Length(8)])
+            .split(area);
+
+        // Upper: left (stats + earnings) | right (task log)
         let body_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
-            .split(area);
+            .split(vert_chunks[0]);
 
         // Left: stats panels stacked
         let left_chunks = Layout::default()
@@ -226,6 +367,9 @@ pub mod tui {
 
         // Right: task log
         draw_task_log(f, body_chunks[1], stats);
+
+        // Lower: log panel
+        draw_log_panel(f, vert_chunks[1], stats, log_scroll);
     }
 
     fn draw_earnings_panel(f: &mut Frame, area: Rect, stats: &MinerStats) {
@@ -451,6 +595,71 @@ pub mod tui {
             s.to_string()
         }
     }
+
+    /// Format current UTC time as HH:MM:SS without external dependencies
+    fn format_time_hms() -> String {
+        let dur = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default();
+        let total_secs = dur.as_secs();
+        let h = (total_secs / 3600) % 24;
+        let m = (total_secs % 3600) / 60;
+        let s = total_secs % 60;
+        format!("{:02}:{:02}:{:02}", h, m, s)
+    }
+
+    fn draw_log_panel(f: &mut Frame, area: Rect, stats: &MinerStats, scroll: usize) {
+        let total = stats.log_lines.len();
+        let title = if scroll > 0 {
+            format!(" Logs [{}/{}] ↑↓ scroll, End=latest ", scroll, total)
+        } else {
+            " Logs [live] ↑↓/PgUp/PgDn scroll ".to_string()
+        };
+
+        let block = Block::default()
+            .title(Span::styled(
+                title,
+                Style::default()
+                    .fg(if scroll > 0 { Color::Yellow } else { Color::Blue })
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray));
+
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        let max_lines = inner.height as usize;
+        let lines: Vec<Line> = stats
+            .log_lines
+            .iter()
+            .skip(scroll)
+            .take(max_lines)
+            .map(|log| {
+                let level_color = match log.level.as_str() {
+                    "ERROR" => Color::Red,
+                    "WARN" => Color::Yellow,
+                    "INFO" => Color::Green,
+                    "DEBUG" => Color::Cyan,
+                    _ => Color::DarkGray,
+                };
+                Line::from(vec![
+                    Span::styled(
+                        format!("{} ", log.timestamp),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(
+                        format!("{:<5} ", log.level),
+                        Style::default().fg(level_color),
+                    ),
+                    Span::styled(&log.message, Style::default().fg(Color::White)),
+                ])
+            })
+            .collect();
+
+        let paragraph = Paragraph::new(lines);
+        f.render_widget(paragraph, inner);
+    }
 }
 
 // Non-TUI fallback: stats are still tracked but no UI
@@ -481,6 +690,14 @@ pub mod tui {
         pub gpu_util_pct: u32,
         pub gpu_mem_used_mb: u64,
         pub gpu_mem_total_mb: u64,
+        pub log_lines: Vec<LogLine>,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct LogLine {
+        pub timestamp: String,
+        pub level: String,
+        pub message: String,
     }
 
     #[derive(Clone, Debug)]
