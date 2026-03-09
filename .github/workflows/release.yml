@@ -21,23 +21,23 @@ jobs:
         include:
           - target: x86_64-apple-darwin
             os: macos-latest
-            features: candle
+            features: tui,candle
             label: macos-intel
           - target: aarch64-apple-darwin
             os: macos-14
-            features: metal,candle
+            features: tui,metal,candle
             label: macos-arm64
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            features: candle
+            features: tui,candle
             label: linux-x86_64
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
-            features: candle
+            features: tui,candle
             label: linux-arm64
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            features: rocm
+            features: tui,rocm
             label: linux-x86_64-rocm
 
     steps:
