@@ -131,7 +131,11 @@ async fn rpc_call<P: Serialize, R: for<'de> Deserialize<'de>>(
         ));
     }
 
-    debug!("RPC {} response: {}", method, &response_str[..response_str.len().min(200)]);
+    debug!(
+        "RPC {} response: {}",
+        method,
+        &response_str[..response_str.len().min(200)]
+    );
 
     let rpc_response: JsonRpcResponse<R> = serde_json::from_str(&response_str).map_err(|e| {
         SubmitError::SerializationError(format!(
@@ -320,10 +324,7 @@ pub async fn fetch_epoch(rpc_url: &str) -> Result<u64, SubmitError> {
             .await?
             .ok_or_else(|| SubmitError::SerializationError("No result in response".to_string()))?;
 
-    let hex_str = result
-        .number
-        .strip_prefix("0x")
-        .unwrap_or(&result.number);
+    let hex_str = result.number.strip_prefix("0x").unwrap_or(&result.number);
     u64::from_str_radix(hex_str, 16)
         .map_err(|e| SubmitError::SerializationError(format!("Invalid epoch hex: {}", e)))
 }

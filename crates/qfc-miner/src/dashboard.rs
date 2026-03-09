@@ -145,11 +145,14 @@ pub mod tui {
             let now = format_time_hms();
 
             if let Ok(mut s) = self.stats.lock() {
-                s.log_lines.insert(0, LogLine {
-                    timestamp: now,
-                    level,
-                    message,
-                });
+                s.log_lines.insert(
+                    0,
+                    LogLine {
+                        timestamp: now,
+                        level,
+                        message,
+                    },
+                );
                 s.log_lines.truncate(50);
             }
         }
@@ -185,8 +188,7 @@ pub mod tui {
     /// Logs go to both qfc-miner.log and the in-TUI log panel.
     pub fn init_tui_tracing(stats: SharedStats, verbose: bool) {
         let filter = if verbose { "debug" } else { "info" };
-        let log_file =
-            std::fs::File::create("qfc-miner.log").expect("Failed to create log file");
+        let log_file = std::fs::File::create("qfc-miner.log").expect("Failed to create log file");
         let file_layer = tracing_subscriber::fmt::layer()
             .with_writer(log_file)
             .with_ansi(false);
@@ -620,7 +622,11 @@ pub mod tui {
             .title(Span::styled(
                 title,
                 Style::default()
-                    .fg(if scroll > 0 { Color::Yellow } else { Color::Blue })
+                    .fg(if scroll > 0 {
+                        Color::Yellow
+                    } else {
+                        Color::Blue
+                    })
                     .add_modifier(Modifier::BOLD),
             ))
             .borders(Borders::ALL)
