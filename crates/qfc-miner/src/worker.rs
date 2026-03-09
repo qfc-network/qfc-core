@@ -205,7 +205,17 @@ impl InferenceWorker {
                         ) {
                             Ok(cpu_engine) => {
                                 self.engine = cpu_engine;
-                                info!("Switched to CPU backend. Retrying task...");
+                                info!("Switched to CPU backend. Reloading model and retrying...");
+                                // Reload model on the new CPU engine
+                                if let Err(e2) = self
+                                    .scheduler
+                                    .ensure_model_loaded(&model_id, &mut *self.engine)
+                                    .await
+                                {
+                                    error!("Failed to load model on CPU: {}", e2);
+                                    tasks_failed += 1;
+                                    continue;
+                                }
                                 // Retry this task with CPU
                                 match self.engine.run_inference(&task).await {
                                     Ok(r) => r,
