@@ -714,6 +714,18 @@ pub struct RpcRegisteredMiner {
     pub vram_mb: u64,
     pub backend: String,
     pub registered_at: String,
+    /// Operating system: "linux", "macos", "windows"
+    pub os: String,
+    /// CPU architecture: "x86_64", "aarch64"
+    pub arch: String,
+    /// CPU model name (e.g. "Apple M2 Pro", "AMD Ryzen 9 7950X")
+    pub cpu_model: String,
+    /// Number of CPU cores
+    pub cpu_cores: u32,
+    /// Total system memory in MB
+    pub total_memory_mb: u64,
+    /// Miner software version (e.g. "2.2.1")
+    pub version: String,
 }
 
 // ============ v2.0 P2: Miner Registration & Status Report Types ============
@@ -736,6 +748,24 @@ pub struct RpcRegisterMinerRequest {
     pub backend: String,
     /// Ed25519 signature over (miner_address || gpu_model || benchmark_score)
     pub signature: String,
+    /// Operating system: "linux", "macos", "windows"
+    #[serde(default)]
+    pub os: String,
+    /// CPU architecture: "x86_64", "aarch64"
+    #[serde(default)]
+    pub arch: String,
+    /// CPU model name (e.g. "Apple M2 Pro")
+    #[serde(default)]
+    pub cpu_model: String,
+    /// Number of CPU cores
+    #[serde(default)]
+    pub cpu_cores: u32,
+    /// Total system memory in MB
+    #[serde(default)]
+    pub total_memory_mb: u64,
+    /// Miner software version
+    #[serde(default)]
+    pub version: String,
 }
 
 /// Result of miner registration
