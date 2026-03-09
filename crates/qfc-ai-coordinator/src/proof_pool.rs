@@ -82,7 +82,7 @@ impl Default for ProofPool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use qfc_types::{Address, BackendType, ComputeTaskType, ModelId};
+    use qfc_types::{Address, BackendType, CanonicalFormat, ComputeTaskType, ModelId};
 
     fn make_proof(epoch: u64) -> InferenceProof {
         InferenceProof::new(
@@ -97,6 +97,7 @@ mod tests {
             100,
             1000,
             BackendType::Cpu,
+            CanonicalFormat::SafetensorsFp32,
             0,
         )
     }

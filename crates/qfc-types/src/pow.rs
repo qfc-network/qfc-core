@@ -185,11 +185,16 @@ impl MiningStats {
 }
 
 // ============ v2.0: AI Inference Types ============
+//
+// IMPORTANT: These types MUST stay in sync with their counterparts in
+// qfc-inference (proof.rs, runtime.rs, task.rs, model.rs).  Borsh
+// serialization is layout-sensitive — any drift in field order, enum
+// variant order, or missing fields will cause deserialization failures
+// (e.g. "Unexpected variant tag" errors).
 
 /// Backend type for AI inference execution (v2.0)
 ///
-/// Mirrors qfc_inference::BackendType but defined here for type-level
-/// use without pulling in the full inference crate.
+/// Mirrors qfc_inference::BackendType — keep variant order identical.
 #[derive(
     Clone,
     Copy,
@@ -207,6 +212,8 @@ pub enum BackendType {
     Cuda,
     /// Apple Metal GPU (Apple Silicon)
     Metal,
+    /// AMD ROCm GPU (via ONNX Runtime)
+    Rocm,
     /// CPU-only fallback
     Cpu,
 }
@@ -216,6 +223,7 @@ impl std::fmt::Display for BackendType {
         match self {
             BackendType::Cuda => write!(f, "CUDA"),
             BackendType::Metal => write!(f, "Metal"),
+            BackendType::Rocm => write!(f, "ROCm"),
             BackendType::Cpu => write!(f, "CPU"),
         }
     }
@@ -256,6 +264,8 @@ impl std::fmt::Display for ModelId {
 }
 
 /// Compute task types supported by the network (v2.0)
+///
+/// Mirrors qfc_inference::ComputeTaskType — keep variant order identical.
 #[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
 pub enum ComputeTaskType {
     /// Text generation (LLM inference)
@@ -270,11 +280,62 @@ pub enum ComputeTaskType {
     ImageClassification { model_id: ModelId, input_hash: Hash },
     /// Embedding generation
     Embedding { model_id: ModelId, input_hash: Hash },
+    /// Speech-to-text transcription (Whisper)
+    SpeechToText {
+        model_id: ModelId,
+        /// Hash of audio data (PCM f32 16kHz mono)
+        audio_hash: Hash,
+        /// Language code (e.g. "en", "zh") or empty for auto-detect
+        language: String,
+    },
+    /// Image generation (Stable Diffusion / FLUX)
+    ImageGeneration {
+        model_id: ModelId,
+        /// Hash of the text prompt
+        prompt_hash: Hash,
+        /// Hash of negative prompt (or ZERO if none)
+        negative_prompt_hash: Hash,
+        /// Output image width in pixels
+        width: u32,
+        /// Output image height in pixels
+        height: u32,
+        /// Number of diffusion steps
+        steps: u32,
+        /// Deterministic seed for reproducibility
+        seed: u64,
+    },
     /// Generic ONNX model execution
     OnnxInference { model_hash: Hash, input_hash: Hash },
 }
 
+/// Canonical model format for deterministic inference output (v2.0)
+///
+/// Mirrors qfc_inference::CanonicalFormat — keep variant order identical.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize, Serialize, Deserialize,
+)]
+pub enum CanonicalFormat {
+    /// FP32 safetensors on CPU (fully deterministic, for small models ≤1B)
+    SafetensorsFp32,
+    /// GGUF Q4_K_M quantized (deterministic integer math, for larger models)
+    GgufQ4KM,
+    /// GGUF Q5_K_M quantized (higher quality, for models where Q4 isn't sufficient)
+    GgufQ5KM,
+}
+
+impl std::fmt::Display for CanonicalFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CanonicalFormat::SafetensorsFp32 => write!(f, "safetensors-fp32"),
+            CanonicalFormat::GgufQ4KM => write!(f, "gguf-q4_k_m"),
+            CanonicalFormat::GgufQ5KM => write!(f, "gguf-q5_k_m"),
+        }
+    }
+}
+
 /// Inference proof submitted to the network (v2.0)
+///
+/// Mirrors qfc_inference::InferenceProof — keep field order identical.
 #[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
 pub struct InferenceProof {
     /// Validator/miner address
@@ -291,8 +352,10 @@ pub struct InferenceProof {
     pub execution_time_ms: u64,
     /// Estimated FLOPS of computation
     pub flops_estimated: u64,
-    /// Backend used (CUDA / Metal / CPU)
+    /// Backend used (CUDA / Metal / ROCm / CPU)
     pub backend: BackendType,
+    /// Canonical model format used for this inference
+    pub canonical_format: CanonicalFormat,
     /// Timestamp
     pub timestamp: u64,
     /// Signature over the proof
@@ -310,6 +373,7 @@ impl InferenceProof {
         execution_time_ms: u64,
         flops_estimated: u64,
         backend: BackendType,
+        canonical_format: CanonicalFormat,
         timestamp: u64,
     ) -> Self {
         Self {
@@ -321,6 +385,7 @@ impl InferenceProof {
             execution_time_ms,
             flops_estimated,
             backend,
+            canonical_format,
             timestamp,
             signature: Signature::default(),
         }
@@ -332,9 +397,6 @@ impl InferenceProof {
     }
 
     /// Get bytes for signing (excludes signature field)
-    ///
-    /// Uses Borsh serialization of all fields except signature, matching
-    /// the qfc_inference::InferenceProof implementation.
     pub fn to_bytes_without_signature(&self) -> Vec<u8> {
         #[derive(borsh::BorshSerialize)]
         struct Unsigned {
@@ -346,6 +408,7 @@ impl InferenceProof {
             execution_time_ms: u64,
             flops_estimated: u64,
             backend: BackendType,
+            canonical_format: CanonicalFormat,
             timestamp: u64,
         }
         let unsigned = Unsigned {
@@ -357,6 +420,7 @@ impl InferenceProof {
             execution_time_ms: self.execution_time_ms,
             flops_estimated: self.flops_estimated,
             backend: self.backend,
+            canonical_format: self.canonical_format,
             timestamp: self.timestamp,
         };
         borsh::to_vec(&unsigned).expect("InferenceProof serialization should not fail")
@@ -488,6 +552,7 @@ mod tests {
             150,
             5000,
             BackendType::Cpu,
+            CanonicalFormat::SafetensorsFp32,
             1234567890,
         );
 
@@ -520,6 +585,7 @@ mod tests {
             150,
             5000,
             BackendType::Cpu,
+            CanonicalFormat::SafetensorsFp32,
             1234567890,
         ));
         assert!(matches!(inf, ComputeProof::InferenceV2(_)));
@@ -529,6 +595,7 @@ mod tests {
     fn test_backend_type_display() {
         assert_eq!(format!("{}", BackendType::Cuda), "CUDA");
         assert_eq!(format!("{}", BackendType::Metal), "Metal");
+        assert_eq!(format!("{}", BackendType::Rocm), "ROCm");
         assert_eq!(format!("{}", BackendType::Cpu), "CPU");
     }
 
