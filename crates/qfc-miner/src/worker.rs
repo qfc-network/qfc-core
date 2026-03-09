@@ -328,11 +328,12 @@ impl InferenceWorker {
                             s.tasks_completed = tasks_completed;
                             s.tasks_failed = tasks_failed;
                             s.total_flops = total_flops;
+                            s.session_earnings_wei = total_earnings_wei;
                             s.status = "Waiting for tasks...".to_string();
 
                             // Add task log entry
                             let now = chrono_now_hms();
-                            let reward_str = "accepted".to_string();
+                            let reward_str = format!("{} QFC", reward_display);
                             s.task_log.insert(
                                 0,
                                 crate::dashboard::tui::TaskLogEntry {
@@ -349,9 +350,8 @@ impl InferenceWorker {
                             }
 
                             // Add to earning sparkline (micro-QFC units)
-                            // For now use FLOPS as proxy since reward_estimate
-                            // may not be present on staging
-                            s.earning_history.push((task_flops / 1_000_000).max(1));
+                            let micro_qfc = (reward_wei / 1_000_000_000_000).max(1) as u64;
+                            s.earning_history.push(micro_qfc);
                             if s.earning_history.len() > 60 {
                                 s.earning_history.remove(0);
                             }
