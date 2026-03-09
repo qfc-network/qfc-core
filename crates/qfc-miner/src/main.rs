@@ -25,8 +25,18 @@ use tracing::info;
 async fn main() -> anyhow::Result<()> {
     let cli = MinerCli::parse();
 
-    // Setup logging
+    // Initialize shared stats (needed early for TUI log layer)
+    let stats = dashboard::tui::new_shared_stats();
+
+    // Setup logging — when TUI is active, capture logs to both file and TUI panel
     let filter = if cli.verbose { "debug" } else { "info" };
+    #[cfg(feature = "tui")]
+    if cli.dashboard {
+        dashboard::tui::init_tui_tracing(stats.clone(), cli.verbose);
+    } else {
+        tracing_subscriber::fmt().with_env_filter(filter).init();
+    }
+    #[cfg(not(feature = "tui"))]
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
     info!("QFC AI Inference Miner v{}", env!("CARGO_PKG_VERSION"));
@@ -183,8 +193,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Initialize shared stats for dashboard
-    let stats = dashboard::tui::new_shared_stats();
+    // Update shared stats with initial info
     {
         let tier_str = bench_score
             .map(|(_, t)| format!("{}", t))
