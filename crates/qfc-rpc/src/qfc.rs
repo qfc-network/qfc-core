@@ -234,6 +234,13 @@ pub trait QfcApi {
     #[method(name = "getPublicTaskStatus")]
     async fn get_public_task_status(&self, task_id: String) -> RpcResult<RpcPublicTaskStatus>;
 
+    /// List public tasks with optional filtering and pagination
+    #[method(name = "listPublicTasks")]
+    async fn list_public_tasks(
+        &self,
+        filter: RpcListPublicTasksFilter,
+    ) -> RpcResult<Vec<RpcPublicTaskStatus>>;
+
     /// Estimate the fee for an inference task
     #[method(name = "estimateInferenceFee")]
     async fn estimate_inference_fee(
@@ -322,6 +329,20 @@ pub trait QfcApi {
     /// Get the EntryPoint supported by this node
     #[method(name = "supportedEntryPoints")]
     async fn supported_entry_points(&self) -> RpcResult<Vec<String>>;
+
+    // ---- v2.0: Agent Registry endpoints ----
+
+    /// Get agent info from the AgentRegistry contract
+    #[method(name = "getAgentInfo")]
+    async fn get_agent_info(&self, agent_id: String) -> RpcResult<RpcAgentInfo>;
+
+    /// List agents owned by a given address
+    #[method(name = "listAgentsByOwner")]
+    async fn list_agents_by_owner(&self, owner_address: String) -> RpcResult<Vec<RpcAgentInfo>>;
+
+    /// Validate a session key against the AgentRegistry contract
+    #[method(name = "validateSessionKey")]
+    async fn validate_session_key(&self, key_address: String) -> RpcResult<RpcSessionKeyInfo>;
 }
 
 /// Faucet response
@@ -615,6 +636,28 @@ pub struct RpcSubmitPublicTask {
     /// Language code for speech_to_text tasks (e.g. "en", "zh")
     #[serde(default)]
     pub language: Option<String>,
+}
+
+/// Filter parameters for listing public tasks
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcListPublicTasksFilter {
+    /// Filter by submitter address (hex, optional)
+    #[serde(default)]
+    pub submitter: Option<String>,
+    /// Filter by status (e.g. "Pending", "Completed", optional)
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Max results (default 50, max 200)
+    #[serde(default = "default_list_limit")]
+    pub limit: usize,
+    /// Offset for pagination (default 0)
+    #[serde(default)]
+    pub offset: usize,
+}
+
+fn default_list_limit() -> usize {
+    50
 }
 
 /// Status of a public inference task (B1: structured result envelope)
@@ -1094,4 +1137,32 @@ pub struct RpcUserOperationStatus {
     pub nonce: u64,
     pub status: String,
     pub paymaster: Option<String>,
+}
+
+// ============ v2.0: Agent Registry RPC Types ============
+
+/// Agent information from the AgentRegistry contract
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcAgentInfo {
+    pub agent_id: String,
+    pub owner: String,
+    pub agent_address: String,
+    pub permissions: Vec<u8>,
+    pub daily_limit: String,
+    pub max_per_tx: String,
+    pub deposit: String,
+    pub spent_today: String,
+    pub last_reset: String,
+    pub nonce: String,
+    pub active: bool,
+}
+
+/// Session key validation result
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcSessionKeyInfo {
+    pub valid: bool,
+    pub agent_id: String,
+    pub expires_at: String,
 }

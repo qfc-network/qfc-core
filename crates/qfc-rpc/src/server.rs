@@ -3,17 +3,18 @@
 use crate::error::RpcError;
 use crate::eth::EthApiServer;
 use crate::qfc::{
-    QfcApiServer, RpcAccountRentInfo, RpcBridgeDeposit, RpcBridgeStatus, RpcBridgeWithdrawal,
-    RpcComputeInfo, RpcEarningRecord, RpcEpoch, RpcEstimateInferenceFee, RpcFaucetResponse,
-    RpcInferenceFeeEstimate, RpcInferenceProofSubmission, RpcInferenceStats, RpcInferenceTask,
-    RpcMinerEarnings, RpcMinerEvent, RpcMinerStatusReport, RpcMinerVesting, RpcModel,
-    RpcModelProposal, RpcNodeInfo, RpcParameterOverride, RpcParameterProposal, RpcProofResult,
-    RpcProposeModelRequest, RpcProposeParameterRequest, RpcProposeSpendRequest,
-    RpcPublicTaskStatus, RpcRegisterMinerRequest, RpcRegisterMinerResult,
-    RpcRegisterWebhookRequest, RpcRegisteredMiner, RpcRemoveWebhookRequest, RpcSpendProposal,
-    RpcSubmitPublicTask, RpcTaskRequest, RpcTreasuryInfo, RpcUndelegation, RpcUserOperation,
-    RpcUserOperationStatus, RpcValidator, RpcValidatorMetrics, RpcValidatorScoreBreakdown,
-    RpcVoteModelRequest, RpcVoteParameterRequest, RpcVoteSpendRequest, RpcWebhook,
+    QfcApiServer, RpcAccountRentInfo, RpcAgentInfo, RpcBridgeDeposit, RpcBridgeStatus,
+    RpcBridgeWithdrawal, RpcComputeInfo, RpcEarningRecord, RpcEpoch, RpcEstimateInferenceFee,
+    RpcFaucetResponse, RpcInferenceFeeEstimate, RpcInferenceProofSubmission, RpcInferenceStats,
+    RpcInferenceTask, RpcListPublicTasksFilter, RpcMinerEarnings, RpcMinerEvent,
+    RpcMinerStatusReport, RpcMinerVesting, RpcModel, RpcModelProposal, RpcNodeInfo,
+    RpcParameterOverride, RpcParameterProposal, RpcProofResult, RpcProposeModelRequest,
+    RpcProposeParameterRequest, RpcProposeSpendRequest, RpcPublicTaskStatus,
+    RpcRegisterMinerRequest, RpcRegisterMinerResult, RpcRegisterWebhookRequest, RpcRegisteredMiner,
+    RpcRemoveWebhookRequest, RpcSessionKeyInfo, RpcSpendProposal, RpcSubmitPublicTask,
+    RpcTaskRequest, RpcTreasuryInfo, RpcUndelegation, RpcUserOperation, RpcUserOperationStatus,
+    RpcValidator, RpcValidatorMetrics, RpcValidatorScoreBreakdown, RpcVoteModelRequest,
+    RpcVoteParameterRequest, RpcVoteSpendRequest, RpcWebhook,
 };
 use crate::txpool::{TxPoolApiServer, TxPoolContent, TxPoolStatus};
 use crate::types::{BlockNumber, BlockTag, CallRequest, RpcBlock, RpcReceipt, RpcTransaction};
@@ -399,6 +400,178 @@ impl RpcServer {
             ParameterKey::MinDelegation => qfc_types::MIN_DELEGATION,
             ParameterKey::MaxTransactionsPerBlock => qfc_types::MAX_TRANSACTIONS_PER_BLOCK as u128,
         }
+    }
+}
+
+/// AgentRegistry contract address on testnet
+const AGENT_REGISTRY_ADDRESS: &str = "7791dfa4d489f3d524708cbc0caa8689b76322b3";
+
+/// ABI helper: encode a Solidity function call with a single string argument.
+/// Returns the 4-byte selector + ABI-encoded string.
+fn abi_encode_string_call(selector: [u8; 4], arg: &str) -> Vec<u8> {
+    let arg_bytes = arg.as_bytes();
+    let mut data = Vec::with_capacity(4 + 32 + 32 + ((arg_bytes.len() + 31) / 32) * 32);
+    data.extend_from_slice(&selector);
+    // offset to string data (always 0x20 for single string param)
+    let mut offset = [0u8; 32];
+    offset[31] = 0x20;
+    data.extend_from_slice(&offset);
+    // string length
+    let mut len_word = [0u8; 32];
+    len_word[24..32].copy_from_slice(&(arg_bytes.len() as u64).to_be_bytes());
+    data.extend_from_slice(&len_word);
+    // string data padded to 32 bytes
+    data.extend_from_slice(arg_bytes);
+    let pad = (32 - (arg_bytes.len() % 32)) % 32;
+    data.extend(std::iter::repeat(0u8).take(pad));
+    data
+}
+
+/// ABI helper: encode a Solidity function call with a single address argument.
+fn abi_encode_address_call(selector: [u8; 4], addr: &Address) -> Vec<u8> {
+    let mut data = vec![0u8; 4 + 32];
+    data[..4].copy_from_slice(&selector);
+    // address is left-padded to 32 bytes (last 20 bytes)
+    data[4 + 12..4 + 32].copy_from_slice(addr.as_bytes());
+    data
+}
+
+/// Read a uint256 from ABI-encoded output at a given 32-byte word offset.
+fn abi_read_u256(output: &[u8], word: usize) -> String {
+    let start = word * 32;
+    if start + 32 > output.len() {
+        return "0x0".to_string();
+    }
+    let slice = &output[start..start + 32];
+    let trimmed = hex::encode(slice).trim_start_matches('0').to_string();
+    format!("0x{}", if trimmed.is_empty() { "0" } else { &trimmed })
+}
+
+/// Read a uint256 as raw bytes from ABI output at a 32-byte word offset.
+fn abi_read_u256_raw(output: &[u8], word: usize) -> [u8; 32] {
+    let start = word * 32;
+    if start + 32 > output.len() {
+        return [0u8; 32];
+    }
+    let mut buf = [0u8; 32];
+    buf.copy_from_slice(&output[start..start + 32]);
+    buf
+}
+
+/// Read an address from ABI-encoded output at a given word offset.
+fn abi_read_address(output: &[u8], word: usize) -> String {
+    let start = word * 32;
+    if start + 32 > output.len() {
+        return "0x0000000000000000000000000000000000000000".to_string();
+    }
+    // address is in the last 20 bytes of the 32-byte word
+    format!("0x{}", hex::encode(&output[start + 12..start + 32]))
+}
+
+/// Read a bool from ABI-encoded output at a given word offset.
+fn abi_read_bool(output: &[u8], word: usize) -> bool {
+    let start = word * 32;
+    if start + 32 > output.len() {
+        return false;
+    }
+    output[start + 31] != 0
+}
+
+/// Read a dynamic string from ABI-encoded output given a base offset and the word
+/// containing the relative offset to the string data.
+fn abi_read_string(output: &[u8], base: usize, offset_word: usize) -> String {
+    let rel_offset_start = offset_word * 32;
+    if rel_offset_start + 32 > output.len() {
+        return String::new();
+    }
+    let rel_raw = abi_read_u256_raw(output, offset_word);
+    let rel = u64::from_be_bytes(rel_raw[24..32].try_into().unwrap_or([0; 8])) as usize;
+    let abs = base + rel;
+    if abs + 32 > output.len() {
+        return String::new();
+    }
+    let len_raw = &output[abs..abs + 32];
+    let len = u64::from_be_bytes(len_raw[24..32].try_into().unwrap_or([0; 8])) as usize;
+    let data_start = abs + 32;
+    if data_start + len > output.len() {
+        return String::new();
+    }
+    String::from_utf8_lossy(&output[data_start..data_start + len]).to_string()
+}
+
+/// Read a dynamic uint8[] array from ABI-encoded output.
+fn abi_read_uint8_array(output: &[u8], base: usize, offset_word: usize) -> Vec<u8> {
+    let rel_raw = abi_read_u256_raw(output, offset_word);
+    let rel = u64::from_be_bytes(rel_raw[24..32].try_into().unwrap_or([0; 8])) as usize;
+    let abs = base + rel;
+    if abs + 32 > output.len() {
+        return Vec::new();
+    }
+    let len_raw = &output[abs..abs + 32];
+    let len = u64::from_be_bytes(len_raw[24..32].try_into().unwrap_or([0; 8])) as usize;
+    let mut result = Vec::with_capacity(len);
+    for i in 0..len {
+        let elem_start = abs + 32 + i * 32;
+        if elem_start + 32 > output.len() {
+            break;
+        }
+        result.push(output[elem_start + 31]);
+    }
+    result
+}
+
+/// Parse the getAgent tuple output into RpcAgentInfo.
+/// tuple(string,address,address,uint8[],uint256,uint256,uint256,uint256,uint256,uint256,bool)
+fn parse_agent_info(agent_id: &str, output: &[u8]) -> RpcAgentInfo {
+    // The output is a tuple starting at an offset pointer.
+    // For a function returning a single tuple, the first 32 bytes is the offset to the tuple data.
+    let tuple_offset = {
+        let raw = abi_read_u256_raw(output, 0);
+        u64::from_be_bytes(raw[24..32].try_into().unwrap_or([0; 8])) as usize
+    };
+    let base = tuple_offset;
+    // Word layout within the tuple:
+    // 0: offset to string (agentId)
+    // 1: owner address
+    // 2: agentAddress
+    // 3: offset to uint8[] permissions
+    // 4: dailyLimit
+    // 5: maxPerTx
+    // 6: deposit
+    // 7: spentToday
+    // 8: lastReset
+    // 9: nonce
+    // 10: active (bool)
+    let tuple_data = if base < output.len() {
+        &output[base..]
+    } else {
+        &[]
+    };
+
+    let _agent_id_str = abi_read_string(tuple_data, 0, 0);
+    let owner = abi_read_address(tuple_data, 1);
+    let agent_address = abi_read_address(tuple_data, 2);
+    let permissions = abi_read_uint8_array(tuple_data, 0, 3);
+    let daily_limit = abi_read_u256(tuple_data, 4);
+    let max_per_tx = abi_read_u256(tuple_data, 5);
+    let deposit = abi_read_u256(tuple_data, 6);
+    let spent_today = abi_read_u256(tuple_data, 7);
+    let last_reset = abi_read_u256(tuple_data, 8);
+    let nonce = abi_read_u256(tuple_data, 9);
+    let active = abi_read_bool(tuple_data, 10);
+
+    RpcAgentInfo {
+        agent_id: agent_id.to_string(),
+        owner,
+        agent_address,
+        permissions,
+        daily_limit,
+        max_per_tx,
+        deposit,
+        spent_today,
+        last_reset,
+        nonce,
+        active,
     }
 }
 
@@ -3092,6 +3265,32 @@ impl QfcApiServer for RpcServer {
         }
     }
 
+    async fn list_public_tasks(
+        &self,
+        filter: RpcListPublicTasksFilter,
+    ) -> RpcResult<Vec<RpcPublicTaskStatus>> {
+        let submitter = filter
+            .submitter
+            .as_deref()
+            .map(Self::parse_address)
+            .transpose()?;
+
+        let pool_filter = qfc_ai_coordinator::PublicTaskFilter {
+            submitter,
+            status: filter.status,
+            limit: filter.limit,
+            offset: filter.offset,
+        };
+
+        let pool = self.task_pool.read();
+        let tasks = pool
+            .list_public_tasks(&pool_filter)
+            .into_iter()
+            .map(Self::build_task_status)
+            .collect();
+        Ok(tasks)
+    }
+
     async fn estimate_inference_fee(
         &self,
         request: RpcEstimateInferenceFee,
@@ -3359,6 +3558,142 @@ impl QfcApiServer for RpcServer {
             last_block = current_block;
         }
         Ok(())
+    }
+
+    // ---- v2.0: Agent Registry endpoints ----
+
+    async fn get_agent_info(&self, agent_id: String) -> RpcResult<RpcAgentInfo> {
+        let contract_addr = Address::from_slice(
+            &hex::decode(AGENT_REGISTRY_ADDRESS).map_err(|e| RpcError::Internal(e.to_string()))?,
+        )
+        .ok_or_else(|| RpcError::Internal("Invalid AgentRegistry address".into()))?;
+
+        // getAgent(string) selector: keccak256("getAgent(string)")[:4]
+        let selector: [u8; 4] = [0xc2, 0xbc, 0x2e, 0xfc];
+        let calldata = abi_encode_string_call(selector, &agent_id);
+
+        let (success, output, _gas) = self
+            .chain
+            .simulate_call(None, Some(contract_addr), U256::ZERO, calldata, None)
+            .map_err(|e| RpcError::Execution(e.to_string()))?;
+
+        if !success {
+            return Err(RpcError::Execution("getAgent call reverted".into()).into());
+        }
+
+        Ok(parse_agent_info(&agent_id, &output))
+    }
+
+    async fn list_agents_by_owner(&self, owner_address: String) -> RpcResult<Vec<RpcAgentInfo>> {
+        let owner = Self::parse_address(&owner_address)?;
+        let contract_addr = Address::from_slice(
+            &hex::decode(AGENT_REGISTRY_ADDRESS).map_err(|e| RpcError::Internal(e.to_string()))?,
+        )
+        .ok_or_else(|| RpcError::Internal("Invalid AgentRegistry address".into()))?;
+
+        // getAgentsByOwner(address) selector: keccak256("getAgentsByOwner(address)")[:4]
+        let selector: [u8; 4] = [0xd1, 0x05, 0x3b, 0x95];
+        let calldata = abi_encode_address_call(selector, &owner);
+
+        let (success, output, _gas) = self
+            .chain
+            .simulate_call(None, Some(contract_addr), U256::ZERO, calldata, None)
+            .map_err(|e| RpcError::Execution(e.to_string()))?;
+
+        if !success {
+            return Err(RpcError::Execution("getAgentsByOwner call reverted".into()).into());
+        }
+
+        // Output is an ABI-encoded array of strings (agent IDs).
+        // We fetch each agent individually.
+        let mut agents = Vec::new();
+
+        // Decode the string[] return: offset -> length -> [offsets] -> [string data]
+        if output.len() >= 64 {
+            let arr_offset = {
+                let raw = abi_read_u256_raw(&output, 0);
+                u64::from_be_bytes(raw[24..32].try_into().unwrap_or([0; 8])) as usize
+            };
+            if arr_offset + 32 <= output.len() {
+                let arr_len = {
+                    let raw = abi_read_u256_raw(&output, arr_offset / 32);
+                    u64::from_be_bytes(raw[24..32].try_into().unwrap_or([0; 8])) as usize
+                };
+                let arr_data = &output[arr_offset..];
+                for i in 0..arr_len {
+                    let id_str = abi_read_string(arr_data, 32, 1 + i);
+                    if !id_str.is_empty() {
+                        match self.get_agent_info(id_str.clone()).await {
+                            Ok(info) => agents.push(info),
+                            Err(e) => {
+                                tracing::warn!("Failed to load agent {}: {}", id_str, e);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(agents)
+    }
+
+    async fn validate_session_key(&self, key_address: String) -> RpcResult<RpcSessionKeyInfo> {
+        let key_addr = Self::parse_address(&key_address)?;
+        let contract_addr = Address::from_slice(
+            &hex::decode(AGENT_REGISTRY_ADDRESS).map_err(|e| RpcError::Internal(e.to_string()))?,
+        )
+        .ok_or_else(|| RpcError::Internal("Invalid AgentRegistry address".into()))?;
+
+        // isSessionKeyValid(address) selector: keccak256("isSessionKeyValid(address)")[:4]
+        let is_valid_selector: [u8; 4] = [0x9d, 0x3a, 0x1b, 0x8e];
+        let calldata_valid = abi_encode_address_call(is_valid_selector, &key_addr);
+
+        let (success, output_valid, _gas) = self
+            .chain
+            .simulate_call(None, Some(contract_addr), U256::ZERO, calldata_valid, None)
+            .map_err(|e| RpcError::Execution(e.to_string()))?;
+
+        if !success {
+            return Ok(RpcSessionKeyInfo {
+                valid: false,
+                agent_id: String::new(),
+                expires_at: "0x0".to_string(),
+            });
+        }
+
+        let valid = abi_read_bool(&output_valid, 0);
+
+        // getAgentForSessionKey(address) selector: keccak256("getAgentForSessionKey(address)")[:4]
+        let get_agent_selector: [u8; 4] = [0x4a, 0x61, 0xbc, 0x42];
+        let calldata_agent = abi_encode_address_call(get_agent_selector, &key_addr);
+
+        let (success2, output_agent, _gas2) = self
+            .chain
+            .simulate_call(None, Some(contract_addr), U256::ZERO, calldata_agent, None)
+            .map_err(|e| RpcError::Execution(e.to_string()))?;
+
+        let (agent_id, expires_at) = if success2 && output_agent.len() >= 64 {
+            // Returns (string agentId, uint256 expiresAt)
+            let offset = {
+                let raw = abi_read_u256_raw(&output_agent, 0);
+                u64::from_be_bytes(raw[24..32].try_into().unwrap_or([0; 8])) as usize
+            };
+            let aid = if offset + 32 <= output_agent.len() {
+                abi_read_string(&output_agent, 0, 0)
+            } else {
+                String::new()
+            };
+            let exp = abi_read_u256(&output_agent, 1);
+            (aid, exp)
+        } else {
+            (String::new(), "0x0".to_string())
+        };
+
+        Ok(RpcSessionKeyInfo {
+            valid,
+            agent_id,
+            expires_at,
+        })
     }
 }
 
