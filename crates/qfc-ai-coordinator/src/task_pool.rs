@@ -58,6 +58,9 @@ struct AssignedTask {
 /// Default timeout for assigned tasks before reassignment (30 seconds)
 const ASSIGNMENT_TIMEOUT_MS: u64 = 30_000;
 
+/// How long completed/expired/failed tasks are retained for querying (1 hour)
+const COMPLETED_RETENTION_MS: u64 = 3_600_000;
+
 /// Pool of pending inference tasks to be assigned to miners
 pub struct TaskPool {
     /// Pending tasks, ordered by creation time
@@ -76,6 +79,8 @@ pub struct TaskPool {
     redundant_assignments: HashMap<Hash, Vec<Address>>,
     /// How many miners to assign for redundant tasks
     redundancy_count: usize,
+    /// Completed/expired/failed tasks retained for querying, with expiry timestamp (ms)
+    completed_tasks: HashMap<Hash, (PublicTask, u64)>,
 }
 
 impl TaskPool {
@@ -89,6 +94,7 @@ impl TaskPool {
             assigned: HashMap::new(),
             redundant_assignments: HashMap::new(),
             redundancy_count: 2,
+            completed_tasks: HashMap::new(),
         }
     }
 
@@ -245,16 +251,18 @@ impl TaskPool {
         task_id
     }
 
-    /// Get a public task by task ID
+    /// Get a public task by task ID (checks active tasks, then retained completed tasks)
     pub fn get_public_task(&self, task_id: &Hash) -> Option<&PublicTask> {
-        self.public_tasks.get(task_id)
+        self.public_tasks
+            .get(task_id)
+            .or_else(|| self.completed_tasks.get(task_id).map(|(t, _)| t))
     }
 
     /// Get a public task by input_hash (used by settlement to match proofs to tasks)
     pub fn get_public_task_by_input_hash(&self, input_hash: &Hash) -> Option<&PublicTask> {
         self.input_hash_index
             .get(input_hash)
-            .and_then(|task_id| self.public_tasks.get(task_id))
+            .and_then(|task_id| self.get_public_task(task_id))
     }
 
     /// Mark a public task as completed by task_id
@@ -266,12 +274,14 @@ impl TaskPool {
         execution_time_ms: u64,
     ) -> bool {
         self.assigned.remove(task_id);
-        if let Some(task) = self.public_tasks.get_mut(task_id) {
+        if let Some(mut task) = self.public_tasks.remove(task_id) {
             task.status = PublicTaskStatus::Completed {
                 result,
                 miner,
                 execution_time_ms,
             };
+            let retain_until = now_ms() + COMPLETED_RETENTION_MS;
+            self.completed_tasks.insert(*task_id, (task, retain_until));
             true
         } else {
             false
@@ -345,10 +355,19 @@ impl TaskPool {
                 self.input_hash_index.remove(&input_hash);
                 self.assigned.remove(&id);
                 task.status = PublicTaskStatus::Expired;
+                // Retain for querying before returning for refund
+                let retain_until = now + COMPLETED_RETENTION_MS;
+                self.completed_tasks.insert(id, (task.clone(), retain_until));
                 expired.push(task);
             }
         }
         expired
+    }
+
+    /// Remove entries from completed_tasks whose retention period has elapsed
+    pub fn prune_retained_completed(&mut self) {
+        let now = now_ms();
+        self.completed_tasks.retain(|_, (_, expiry)| now < *expiry);
     }
 
     /// Generate a unique task ID
