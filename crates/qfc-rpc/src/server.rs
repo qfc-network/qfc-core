@@ -3623,7 +3623,7 @@ impl QfcApiServer for RpcServer {
                 for i in 0..arr_len {
                     let id_str = abi_read_string(arr_data, 32, 1 + i);
                     if !id_str.is_empty() {
-                        match self.get_agent_info(id_str).await {
+                        match self.get_agent_info(id_str.clone()).await {
                             Ok(info) => agents.push(info),
                             Err(e) => {
                                 tracing::warn!("Failed to load agent {}: {}", id_str, e);
