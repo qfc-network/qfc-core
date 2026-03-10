@@ -202,6 +202,9 @@ async fn main() -> anyhow::Result<()> {
         s.address = format!("0x{}", wallet_hex);
         s.backend = format!("{}", backend);
         s.tier = tier_str;
+        s.device_name = hw.device_name.clone();
+        s.device_memory_mb = hw.memory_mb;
+        s.compute_cores = hw.compute_cores;
         s.rpc_url = validator_rpc.clone();
         s.session_start = Some(std::time::Instant::now());
         s.status = "Starting...".to_string();
