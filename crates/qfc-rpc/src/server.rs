@@ -3,18 +3,18 @@
 use crate::error::RpcError;
 use crate::eth::EthApiServer;
 use crate::qfc::{
-    QfcApiServer, RpcAccountRentInfo, RpcBridgeDeposit, RpcBridgeStatus, RpcBridgeWithdrawal,
-    RpcComputeInfo, RpcEarningRecord, RpcEpoch, RpcEstimateInferenceFee, RpcFaucetResponse,
-    RpcInferenceFeeEstimate, RpcInferenceProofSubmission, RpcInferenceStats, RpcInferenceTask,
-    RpcListPublicTasksFilter, RpcMinerEarnings, RpcMinerEvent, RpcMinerStatusReport,
-    RpcMinerVesting, RpcModel, RpcModelProposal, RpcNodeInfo, RpcParameterOverride,
-    RpcParameterProposal, RpcProofResult, RpcProposeModelRequest, RpcProposeParameterRequest,
-    RpcProposeSpendRequest, RpcPublicTaskStatus, RpcRegisterMinerRequest, RpcRegisterMinerResult,
-    RpcRegisterWebhookRequest, RpcRegisteredMiner, RpcRemoveWebhookRequest, RpcSpendProposal,
-    RpcSubmitPublicTask, RpcTaskRequest, RpcTreasuryInfo, RpcUndelegation, RpcUserOperation,
-    RpcUserOperationStatus, RpcValidator, RpcValidatorMetrics, RpcValidatorScoreBreakdown,
-    RpcAgentInfo, RpcSessionKeyInfo,
-    RpcVoteModelRequest, RpcVoteParameterRequest, RpcVoteSpendRequest, RpcWebhook,
+    QfcApiServer, RpcAccountRentInfo, RpcAgentInfo, RpcBridgeDeposit, RpcBridgeStatus,
+    RpcBridgeWithdrawal, RpcComputeInfo, RpcEarningRecord, RpcEpoch, RpcEstimateInferenceFee,
+    RpcFaucetResponse, RpcInferenceFeeEstimate, RpcInferenceProofSubmission, RpcInferenceStats,
+    RpcInferenceTask, RpcListPublicTasksFilter, RpcMinerEarnings, RpcMinerEvent,
+    RpcMinerStatusReport, RpcMinerVesting, RpcModel, RpcModelProposal, RpcNodeInfo,
+    RpcParameterOverride, RpcParameterProposal, RpcProofResult, RpcProposeModelRequest,
+    RpcProposeParameterRequest, RpcProposeSpendRequest, RpcPublicTaskStatus,
+    RpcRegisterMinerRequest, RpcRegisterMinerResult, RpcRegisterWebhookRequest, RpcRegisteredMiner,
+    RpcRemoveWebhookRequest, RpcSessionKeyInfo, RpcSpendProposal, RpcSubmitPublicTask,
+    RpcTaskRequest, RpcTreasuryInfo, RpcUndelegation, RpcUserOperation, RpcUserOperationStatus,
+    RpcValidator, RpcValidatorMetrics, RpcValidatorScoreBreakdown, RpcVoteModelRequest,
+    RpcVoteParameterRequest, RpcVoteSpendRequest, RpcWebhook,
 };
 use crate::txpool::{TxPoolApiServer, TxPoolContent, TxPoolStatus};
 use crate::types::{BlockNumber, BlockTag, CallRequest, RpcBlock, RpcReceipt, RpcTransaction};
@@ -443,9 +443,8 @@ fn abi_read_u256(output: &[u8], word: usize) -> String {
         return "0x0".to_string();
     }
     let slice = &output[start..start + 32];
-    format!("0x{}", hex::encode(slice).trim_start_matches('0'))
-        .replace("0x", "0x")
-        .to_string()
+    let trimmed = hex::encode(slice).trim_start_matches('0').to_string();
+    format!("0x{}", if trimmed.is_empty() { "0" } else { &trimmed })
 }
 
 /// Read a uint256 as raw bytes from ABI output at a 32-byte word offset.
@@ -3565,8 +3564,7 @@ impl QfcApiServer for RpcServer {
 
     async fn get_agent_info(&self, agent_id: String) -> RpcResult<RpcAgentInfo> {
         let contract_addr = Address::from_slice(
-            &hex::decode(AGENT_REGISTRY_ADDRESS)
-                .map_err(|e| RpcError::Internal(e.to_string()))?,
+            &hex::decode(AGENT_REGISTRY_ADDRESS).map_err(|e| RpcError::Internal(e.to_string()))?,
         )
         .ok_or_else(|| RpcError::Internal("Invalid AgentRegistry address".into()))?;
 
@@ -3589,8 +3587,7 @@ impl QfcApiServer for RpcServer {
     async fn list_agents_by_owner(&self, owner_address: String) -> RpcResult<Vec<RpcAgentInfo>> {
         let owner = Self::parse_address(&owner_address)?;
         let contract_addr = Address::from_slice(
-            &hex::decode(AGENT_REGISTRY_ADDRESS)
-                .map_err(|e| RpcError::Internal(e.to_string()))?,
+            &hex::decode(AGENT_REGISTRY_ADDRESS).map_err(|e| RpcError::Internal(e.to_string()))?,
         )
         .ok_or_else(|| RpcError::Internal("Invalid AgentRegistry address".into()))?;
 
@@ -3604,9 +3601,7 @@ impl QfcApiServer for RpcServer {
             .map_err(|e| RpcError::Execution(e.to_string()))?;
 
         if !success {
-            return Err(
-                RpcError::Execution("getAgentsByOwner call reverted".into()).into(),
-            );
+            return Err(RpcError::Execution("getAgentsByOwner call reverted".into()).into());
         }
 
         // Output is an ABI-encoded array of strings (agent IDs).
@@ -3630,7 +3625,9 @@ impl QfcApiServer for RpcServer {
                     if !id_str.is_empty() {
                         match self.get_agent_info(id_str).await {
                             Ok(info) => agents.push(info),
-                            Err(_) => {} // skip agents that fail to load
+                            Err(e) => {
+                                tracing::warn!("Failed to load agent {}: {}", id_str, e);
+                            }
                         }
                     }
                 }
@@ -3643,8 +3640,7 @@ impl QfcApiServer for RpcServer {
     async fn validate_session_key(&self, key_address: String) -> RpcResult<RpcSessionKeyInfo> {
         let key_addr = Self::parse_address(&key_address)?;
         let contract_addr = Address::from_slice(
-            &hex::decode(AGENT_REGISTRY_ADDRESS)
-                .map_err(|e| RpcError::Internal(e.to_string()))?,
+            &hex::decode(AGENT_REGISTRY_ADDRESS).map_err(|e| RpcError::Internal(e.to_string()))?,
         )
         .ok_or_else(|| RpcError::Internal("Invalid AgentRegistry address".into()))?;
 
@@ -3654,13 +3650,7 @@ impl QfcApiServer for RpcServer {
 
         let (success, output_valid, _gas) = self
             .chain
-            .simulate_call(
-                None,
-                Some(contract_addr),
-                U256::ZERO,
-                calldata_valid,
-                None,
-            )
+            .simulate_call(None, Some(contract_addr), U256::ZERO, calldata_valid, None)
             .map_err(|e| RpcError::Execution(e.to_string()))?;
 
         if !success {
@@ -3679,13 +3669,7 @@ impl QfcApiServer for RpcServer {
 
         let (success2, output_agent, _gas2) = self
             .chain
-            .simulate_call(
-                None,
-                Some(contract_addr),
-                U256::ZERO,
-                calldata_agent,
-                None,
-            )
+            .simulate_call(None, Some(contract_addr), U256::ZERO, calldata_agent, None)
             .map_err(|e| RpcError::Execution(e.to_string()))?;
 
         let (agent_id, expires_at) = if success2 && output_agent.len() >= 64 {
