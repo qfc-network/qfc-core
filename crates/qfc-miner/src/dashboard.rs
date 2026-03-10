@@ -29,10 +29,16 @@ pub mod tui {
     pub struct MinerStats {
         /// Miner wallet address
         pub address: String,
-        /// Backend name
+        /// Backend name (CPU, Metal, CUDA, ROCm, CoreML)
         pub backend: String,
         /// GPU tier
         pub tier: String,
+        /// Device name (e.g. "Apple M2 Pro", "NVIDIA RTX 4090")
+        pub device_name: String,
+        /// Device memory in MB
+        pub device_memory_mb: u64,
+        /// Compute cores
+        pub compute_cores: u32,
         /// Validator RPC URL
         pub rpc_url: String,
 
@@ -396,6 +402,18 @@ pub mod tui {
         let mins = (duration.as_secs() % 3600) / 60;
         let secs = duration.as_secs() % 60;
 
+        let backend_color = match stats.backend.as_str() {
+            "Metal" | "CoreML" => Color::Magenta,
+            "CUDA" => Color::Green,
+            "ROCm" => Color::Red,
+            _ => Color::DarkGray, // CPU
+        };
+        let backend_label = if stats.backend == "CPU" {
+            " CPU ".to_string()
+        } else {
+            format!(" {} ", stats.backend)
+        };
+
         let header_text = Line::from(vec![
             Span::styled(
                 " QFC INFERENCE MINER ",
@@ -404,15 +422,22 @@ pub mod tui {
                     .bg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
+            Span::raw(" "),
+            Span::styled(
+                backend_label,
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(backend_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" T{}", stats.tier),
+                Style::default().fg(backend_color),
+            ),
             Span::raw("  "),
             Span::styled(
                 format!("{}", stats.address),
                 Style::default().fg(Color::Yellow),
-            ),
-            Span::raw("  "),
-            Span::styled(
-                format!("{}  T{}", stats.backend, stats.tier),
-                Style::default().fg(Color::DarkGray),
             ),
             Span::raw("  "),
             Span::styled(
@@ -597,8 +622,100 @@ pub mod tui {
     }
 
     fn draw_gpu_panel(f: &mut Frame, area: Rect, stats: &MinerStats) {
-        // Sparkline of recent earnings
-        let block = Block::default()
+        // Split into hardware info (top) and sparkline (bottom)
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(6), Constraint::Min(3)])
+            .split(area);
+
+        // --- Hardware info panel ---
+        let backend_color = match stats.backend.as_str() {
+            "Metal" | "CoreML" => Color::Magenta,
+            "CUDA" => Color::Green,
+            "ROCm" => Color::Red,
+            _ => Color::DarkGray,
+        };
+
+        let is_gpu = stats.backend != "CPU" && !stats.backend.is_empty();
+        let accel_indicator = if is_gpu { "▲ GPU" } else { "▽ CPU" };
+        let accel_color = if is_gpu { Color::Green } else { Color::Yellow };
+
+        let device_display = if stats.device_name.is_empty() {
+            stats.backend.clone()
+        } else {
+            stats.device_name.clone()
+        };
+
+        let mem_line = if stats.gpu_mem_total_mb > 0 {
+            format!("{} / {} MB", stats.gpu_mem_used_mb, stats.gpu_mem_total_mb)
+        } else if stats.device_memory_mb > 0 {
+            format!("{} MB", stats.device_memory_mb)
+        } else {
+            "—".to_string()
+        };
+
+        let mut hw_lines = vec![
+            Line::from(vec![
+                Span::styled("  Accel:   ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    accel_indicator,
+                    Style::default()
+                        .fg(accel_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("  {}", stats.backend),
+                    Style::default().fg(backend_color),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("  Device:  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(device_display, Style::default().fg(Color::White)),
+            ]),
+            Line::from(vec![
+                Span::styled("  Memory:  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(mem_line, Style::default().fg(Color::White)),
+            ]),
+        ];
+
+        // GPU temp/utilization (if available)
+        if stats.gpu_temp_c > 0 || stats.gpu_util_pct > 0 {
+            let temp_color = if stats.gpu_temp_c > 85 {
+                Color::Red
+            } else if stats.gpu_temp_c > 70 {
+                Color::Yellow
+            } else {
+                Color::Green
+            };
+            hw_lines.push(Line::from(vec![
+                Span::styled("  Status:  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{}°C", stats.gpu_temp_c),
+                    Style::default().fg(temp_color),
+                ),
+                Span::styled("  ", Style::default()),
+                Span::styled(
+                    format!("{}% util", stats.gpu_util_pct),
+                    Style::default().fg(Color::White),
+                ),
+            ]));
+        }
+
+        let hw_block = Block::default()
+            .title(Span::styled(
+                " Hardware ",
+                Style::default()
+                    .fg(backend_color)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray));
+
+        let hw_paragraph = Paragraph::new(hw_lines).block(hw_block);
+        f.render_widget(hw_paragraph, chunks[0]);
+
+        // --- Sparkline ---
+        let spark_block = Block::default()
             .title(Span::styled(
                 " Earnings History ",
                 Style::default()
@@ -610,15 +727,15 @@ pub mod tui {
 
         if !stats.earning_history.is_empty() {
             let sparkline = Sparkline::default()
-                .block(block)
+                .block(spark_block)
                 .data(&stats.earning_history)
                 .style(Style::default().fg(Color::Green));
-            f.render_widget(sparkline, area);
+            f.render_widget(sparkline, chunks[1]);
         } else {
             let paragraph = Paragraph::new("  Waiting for tasks...")
-                .block(block)
+                .block(spark_block)
                 .style(Style::default().fg(Color::DarkGray));
-            f.render_widget(paragraph, area);
+            f.render_widget(paragraph, chunks[1]);
         }
     }
 
