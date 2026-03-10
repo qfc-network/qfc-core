@@ -46,3 +46,5 @@ metal = ["candle", "candle-core/metal"]
 onnx = ["dep:ort"]
 # AMD ROCm GPU support via ONNX Runtime
 rocm = ["onnx"]
+# CoreML (Apple Silicon Metal/ANE) via ONNX Runtime
+coreml = ["onnx", "ort/coreml"]

@@ -114,14 +114,21 @@ pub fn create_engine_for_backend(
             "CUDA (not compiled with cuda feature)".to_string(),
         )),
 
-        #[cfg(feature = "metal")]
+        // Metal: prefer ONNX+CoreML (full op coverage), fallback to candle Metal
+        #[cfg(feature = "coreml")]
+        BackendType::Metal => {
+            tracing::info!("Using ONNX Runtime + CoreML for Metal acceleration");
+            let engine = backend::onnx::OnnxEngine::new_coreml()?;
+            Ok(Box::new(engine))
+        }
+        #[cfg(all(feature = "metal", not(feature = "coreml")))]
         BackendType::Metal => {
             let engine = backend::metal::MetalEngine::new()?;
             Ok(Box::new(engine))
         }
-        #[cfg(not(feature = "metal"))]
+        #[cfg(not(any(feature = "metal", feature = "coreml")))]
         BackendType::Metal => Err(InferenceError::BackendUnavailable(
-            "Metal (not compiled with metal feature)".to_string(),
+            "Metal (not compiled with metal or coreml feature)".to_string(),
         )),
 
         #[cfg(feature = "onnx")]
