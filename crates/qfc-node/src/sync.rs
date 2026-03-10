@@ -18,6 +18,9 @@ use tracing::{debug, error, info, warn};
 /// Maximum number of blocks to request at once
 const MAX_BLOCKS_PER_REQUEST: u64 = 32;
 
+/// Maximum number of pending blocks waiting for parents (prevents memory exhaustion)
+const MAX_PENDING_BLOCKS: usize = 1_000;
+
 /// Sync state information
 #[derive(Clone, Debug, Default)]
 #[allow(dead_code)]
@@ -323,8 +326,15 @@ impl SyncManager {
                     block_number,
                     hex::encode(&parent_hash.as_bytes()[..8])
                 );
-                // Add to pending and request missing blocks
-                self.pending_blocks.write().push_back(block);
+                // Add to pending and request missing blocks (bounded)
+                {
+                    let mut pending = self.pending_blocks.write();
+                    if pending.len() >= MAX_PENDING_BLOCKS {
+                        warn!("Pending blocks queue full ({MAX_PENDING_BLOCKS}), dropping oldest");
+                        pending.pop_front();
+                    }
+                    pending.push_back(block);
+                }
                 self.request_missing_blocks(parent_hash);
             }
             Err(e) => {
@@ -429,7 +439,15 @@ impl SyncManager {
                                 Err(qfc_chain::ChainError::InvalidParent { .. }) => {
                                     // Need to request even earlier blocks
                                     info!("Block #{} still missing parent, queuing", block_number);
-                                    self_clone.pending_blocks.write().push_front(block);
+                                    let mut pending = self_clone.pending_blocks.write();
+                                    if pending.len() < MAX_PENDING_BLOCKS {
+                                        pending.push_front(block);
+                                    } else {
+                                        warn!(
+                                            "Pending blocks queue full, dropping block #{}",
+                                            block_number
+                                        );
+                                    }
                                     // Request parent
                                     self_clone.request_missing_blocks(block_parent);
                                 }
