@@ -9,8 +9,8 @@ use qfc_executor::Executor;
 use qfc_state::StateDB;
 use qfc_storage::{cf, encode_block_number, Database, WriteBatch};
 use qfc_types::{
-    Address, Block, BlockBody, BlockHeader, Epoch, Hash, Receipt, SealedBlock, Signature,
-    Transaction, TransactionType, ValidatorNode, U256,
+    Address, Block, BlockBody, BlockHeader, Epoch, Hash, Receipt, SealedBlock, Transaction,
+    ValidatorNode, U256,
 };
 use std::sync::Arc;
 use tracing::{debug, info};
@@ -689,70 +689,61 @@ impl Chain {
         data: Vec<u8>,
         gas_limit: Option<u64>,
     ) -> Result<(bool, Vec<u8>, u64)> {
-        // Use a default sender if not specified
         let sender = from.unwrap_or_else(|| Address::ZERO);
-
-        // Create a simulated transaction
-        let tx_type = if to.is_some() {
-            if data.is_empty() {
-                TransactionType::Transfer
-            } else {
-                TransactionType::ContractCall
-            }
-        } else {
-            TransactionType::ContractCreate
-        };
-
         let gas = gas_limit.unwrap_or(qfc_types::DEFAULT_BLOCK_GAS_LIMIT);
 
-        let tx = Transaction {
-            tx_type,
-            chain_id: self.config.chain_id,
-            nonce: self.state.get_nonce(&sender).unwrap_or(0),
-            to,
-            value,
-            data,
-            gas_limit: gas,
-            gas_price: U256::from_u64(1_000_000_000), // 1 Gwei (matches EVM basefee)
-            public_key: qfc_types::PublicKey::ZERO,
-            signature: Signature::ZERO,
-        };
+        // Use EvmExecutor directly instead of routing through the full transaction
+        // execution pipeline. The old path went through execute_contract_call() which
+        // checks state.get_code() and silently returns empty output if code is not
+        // found — breaking eth_call for deployed contracts.
+        let block_number = self.block_number();
+        let block_timestamp = self.head().map(|b| b.block.timestamp()).unwrap_or(0);
 
-        // Take a snapshot
+        // Take a snapshot so we can revert any state changes
         let snapshot = self.state.snapshot();
 
         // Give sender enough balance for gas (simulation only)
-        // Gas is deducted twice: once by executor (sub_balance) and once by revm internally.
-        // So we need 2x gas_cost to survive both deductions, plus any value being sent.
         let gas_cost = U256::from_u64(gas) * U256::from_u64(1_000_000_000);
-        let total_needed = gas_cost * U256::from_u64(2) + value;
+        let total_needed = gas_cost + value;
         let _ = self.state.add_balance(&sender, total_needed);
 
-        // Create a signed transaction (we skip validation for simulation)
-        let tx_hash = blake3_hash(&tx.to_bytes_without_signature());
-        let signed_tx = qfc_types::SignedTransaction::new(tx, tx_hash, sender);
+        let evm_executor = qfc_executor::EvmExecutor::new(
+            &self.state,
+            self.config.chain_id,
+            block_number,
+            block_timestamp,
+            Address::ZERO,
+            qfc_types::DEFAULT_BLOCK_GAS_LIMIT,
+        );
 
-        // Execute
-        let result = self
-            .executor
-            .execute(&signed_tx, &self.state, &Address::ZERO);
+        let result = if let Some(to_addr) = to {
+            if value.is_zero() {
+                // View/pure function call — use static_call (no state changes)
+                evm_executor.static_call(Some(&sender), &to_addr, data, gas)
+            } else {
+                // Call with value — use regular call
+                evm_executor.call(&sender, &to_addr, data, value, gas)
+            }
+        } else {
+            // Contract creation
+            evm_executor.create(&sender, data, value, gas)
+        };
 
         // Revert state changes
         let _ = self.state.revert(snapshot);
 
         match result {
-            Ok(exec_result) => {
-                let output = if exec_result.success {
-                    exec_result.output
+            Ok(evm_result) => {
+                let output = if evm_result.success {
+                    evm_result.output
                 } else {
-                    // Return revert data if available, otherwise error as bytes
-                    if exec_result.output.is_empty() {
-                        exec_result.error.unwrap_or_default().into_bytes()
+                    if evm_result.output.is_empty() {
+                        evm_result.error.unwrap_or_default().into_bytes()
                     } else {
-                        exec_result.output
+                        evm_result.output
                     }
                 };
-                Ok((exec_result.success, output, exec_result.gas_used))
+                Ok((evm_result.success, output, evm_result.gas_used))
             }
             Err(e) => Err(ChainError::Executor(e.to_string())),
         }
