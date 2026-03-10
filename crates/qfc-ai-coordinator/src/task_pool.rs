@@ -402,7 +402,8 @@ impl TaskPool {
                 task.status = PublicTaskStatus::Expired;
                 // Retain for querying before returning for refund
                 let retain_until = now + COMPLETED_RETENTION_MS;
-                self.completed_tasks.insert(id, (task.clone(), retain_until));
+                self.completed_tasks
+                    .insert(id, (task.clone(), retain_until));
                 expired.push(task);
             }
         }

@@ -164,8 +164,7 @@ impl OnnxEngine {
             }
             _ => {
                 tracing::info!("Creating ONNX session with CPU execution provider");
-                let mut builder =
-                    ort::session::Session::builder().map_err(map_builder_err)?;
+                let mut builder = ort::session::Session::builder().map_err(map_builder_err)?;
                 builder.commit_from_file(model_path).map_err(map_load_err)?
             }
         };
