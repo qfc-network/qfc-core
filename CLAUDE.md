@@ -97,6 +97,12 @@ Proof of Contribution (PoC) - 多维度贡献评分:
 - `qfc_getNetworkState` - 网络状态 (normal/congested/storage_shortage/under_attack)
 - `qfc_nodeInfo` - 节点信息
 - `qfc_requestFaucet` - 请求测试币 (仅 dev 模式, chain_id=9000)
+- `qfc_getAgentInfo` - 查询 Agent 信息 (AgentRegistry 合约)
+- `qfc_listAgentsByOwner` - 按 owner 列出 Agent
+- `qfc_validateSessionKey` - 验证 session key
+- `qfc_registerAgent` - 注册 Agent (签名授权, 写入交易)
+- `qfc_fundAgent` - 为 Agent 充值 deposit (签名授权, 写入交易)
+- `qfc_revokeAgent` - 撤销 Agent (签名授权, 写入交易)
 
 ## 开发状态
 

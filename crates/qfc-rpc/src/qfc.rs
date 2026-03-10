@@ -343,6 +343,24 @@ pub trait QfcApi {
     /// Validate a session key against the AgentRegistry contract
     #[method(name = "validateSessionKey")]
     async fn validate_session_key(&self, key_address: String) -> RpcResult<RpcSessionKeyInfo>;
+
+    /// Register a new agent (write — creates a ContractCall transaction)
+    #[method(name = "registerAgent")]
+    async fn register_agent(
+        &self,
+        request: RpcRegisterAgentRequest,
+    ) -> RpcResult<RpcAgentWriteResult>;
+
+    /// Fund an agent with deposit (write — creates a ContractCall transaction)
+    #[method(name = "fundAgent")]
+    async fn fund_agent(&self, request: RpcFundAgentRequest) -> RpcResult<RpcAgentWriteResult>;
+
+    /// Revoke (deactivate) an agent (write — creates a ContractCall transaction)
+    #[method(name = "revokeAgent")]
+    async fn revoke_agent(
+        &self,
+        request: RpcRevokeAgentRequest,
+    ) -> RpcResult<RpcAgentWriteResult>;
 }
 
 /// Faucet response
@@ -1165,4 +1183,69 @@ pub struct RpcSessionKeyInfo {
     pub valid: bool,
     pub agent_id: String,
     pub expires_at: String,
+}
+
+// ============ v2.0: Agent Registry Write RPC Types ============
+
+/// Request to register a new agent
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcRegisterAgentRequest {
+    /// Unique agent identifier (human-readable string)
+    pub agent_id: String,
+    /// Owner address (hex, the account that controls the agent)
+    pub owner: String,
+    /// Ed25519 public key of the owner (hex)
+    pub public_key: String,
+    /// Permission bitmask (array of allowed permission codes)
+    #[serde(default)]
+    pub permissions: Vec<u8>,
+    /// Daily spending limit in wei (hex or decimal string)
+    pub daily_limit: String,
+    /// Max amount per transaction in wei (hex or decimal string)
+    pub max_per_tx: String,
+    /// Ed25519 signature over (agent_id || owner || daily_limit || max_per_tx) for authorization
+    pub signature: String,
+}
+
+/// Request to fund an agent with deposit
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcFundAgentRequest {
+    /// Agent ID to fund
+    pub agent_id: String,
+    /// Funder address (hex) — must be the agent owner
+    pub funder: String,
+    /// Ed25519 public key of the funder (hex)
+    pub public_key: String,
+    /// Amount to deposit in wei (hex or decimal string)
+    pub amount: String,
+    /// Ed25519 signature over (agent_id || funder || amount) for authorization
+    pub signature: String,
+}
+
+/// Request to revoke (deactivate) an agent
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcRevokeAgentRequest {
+    /// Agent ID to revoke
+    pub agent_id: String,
+    /// Owner address (hex) — must be the agent owner
+    pub owner: String,
+    /// Ed25519 public key of the owner (hex)
+    pub public_key: String,
+    /// Ed25519 signature over (agent_id || owner || "revoke") for authorization
+    pub signature: String,
+}
+
+/// Result of an agent write operation (register/fund/revoke)
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcAgentWriteResult {
+    /// Transaction hash (hex)
+    pub tx_hash: String,
+    /// Agent ID affected
+    pub agent_id: String,
+    /// Human-readable status message
+    pub message: String,
 }
