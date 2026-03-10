@@ -1,13 +1,22 @@
 //! State database for managing accounts and storage
 
 use crate::error::{Result, StateError};
+use lru::LruCache;
 use parking_lot::RwLock;
 use qfc_crypto::blake3_hash;
 use qfc_storage::{cf, Database};
 use qfc_trie::Trie;
 use qfc_types::{Account, Address, Hash, Undelegation, U256};
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use tracing::debug;
+
+/// Maximum number of accounts in the LRU cache
+const ACCOUNT_CACHE_SIZE: usize = 10_000;
+/// Maximum number of addresses with cached storage slots
+const STORAGE_CACHE_SIZE: usize = 5_000;
+/// Maximum number of code entries in the LRU cache
+const CODE_CACHE_SIZE: usize = 1_000;
 
 /// State database for managing blockchain state
 pub struct StateDB {
@@ -15,12 +24,12 @@ pub struct StateDB {
     db: Database,
     /// Account state trie
     trie: RwLock<Trie>,
-    /// Account cache
-    account_cache: RwLock<HashMap<Address, Account>>,
-    /// Storage cache: address -> (slot -> value)
-    storage_cache: RwLock<HashMap<Address, HashMap<U256, U256>>>,
-    /// Code cache: hash -> code
-    code_cache: RwLock<HashMap<Hash, Vec<u8>>>,
+    /// Account cache (LRU-bounded)
+    account_cache: RwLock<LruCache<Address, Account>>,
+    /// Storage cache: address -> (slot -> value) (LRU-bounded by address)
+    storage_cache: RwLock<LruCache<Address, HashMap<U256, U256>>>,
+    /// Code cache: hash -> code (LRU-bounded)
+    code_cache: RwLock<LruCache<Hash, Vec<u8>>>,
     /// Current state root
     root: RwLock<Hash>,
 }
@@ -32,9 +41,13 @@ impl StateDB {
         Self {
             db,
             trie: RwLock::new(trie),
-            account_cache: RwLock::new(HashMap::new()),
-            storage_cache: RwLock::new(HashMap::new()),
-            code_cache: RwLock::new(HashMap::new()),
+            account_cache: RwLock::new(LruCache::new(
+                NonZeroUsize::new(ACCOUNT_CACHE_SIZE).unwrap(),
+            )),
+            storage_cache: RwLock::new(LruCache::new(
+                NonZeroUsize::new(STORAGE_CACHE_SIZE).unwrap(),
+            )),
+            code_cache: RwLock::new(LruCache::new(NonZeroUsize::new(CODE_CACHE_SIZE).unwrap())),
             root: RwLock::new(Hash::ZERO),
         }
     }
@@ -45,9 +58,13 @@ impl StateDB {
         Self {
             db,
             trie: RwLock::new(trie),
-            account_cache: RwLock::new(HashMap::new()),
-            storage_cache: RwLock::new(HashMap::new()),
-            code_cache: RwLock::new(HashMap::new()),
+            account_cache: RwLock::new(LruCache::new(
+                NonZeroUsize::new(ACCOUNT_CACHE_SIZE).unwrap(),
+            )),
+            storage_cache: RwLock::new(LruCache::new(
+                NonZeroUsize::new(STORAGE_CACHE_SIZE).unwrap(),
+            )),
+            code_cache: RwLock::new(LruCache::new(NonZeroUsize::new(CODE_CACHE_SIZE).unwrap())),
             root: RwLock::new(root),
         }
     }
@@ -58,7 +75,7 @@ impl StateDB {
         *self.root.write() = root;
         self.account_cache.write().clear();
         self.storage_cache.write().clear();
-        self.code_cache.write().clear();
+        // Code is content-addressed (immutable), safe to keep across root changes
     }
 
     /// Get the current state root
@@ -68,8 +85,8 @@ impl StateDB {
 
     /// Get an account (returns default if not exists)
     pub fn get_account(&self, address: &Address) -> Result<Account> {
-        // Check cache first
-        if let Some(account) = self.account_cache.read().get(address) {
+        // Check cache first (LruCache::get requires &mut self)
+        if let Some(account) = self.account_cache.write().get(address) {
             return Ok(account.clone());
         }
 
@@ -82,7 +99,7 @@ impl StateDB {
                 let account = Account::from_bytes(&data)
                     .map_err(|e| StateError::Serialization(e.to_string()))?;
                 // Cache it
-                self.account_cache.write().insert(*address, account.clone());
+                self.account_cache.write().put(*address, account.clone());
                 Ok(account)
             }
             None => Ok(Account::new_eoa()),
@@ -92,7 +109,7 @@ impl StateDB {
     /// Set an account
     pub fn set_account(&self, address: &Address, account: &Account) -> Result<()> {
         // Update cache
-        self.account_cache.write().insert(*address, account.clone());
+        self.account_cache.write().put(*address, account.clone());
 
         // Update trie
         let key = address.as_bytes();
@@ -188,14 +205,14 @@ impl StateDB {
         match account.code_hash {
             Some(hash) => {
                 // Check cache
-                if let Some(code) = self.code_cache.read().get(&hash) {
+                if let Some(code) = self.code_cache.write().get(&hash) {
                     return Ok(code.clone());
                 }
 
                 // Load from database
                 match self.db.get(cf::CODE, hash.as_bytes())? {
                     Some(code) => {
-                        self.code_cache.write().insert(hash, code.clone());
+                        self.code_cache.write().put(hash, code.clone());
                         Ok(code)
                     }
                     None => Ok(Vec::new()),
@@ -213,7 +230,7 @@ impl StateDB {
         self.db.put(cf::CODE, code_hash.as_bytes(), &code)?;
 
         // Update code cache
-        self.code_cache.write().insert(code_hash, code);
+        self.code_cache.write().put(code_hash, code);
 
         // Update account
         let mut account = self.get_account(address)?;
@@ -231,7 +248,7 @@ impl StateDB {
     /// Get storage value
     pub fn get_storage(&self, address: &Address, slot: &U256) -> Result<U256> {
         // Check cache
-        if let Some(storage) = self.storage_cache.read().get(address) {
+        if let Some(storage) = self.storage_cache.write().get(address) {
             if let Some(value) = storage.get(slot) {
                 return Ok(*value);
             }
@@ -253,11 +270,14 @@ impl StateDB {
             Some(data) if data.len() == 32 => {
                 let value = U256::from_be_bytes(&data.try_into().unwrap());
                 // Cache it
-                self.storage_cache
-                    .write()
-                    .entry(*address)
-                    .or_default()
-                    .insert(*slot, value);
+                let mut cache = self.storage_cache.write();
+                if let Some(slots) = cache.get_mut(address) {
+                    slots.insert(*slot, value);
+                } else {
+                    let mut slots = HashMap::new();
+                    slots.insert(*slot, value);
+                    cache.put(*address, slots);
+                }
                 Ok(value)
             }
             _ => Ok(U256::ZERO),
@@ -267,11 +287,16 @@ impl StateDB {
     /// Set storage value
     pub fn set_storage(&self, address: &Address, slot: U256, value: U256) -> Result<()> {
         // Update cache
-        self.storage_cache
-            .write()
-            .entry(*address)
-            .or_default()
-            .insert(slot, value);
+        {
+            let mut cache = self.storage_cache.write();
+            if let Some(slots) = cache.get_mut(address) {
+                slots.insert(slot, value);
+            } else {
+                let mut slots = HashMap::new();
+                slots.insert(slot, value);
+                cache.put(*address, slots);
+            }
+        }
 
         // Get current storage root
         let account = self.get_account(address)?;
@@ -483,18 +508,42 @@ impl StateDB {
 
     /// Create a snapshot of the current state
     pub fn snapshot(&self) -> StateSnapshot {
+        // Extract current cache contents into HashMaps for the snapshot
+        let accounts: HashMap<Address, Account> = self
+            .account_cache
+            .read()
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
+        let storage: HashMap<Address, HashMap<U256, U256>> = self
+            .storage_cache
+            .read()
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
         StateSnapshot {
             root: self.root(),
-            accounts: self.account_cache.read().clone(),
-            storage: self.storage_cache.read().clone(),
+            accounts,
+            storage,
         }
     }
 
     /// Revert to a snapshot
     pub fn revert(&self, snapshot: StateSnapshot) -> Result<()> {
         *self.root.write() = snapshot.root;
-        *self.account_cache.write() = snapshot.accounts;
-        *self.storage_cache.write() = snapshot.storage;
+
+        // Rebuild LRU caches from snapshot
+        let mut account_cache = LruCache::new(NonZeroUsize::new(ACCOUNT_CACHE_SIZE).unwrap());
+        for (k, v) in snapshot.accounts {
+            account_cache.put(k, v);
+        }
+        *self.account_cache.write() = account_cache;
+
+        let mut storage_cache = LruCache::new(NonZeroUsize::new(STORAGE_CACHE_SIZE).unwrap());
+        for (k, v) in snapshot.storage {
+            storage_cache.put(k, v);
+        }
+        *self.storage_cache.write() = storage_cache;
 
         // Recreate trie at snapshot root
         *self.trie.write() = Trie::with_root(self.db.clone(), snapshot.root);
@@ -513,12 +562,25 @@ pub struct StateSnapshot {
 
 impl Clone for StateDB {
     fn clone(&self) -> Self {
+        // Rebuild LRU caches from source
+        let mut account_cache = LruCache::new(NonZeroUsize::new(ACCOUNT_CACHE_SIZE).unwrap());
+        for (k, v) in self.account_cache.read().iter() {
+            account_cache.put(*k, v.clone());
+        }
+        let mut storage_cache = LruCache::new(NonZeroUsize::new(STORAGE_CACHE_SIZE).unwrap());
+        for (k, v) in self.storage_cache.read().iter() {
+            storage_cache.put(*k, v.clone());
+        }
+        let mut code_cache = LruCache::new(NonZeroUsize::new(CODE_CACHE_SIZE).unwrap());
+        for (k, v) in self.code_cache.read().iter() {
+            code_cache.put(*k, v.clone());
+        }
         Self {
             db: self.db.clone(),
             trie: RwLock::new(Trie::with_root(self.db.clone(), self.root())),
-            account_cache: RwLock::new(self.account_cache.read().clone()),
-            storage_cache: RwLock::new(self.storage_cache.read().clone()),
-            code_cache: RwLock::new(self.code_cache.read().clone()),
+            account_cache: RwLock::new(account_cache),
+            storage_cache: RwLock::new(storage_cache),
+            code_cache: RwLock::new(code_cache),
             root: RwLock::new(self.root()),
         }
     }
