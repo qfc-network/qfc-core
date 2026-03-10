@@ -234,6 +234,13 @@ pub trait QfcApi {
     #[method(name = "getPublicTaskStatus")]
     async fn get_public_task_status(&self, task_id: String) -> RpcResult<RpcPublicTaskStatus>;
 
+    /// List public tasks with optional filtering and pagination
+    #[method(name = "listPublicTasks")]
+    async fn list_public_tasks(
+        &self,
+        filter: RpcListPublicTasksFilter,
+    ) -> RpcResult<Vec<RpcPublicTaskStatus>>;
+
     /// Estimate the fee for an inference task
     #[method(name = "estimateInferenceFee")]
     async fn estimate_inference_fee(
@@ -615,6 +622,28 @@ pub struct RpcSubmitPublicTask {
     /// Language code for speech_to_text tasks (e.g. "en", "zh")
     #[serde(default)]
     pub language: Option<String>,
+}
+
+/// Filter parameters for listing public tasks
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcListPublicTasksFilter {
+    /// Filter by submitter address (hex, optional)
+    #[serde(default)]
+    pub submitter: Option<String>,
+    /// Filter by status (e.g. "Pending", "Completed", optional)
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Max results (default 50, max 200)
+    #[serde(default = "default_list_limit")]
+    pub limit: usize,
+    /// Offset for pagination (default 0)
+    #[serde(default)]
+    pub offset: usize,
+}
+
+fn default_list_limit() -> usize {
+    50
 }
 
 /// Status of a public inference task (B1: structured result envelope)

@@ -6,10 +6,10 @@ use crate::qfc::{
     QfcApiServer, RpcAccountRentInfo, RpcBridgeDeposit, RpcBridgeStatus, RpcBridgeWithdrawal,
     RpcComputeInfo, RpcEarningRecord, RpcEpoch, RpcEstimateInferenceFee, RpcFaucetResponse,
     RpcInferenceFeeEstimate, RpcInferenceProofSubmission, RpcInferenceStats, RpcInferenceTask,
-    RpcMinerEarnings, RpcMinerEvent, RpcMinerStatusReport, RpcMinerVesting, RpcModel,
-    RpcModelProposal, RpcNodeInfo, RpcParameterOverride, RpcParameterProposal, RpcProofResult,
-    RpcProposeModelRequest, RpcProposeParameterRequest, RpcProposeSpendRequest,
-    RpcPublicTaskStatus, RpcRegisterMinerRequest, RpcRegisterMinerResult,
+    RpcListPublicTasksFilter, RpcMinerEarnings, RpcMinerEvent, RpcMinerStatusReport,
+    RpcMinerVesting, RpcModel, RpcModelProposal, RpcNodeInfo, RpcParameterOverride,
+    RpcParameterProposal, RpcProofResult, RpcProposeModelRequest, RpcProposeParameterRequest,
+    RpcProposeSpendRequest, RpcPublicTaskStatus, RpcRegisterMinerRequest, RpcRegisterMinerResult,
     RpcRegisterWebhookRequest, RpcRegisteredMiner, RpcRemoveWebhookRequest, RpcSpendProposal,
     RpcSubmitPublicTask, RpcTaskRequest, RpcTreasuryInfo, RpcUndelegation, RpcUserOperation,
     RpcUserOperationStatus, RpcValidator, RpcValidatorMetrics, RpcValidatorScoreBreakdown,
@@ -3090,6 +3090,32 @@ impl QfcApiServer for RpcServer {
             Some(task) => Ok(Self::build_task_status(task)),
             None => Err(RpcError::InvalidParams("Task not found".to_string()).into()),
         }
+    }
+
+    async fn list_public_tasks(
+        &self,
+        filter: RpcListPublicTasksFilter,
+    ) -> RpcResult<Vec<RpcPublicTaskStatus>> {
+        let submitter = filter
+            .submitter
+            .as_deref()
+            .map(Self::parse_address)
+            .transpose()?;
+
+        let pool_filter = qfc_ai_coordinator::PublicTaskFilter {
+            submitter,
+            status: filter.status,
+            limit: filter.limit,
+            offset: filter.offset,
+        };
+
+        let pool = self.task_pool.read();
+        let tasks = pool
+            .list_public_tasks(&pool_filter)
+            .into_iter()
+            .map(Self::build_task_status)
+            .collect();
+        Ok(tasks)
     }
 
     async fn estimate_inference_fee(
