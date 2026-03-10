@@ -1,7 +1,7 @@
-//! ONNX Runtime inference backend (AMD ROCm, DirectML, CPU)
+//! ONNX Runtime inference backend (CoreML, AMD ROCm, DirectML, CPU)
 //!
 //! Uses the `ort` crate (ONNX Runtime Rust bindings) to run inference
-//! on AMD GPUs via ROCm, or as a cross-platform CPU fallback.
+//! on Apple Silicon via CoreML, AMD GPUs via ROCm, or as a CPU fallback.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -35,6 +35,22 @@ impl OnnxEngine {
             loaded_models: Vec::new(),
             available_memory_mb: hw.memory_mb,
             backend: BackendType::Rocm,
+            sessions: HashMap::new(),
+        })
+    }
+
+    /// Create a new ONNX engine with CoreML backend (Apple Silicon Metal/ANE)
+    #[cfg(feature = "coreml")]
+    pub fn new_coreml() -> Result<Self, InferenceError> {
+        let hw = crate::runtime::detect_hardware();
+        tracing::info!(
+            "Initializing ONNX Runtime with CoreML backend ({}MB unified memory)",
+            hw.memory_mb
+        );
+        Ok(Self {
+            loaded_models: Vec::new(),
+            available_memory_mb: hw.memory_mb,
+            backend: BackendType::Metal,
             sessions: HashMap::new(),
         })
     }
@@ -118,29 +134,39 @@ impl OnnxEngine {
         &self,
         model_path: &PathBuf,
     ) -> Result<ort::session::Session, InferenceError> {
+        let map_builder_err =
+            |e: ort::Error| InferenceError::ExecutionFailed(format!("ONNX builder error: {}", e));
+        let map_load_err = |e: ort::Error| {
+            InferenceError::ExecutionFailed(format!("ONNX model load error: {}", e))
+        };
+
         let session = match self.backend {
+            #[cfg(feature = "coreml")]
+            BackendType::Metal => {
+                tracing::info!("Creating ONNX session with CoreML execution provider");
+                let mut builder = ort::session::Session::builder()
+                    .map_err(map_builder_err)?
+                    .with_execution_providers([ort::ep::CoreML::default().build()])
+                    .map_err(|e| {
+                        InferenceError::ExecutionFailed(format!("CoreML EP error: {}", e))
+                    })?;
+                builder.commit_from_file(model_path).map_err(map_load_err)?
+            }
             BackendType::Rocm => {
                 tracing::info!("Creating ONNX session with ROCm execution provider");
-                let mut builder = ort::session::Session::builder().map_err(|e| {
-                    InferenceError::ExecutionFailed(format!("ONNX builder error: {}", e))
-                })?;
-                builder = builder
+                let mut builder = ort::session::Session::builder()
+                    .map_err(map_builder_err)?
                     .with_execution_providers([ort::ep::ROCm::default().build()])
                     .map_err(|e| {
                         InferenceError::ExecutionFailed(format!("ROCm EP error: {}", e))
                     })?;
-                builder.commit_from_file(model_path).map_err(|e| {
-                    InferenceError::ExecutionFailed(format!("ONNX model load error: {}", e))
-                })?
+                builder.commit_from_file(model_path).map_err(map_load_err)?
             }
             _ => {
                 tracing::info!("Creating ONNX session with CPU execution provider");
-                let mut builder = ort::session::Session::builder().map_err(|e| {
-                    InferenceError::ExecutionFailed(format!("ONNX builder error: {}", e))
-                })?;
-                builder.commit_from_file(model_path).map_err(|e| {
-                    InferenceError::ExecutionFailed(format!("ONNX model load error: {}", e))
-                })?
+                let mut builder =
+                    ort::session::Session::builder().map_err(map_builder_err)?;
+                builder.commit_from_file(model_path).map_err(map_load_err)?
             }
         };
         Ok(session)
@@ -221,9 +247,10 @@ impl InferenceEngine for OnnxEngine {
         let ops = (size * size) as f64;
         let flops = ops / elapsed.as_secs_f64();
 
-        // ROCm GPU benchmark gets a multiplier (actual GPU compute will be faster)
+        // GPU benchmarks get a multiplier (actual GPU compute will be faster)
         let gpu_multiplier = match self.backend {
             BackendType::Rocm => 10.0,
+            BackendType::Metal => 8.0, // CoreML/Metal
             _ => 1.0,
         };
 
