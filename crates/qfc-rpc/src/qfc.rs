@@ -358,6 +358,53 @@ pub trait QfcApi {
     /// Revoke (deactivate) an agent (write — creates a ContractCall transaction)
     #[method(name = "revokeAgent")]
     async fn revoke_agent(&self, request: RpcRevokeAgentRequest) -> RpcResult<RpcAgentWriteResult>;
+
+    // ---- v3.0: Agent Discovery + Resource endpoints ----
+
+    /// List agents with filters, sorting, and pagination
+    #[method(name = "listAgents")]
+    async fn list_agents(&self, params: RpcListAgentsParams) -> RpcResult<RpcListAgentsResponse>;
+
+    /// Query agents by capability with min reputation/stake filters
+    #[method(name = "queryAgentsByCapability")]
+    async fn query_agents_by_capability(
+        &self,
+        params: RpcQueryByCapabilityParams,
+    ) -> RpcResult<Vec<RpcAgentDetailView>>;
+
+    /// Query agents by protocol digest
+    #[method(name = "queryAgentsByProtocolDigest")]
+    async fn query_agents_by_protocol_digest(
+        &self,
+        protocol_digest: String,
+    ) -> RpcResult<Vec<RpcAgentDetailView>>;
+
+    /// Get detailed agent info (v3 resource-based)
+    #[method(name = "getAgent")]
+    async fn get_agent(&self, agent_id: String) -> RpcResult<RpcAgentDetailView>;
+
+    /// Freeze an agent (owner or governance)
+    #[method(name = "freezeAgent")]
+    async fn freeze_agent(&self, params: RpcFreezeAgentParams) -> RpcResult<RpcAgentWriteResult>;
+
+    /// Issue a session key for an agent
+    #[method(name = "issueSessionKey")]
+    async fn issue_session_key(
+        &self,
+        params: RpcIssueSessionKeyParams,
+    ) -> RpcResult<RpcSessionKeyDetail>;
+
+    /// Revoke a session key
+    #[method(name = "revokeSessionKey")]
+    async fn revoke_session_key_v3(&self, key_id: String) -> RpcResult<RpcAgentWriteResult>;
+
+    /// Get session keys for an agent
+    #[method(name = "getSessionKeys")]
+    async fn get_session_keys(&self, agent_id: String) -> RpcResult<Vec<RpcSessionKeyDetail>>;
+
+    /// Get agent balance (stake + deposit)
+    #[method(name = "getAgentBalance")]
+    async fn get_agent_balance(&self, agent_id: String) -> RpcResult<RpcAgentBalance>;
 }
 
 /// Faucet response
@@ -1245,4 +1292,139 @@ pub struct RpcAgentWriteResult {
     pub agent_id: String,
     /// Human-readable status message
     pub message: String,
+}
+
+// ============ v3.0: Agent Discovery + Resource RPC Types ============
+
+/// Params for listing agents
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcListAgentsParams {
+    /// "active" | "frozen" | "all" (default "active")
+    #[serde(default = "default_status_active")]
+    pub status: String,
+    /// "reputation_score" | "stake" | "created_at" (default "reputation_score")
+    #[serde(default = "default_sort_reputation")]
+    pub sort_by: String,
+    /// "desc" | "asc" (default "desc")
+    #[serde(default = "default_sort_desc")]
+    pub sort_order: String,
+    #[serde(default = "default_limit_20")]
+    pub limit: usize,
+    #[serde(default)]
+    pub offset: usize,
+}
+
+fn default_status_active() -> String {
+    "active".to_string()
+}
+fn default_sort_reputation() -> String {
+    "reputation_score".to_string()
+}
+fn default_sort_desc() -> String {
+    "desc".to_string()
+}
+fn default_limit_20() -> usize {
+    20
+}
+
+/// Response for listing agents
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcListAgentsResponse {
+    pub agents: Vec<RpcAgentDetailView>,
+    pub total: usize,
+    pub has_more: bool,
+}
+
+/// Detailed agent view (v3 resource-based)
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcAgentDetailView {
+    pub agent_id: String,
+    pub owner: String,
+    pub capabilities: Vec<String>,
+    pub protocol_digests: Vec<String>,
+    pub endpoint: String,
+    pub stake: String,
+    pub frozen: bool,
+    pub reputation_score: u64,
+    pub total_tasks_completed: u64,
+    pub total_tasks_failed: u64,
+    pub last_heartbeat: u64,
+    pub created_at: u64,
+}
+
+/// Params for querying agents by capability
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcQueryByCapabilityParams {
+    pub capability: String,
+    #[serde(default)]
+    pub min_reputation: u64,
+    #[serde(default)]
+    pub min_stake: String,
+    #[serde(default = "default_limit_10")]
+    pub limit: usize,
+}
+
+fn default_limit_10() -> usize {
+    10
+}
+
+/// Params for freezing an agent
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcFreezeAgentParams {
+    pub agent_id: String,
+    #[serde(default)]
+    pub reason: String,
+}
+
+/// Params for issuing a session key
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcIssueSessionKeyParams {
+    pub agent_id: String,
+    pub public_key: String,
+    /// Permission bitmask (e.g. 0x01 for inference, 0x03 for inference+transfer)
+    pub permissions: u64,
+    /// Max spend per period (decimal string)
+    #[serde(default)]
+    pub spending_limit: String,
+    /// Period duration in seconds (default 86400 = 1 day)
+    #[serde(default = "default_period_day")]
+    pub period_duration: u64,
+    /// TTL in seconds (max 604800 = 7 days)
+    pub ttl_secs: u64,
+}
+
+fn default_period_day() -> u64 {
+    86400
+}
+
+/// Session key detail (v3)
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcSessionKeyDetail {
+    pub key_id: String,
+    pub agent_id: String,
+    pub public_key: String,
+    pub permissions: u64,
+    pub permissions_names: Vec<String>,
+    pub spending_limit: String,
+    pub spent_this_period: String,
+    pub period_duration: u64,
+    pub expires_at: u64,
+    pub nonce: u64,
+    pub created_at: u64,
+}
+
+/// Agent balance response
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcAgentBalance {
+    pub agent_id: String,
+    pub stake: String,
+    pub stake_tier: String,
 }

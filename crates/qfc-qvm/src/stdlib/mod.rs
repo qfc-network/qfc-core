@@ -3,9 +3,13 @@
 //! Built-in functions available to all QuantumScript contracts.
 
 pub mod abi;
+pub mod agent_index;
+pub mod agent_registry;
 pub mod collections;
 pub mod crypto;
+pub mod inference_capability;
 pub mod math;
+pub mod session_keys;
 
 use primitive_types::{H160, U256};
 use std::collections::HashMap;
