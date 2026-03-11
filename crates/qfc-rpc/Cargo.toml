@@ -30,6 +30,7 @@ qfc-ai-coordinator.workspace = true
 qfc-bridge.workspace = true
 qfc-executor.workspace = true
 qfc-storage.workspace = true
+qfc-qvm.workspace = true
 borsh.workspace = true
 base64.workspace = true
 

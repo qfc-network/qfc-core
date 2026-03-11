@@ -3,19 +3,21 @@
 use crate::error::RpcError;
 use crate::eth::EthApiServer;
 use crate::qfc::{
-    QfcApiServer, RpcAccountRentInfo, RpcAgentInfo, RpcAgentWriteResult, RpcBridgeDeposit,
-    RpcBridgeStatus, RpcBridgeWithdrawal, RpcComputeInfo, RpcEarningRecord, RpcEpoch,
-    RpcEstimateInferenceFee, RpcFaucetResponse, RpcFundAgentRequest, RpcInferenceFeeEstimate,
-    RpcInferenceProofSubmission, RpcInferenceStats, RpcInferenceTask, RpcListPublicTasksFilter,
-    RpcMinerEarnings, RpcMinerEvent, RpcMinerStatusReport, RpcMinerVesting, RpcModel,
-    RpcModelProposal, RpcNodeInfo, RpcParameterOverride, RpcParameterProposal, RpcProofResult,
-    RpcProposeModelRequest, RpcProposeParameterRequest, RpcProposeSpendRequest,
-    RpcPublicTaskStatus, RpcRegisterAgentRequest, RpcRegisterMinerRequest, RpcRegisterMinerResult,
+    QfcApiServer, RpcAccountRentInfo, RpcAgentBalance, RpcAgentDetailView, RpcAgentInfo,
+    RpcAgentWriteResult, RpcBridgeDeposit, RpcBridgeStatus, RpcBridgeWithdrawal, RpcComputeInfo,
+    RpcEarningRecord, RpcEpoch, RpcEstimateInferenceFee, RpcFaucetResponse, RpcFreezeAgentParams,
+    RpcFundAgentRequest, RpcInferenceFeeEstimate, RpcInferenceProofSubmission, RpcInferenceStats,
+    RpcInferenceTask, RpcIssueSessionKeyParams, RpcListAgentsParams, RpcListAgentsResponse,
+    RpcListPublicTasksFilter, RpcMinerEarnings, RpcMinerEvent, RpcMinerStatusReport,
+    RpcMinerVesting, RpcModel, RpcModelProposal, RpcNodeInfo, RpcParameterOverride,
+    RpcParameterProposal, RpcProofResult, RpcProposeModelRequest, RpcProposeParameterRequest,
+    RpcProposeSpendRequest, RpcPublicTaskStatus, RpcQueryByCapabilityParams,
+    RpcRegisterAgentRequest, RpcRegisterMinerRequest, RpcRegisterMinerResult,
     RpcRegisterWebhookRequest, RpcRegisteredMiner, RpcRemoveWebhookRequest, RpcRevokeAgentRequest,
-    RpcSessionKeyInfo, RpcSpendProposal, RpcSubmitPublicTask, RpcTaskRequest, RpcTreasuryInfo,
-    RpcUndelegation, RpcUserOperation, RpcUserOperationStatus, RpcValidator, RpcValidatorMetrics,
-    RpcValidatorScoreBreakdown, RpcVoteModelRequest, RpcVoteParameterRequest, RpcVoteSpendRequest,
-    RpcWebhook,
+    RpcSessionKeyDetail, RpcSessionKeyInfo, RpcSpendProposal, RpcSubmitPublicTask, RpcTaskRequest,
+    RpcTreasuryInfo, RpcUndelegation, RpcUserOperation, RpcUserOperationStatus, RpcValidator,
+    RpcValidatorMetrics, RpcValidatorScoreBreakdown, RpcVoteModelRequest, RpcVoteParameterRequest,
+    RpcVoteSpendRequest, RpcWebhook,
 };
 use crate::txpool::{TxPoolApiServer, TxPoolContent, TxPoolStatus};
 use crate::types::{BlockNumber, BlockTag, CallRequest, RpcBlock, RpcReceipt, RpcTransaction};
@@ -128,6 +130,14 @@ pub struct RpcServer {
     user_op_pool: Arc<RwLock<qfc_executor::account_abstraction::UserOpPool>>,
     /// v2.0: Miner webhook notification store
     webhook_store: crate::webhook::WebhookStore,
+    /// v3.0: QVM Agent Registry (resource-based)
+    agent_registry: Arc<RwLock<qfc_qvm::stdlib::agent_registry::AgentRegistry>>,
+    /// v3.0: QVM Inference Capability Store
+    capability_store: Arc<RwLock<qfc_qvm::stdlib::inference_capability::CapabilityStore>>,
+    /// v3.0: QVM Session Key Store
+    session_key_store: Arc<RwLock<qfc_qvm::stdlib::session_keys::SessionKeyStore>>,
+    /// v3.0: Agent discovery index
+    agent_index: Arc<RwLock<qfc_qvm::stdlib::agent_index::AgentIndex>>,
 }
 
 impl Clone for RpcServer {
@@ -157,6 +167,10 @@ impl Clone for RpcServer {
             entry_point: self.entry_point.clone(),
             user_op_pool: self.user_op_pool.clone(),
             webhook_store: self.webhook_store.clone(),
+            agent_registry: self.agent_registry.clone(),
+            capability_store: self.capability_store.clone(),
+            session_key_store: self.session_key_store.clone(),
+            agent_index: self.agent_index.clone(),
         }
     }
 }
@@ -203,6 +217,18 @@ impl RpcServer {
                 qfc_executor::account_abstraction::UserOpPool::new(1000, 16),
             )),
             webhook_store: crate::webhook::new_store(),
+            agent_registry: Arc::new(RwLock::new(
+                qfc_qvm::stdlib::agent_registry::AgentRegistry::new(),
+            )),
+            capability_store: Arc::new(RwLock::new(
+                qfc_qvm::stdlib::inference_capability::CapabilityStore::new(),
+            )),
+            session_key_store: Arc::new(RwLock::new(
+                qfc_qvm::stdlib::session_keys::SessionKeyStore::new(),
+            )),
+            agent_index: Arc::new(RwLock::new(
+                qfc_qvm::stdlib::agent_index::AgentIndex::new(),
+            )),
         }
     }
 
@@ -4006,6 +4032,305 @@ impl QfcApiServer for RpcServer {
             message: "Agent revocation submitted".into(),
         })
     }
+
+    // ---- v3.0: Agent Discovery + Resource endpoints ----
+
+    async fn list_agents(&self, params: RpcListAgentsParams) -> RpcResult<RpcListAgentsResponse> {
+        use qfc_qvm::stdlib::agent_index::{AgentSortField, AgentStatusFilter};
+
+        let status = match params.status.as_str() {
+            "frozen" => AgentStatusFilter::Frozen,
+            "all" => AgentStatusFilter::All,
+            _ => AgentStatusFilter::Active,
+        };
+        let sort_by = match params.sort_by.as_str() {
+            "stake" => AgentSortField::Stake,
+            "created_at" => AgentSortField::CreatedAt,
+            _ => AgentSortField::ReputationScore,
+        };
+        let sort_desc = params.sort_order != "asc";
+        let limit = params.limit.max(1).min(200);
+
+        let index = self.agent_index.read();
+        let (agents, total) = index.list_agents(status, sort_by, sort_desc, limit, params.offset);
+
+        let agent_views: Vec<RpcAgentDetailView> = agents.iter().map(|a| self.agent_view_to_rpc(a)).collect();
+
+        Ok(RpcListAgentsResponse {
+            has_more: params.offset + agent_views.len() < total,
+            agents: agent_views,
+            total,
+        })
+    }
+
+    async fn query_agents_by_capability(
+        &self,
+        params: RpcQueryByCapabilityParams,
+    ) -> RpcResult<Vec<RpcAgentDetailView>> {
+        let min_stake = Self::parse_amount_u128(&params.min_stake).unwrap_or(0) as u64;
+        let limit = params.limit.max(1).min(200);
+
+        let index = self.agent_index.read();
+        let results = index.query_by_capability(
+            &params.capability,
+            params.min_reputation,
+            min_stake,
+            limit,
+        );
+
+        Ok(results.iter().map(|a| self.agent_view_to_rpc(a)).collect())
+    }
+
+    async fn query_agents_by_protocol_digest(
+        &self,
+        protocol_digest: String,
+    ) -> RpcResult<Vec<RpcAgentDetailView>> {
+        let digest_bytes = hex::decode(
+            protocol_digest.strip_prefix("0x").unwrap_or(&protocol_digest),
+        )
+        .map_err(|e| RpcError::InvalidParams(format!("Invalid protocol_digest hex: {}", e)))?;
+
+        if digest_bytes.len() != 32 {
+            return Err(RpcError::InvalidParams("protocol_digest must be 32 bytes".into()).into());
+        }
+
+        let mut hash_arr = [0u8; 32];
+        hash_arr.copy_from_slice(&digest_bytes);
+        let hash = Hash::from(hash_arr);
+
+        let index = self.agent_index.read();
+        let results = index.query_by_protocol_digest(&hash);
+        Ok(results.iter().map(|a| self.agent_view_to_rpc(a)).collect())
+    }
+
+    async fn get_agent(&self, agent_id: String) -> RpcResult<RpcAgentDetailView> {
+        let id_bytes = hex::decode(
+            agent_id.strip_prefix("0x").unwrap_or(&agent_id),
+        )
+        .map_err(|e| RpcError::InvalidParams(format!("Invalid agent_id hex: {}", e)))?;
+
+        if id_bytes.len() != 32 {
+            return Err(RpcError::InvalidParams("agent_id must be 32 bytes".into()).into());
+        }
+
+        let mut hash_arr = [0u8; 32];
+        hash_arr.copy_from_slice(&id_bytes);
+        let hash = Hash::from(hash_arr);
+
+        let registry = self.agent_registry.read();
+        let agent = registry
+            .get(&hash)
+            .ok_or_else(|| RpcError::Internal("Agent not found".into()))?;
+
+        Ok(RpcAgentDetailView {
+            agent_id: format!("0x{}", hex::encode(agent.id.as_bytes())),
+            owner: format!("0x{}", hex::encode(agent.owner.as_bytes())),
+            capabilities: agent.capabilities.clone(),
+            protocol_digests: agent
+                .protocol_digests
+                .iter()
+                .map(|d| format!("0x{}", hex::encode(d.as_bytes())))
+                .collect(),
+            endpoint: agent.endpoint.clone(),
+            stake: agent.stake.to_string(),
+            frozen: agent.frozen,
+            reputation_score: agent.reputation_score,
+            total_tasks_completed: agent.total_tasks_completed,
+            total_tasks_failed: agent.total_tasks_failed,
+            last_heartbeat: agent.last_heartbeat,
+            created_at: agent.created_at,
+        })
+    }
+
+    async fn freeze_agent(&self, params: RpcFreezeAgentParams) -> RpcResult<RpcAgentWriteResult> {
+        let id_bytes = hex::decode(
+            params.agent_id.strip_prefix("0x").unwrap_or(&params.agent_id),
+        )
+        .map_err(|e| RpcError::InvalidParams(format!("Invalid agent_id hex: {}", e)))?;
+
+        if id_bytes.len() != 32 {
+            return Err(RpcError::InvalidParams("agent_id must be 32 bytes".into()).into());
+        }
+
+        let mut hash_arr = [0u8; 32];
+        hash_arr.copy_from_slice(&id_bytes);
+        let hash = Hash::from(hash_arr);
+
+        let mut registry = self.agent_registry.write();
+        // For now, allow freeze as governance action (no signature check for simplicity)
+        registry
+            .freeze(
+                &hash,
+                qfc_qvm::stdlib::agent_registry::zero_h160(),
+                params.reason.clone(),
+                true,
+            )
+            .map_err(|e| RpcError::Internal(format!("Freeze failed: error code {}", e)))?;
+
+        // Update index
+        if let Some(agent) = registry.get(&hash) {
+            let view =
+                qfc_qvm::stdlib::agent_index::AgentView::from_registration(agent);
+            self.agent_index.write().insert_agent(view);
+        }
+
+        Ok(RpcAgentWriteResult {
+            tx_hash: String::new(),
+            agent_id: params.agent_id,
+            message: format!("Agent frozen: {}", params.reason),
+        })
+    }
+
+    async fn issue_session_key(
+        &self,
+        params: RpcIssueSessionKeyParams,
+    ) -> RpcResult<RpcSessionKeyDetail> {
+        let agent_id_bytes = hex::decode(
+            params.agent_id.strip_prefix("0x").unwrap_or(&params.agent_id),
+        )
+        .map_err(|e| RpcError::InvalidParams(format!("Invalid agent_id hex: {}", e)))?;
+
+        if agent_id_bytes.len() != 32 {
+            return Err(RpcError::InvalidParams("agent_id must be 32 bytes".into()).into());
+        }
+
+        let mut agent_hash = [0u8; 32];
+        agent_hash.copy_from_slice(&agent_id_bytes);
+        let agent_id = Hash::from(agent_hash);
+
+        // Verify agent exists
+        {
+            let registry = self.agent_registry.read();
+            if registry.get(&agent_id).is_none() {
+                return Err(RpcError::Internal("Agent not found".into()).into());
+            }
+        }
+
+        let pub_key_bytes = hex::decode(
+            params.public_key.strip_prefix("0x").unwrap_or(&params.public_key),
+        )
+        .map_err(|e| RpcError::InvalidParams(format!("Invalid public_key hex: {}", e)))?;
+
+        let spending_limit = Self::parse_amount_u128(&params.spending_limit).unwrap_or(0) as u64;
+
+        // Generate key_id from hash of params
+        let key_id = blake3_hash(
+            &[
+                agent_id_bytes.as_slice(),
+                pub_key_bytes.as_slice(),
+                &params.ttl_secs.to_le_bytes(),
+            ]
+            .concat(),
+        );
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let mut store = self.session_key_store.write();
+        store.set_timestamp(now);
+        let key = store
+            .issue(
+                key_id,
+                agent_id,
+                qfc_qvm::stdlib::agent_registry::zero_h160(),
+                pub_key_bytes,
+                params.permissions,
+                spending_limit,
+                params.period_duration,
+                params.ttl_secs,
+            )
+            .map_err(|e| RpcError::Internal(format!("Issue session key failed: error code {}", e)))?;
+
+        Ok(self.session_key_to_rpc(key))
+    }
+
+    async fn revoke_session_key_v3(&self, key_id: String) -> RpcResult<RpcAgentWriteResult> {
+        let id_bytes = hex::decode(
+            key_id.strip_prefix("0x").unwrap_or(&key_id),
+        )
+        .map_err(|e| RpcError::InvalidParams(format!("Invalid key_id hex: {}", e)))?;
+
+        if id_bytes.len() != 32 {
+            return Err(RpcError::InvalidParams("key_id must be 32 bytes".into()).into());
+        }
+
+        let mut hash_arr = [0u8; 32];
+        hash_arr.copy_from_slice(&id_bytes);
+        let hash = Hash::from(hash_arr);
+
+        let mut store = self.session_key_store.write();
+        store
+            .revoke(&hash)
+            .map_err(|e| RpcError::Internal(format!("Revoke session key failed: error code {}", e)))?;
+
+        Ok(RpcAgentWriteResult {
+            tx_hash: String::new(),
+            agent_id: key_id,
+            message: "Session key revoked".into(),
+        })
+    }
+
+    async fn get_session_keys(&self, agent_id: String) -> RpcResult<Vec<RpcSessionKeyDetail>> {
+        let id_bytes = hex::decode(
+            agent_id.strip_prefix("0x").unwrap_or(&agent_id),
+        )
+        .map_err(|e| RpcError::InvalidParams(format!("Invalid agent_id hex: {}", e)))?;
+
+        if id_bytes.len() != 32 {
+            return Err(RpcError::InvalidParams("agent_id must be 32 bytes".into()).into());
+        }
+
+        let mut hash_arr = [0u8; 32];
+        hash_arr.copy_from_slice(&id_bytes);
+        let hash = Hash::from(hash_arr);
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let mut store = self.session_key_store.write();
+        store.set_timestamp(now);
+        let keys = store.list_for_agent(&hash);
+
+        Ok(keys.iter().map(|k| self.session_key_to_rpc(k)).collect())
+    }
+
+    async fn get_agent_balance(&self, agent_id: String) -> RpcResult<RpcAgentBalance> {
+        let id_bytes = hex::decode(
+            agent_id.strip_prefix("0x").unwrap_or(&agent_id),
+        )
+        .map_err(|e| RpcError::InvalidParams(format!("Invalid agent_id hex: {}", e)))?;
+
+        if id_bytes.len() != 32 {
+            return Err(RpcError::InvalidParams("agent_id must be 32 bytes".into()).into());
+        }
+
+        let mut hash_arr = [0u8; 32];
+        hash_arr.copy_from_slice(&id_bytes);
+        let hash = Hash::from(hash_arr);
+
+        let registry = self.agent_registry.read();
+        let agent = registry
+            .get(&hash)
+            .ok_or_else(|| RpcError::Internal("Agent not found".into()))?;
+
+        let tier = qfc_qvm::stdlib::agent_registry::StakeTier::from_stake(agent.stake)
+            .map(|t| match t {
+                qfc_qvm::stdlib::agent_registry::StakeTier::Basic => "basic",
+                qfc_qvm::stdlib::agent_registry::StakeTier::Verified => "verified",
+                qfc_qvm::stdlib::agent_registry::StakeTier::Premium => "premium",
+            })
+            .unwrap_or("none");
+
+        Ok(RpcAgentBalance {
+            agent_id: format!("0x{}", hex::encode(agent.id.as_bytes())),
+            stake: agent.stake.to_string(),
+            stake_tier: tier.to_string(),
+        })
+    }
 }
 
 /// ABI helper: encode registerAgent(string,uint8[],uint256,uint256) calldata.
@@ -4230,6 +4555,51 @@ impl RpcServer {
             result_preview,
             miner_address,
             execution_time_ms,
+        }
+    }
+
+    /// Convert AgentView to RPC response
+    fn agent_view_to_rpc(&self, a: &qfc_qvm::stdlib::agent_index::AgentView) -> RpcAgentDetailView {
+        RpcAgentDetailView {
+            agent_id: format!("0x{}", hex::encode(a.id.as_bytes())),
+            owner: format!("0x{}", hex::encode(a.owner.as_bytes())),
+            capabilities: a.capabilities.clone(),
+            protocol_digests: a
+                .protocol_digests
+                .iter()
+                .map(|d| format!("0x{}", hex::encode(d.as_bytes())))
+                .collect(),
+            endpoint: a.endpoint.clone(),
+            stake: a.stake.to_string(),
+            frozen: a.frozen,
+            reputation_score: a.reputation_score,
+            total_tasks_completed: a.total_tasks_completed,
+            total_tasks_failed: 0,
+            last_heartbeat: a.last_heartbeat,
+            created_at: a.created_at,
+        }
+    }
+
+    /// Convert SessionKey to RPC response
+    fn session_key_to_rpc(
+        &self,
+        k: &qfc_qvm::stdlib::session_keys::SessionKey,
+    ) -> RpcSessionKeyDetail {
+        RpcSessionKeyDetail {
+            key_id: format!("0x{}", hex::encode(k.id.as_bytes())),
+            agent_id: format!("0x{}", hex::encode(k.agent_id.as_bytes())),
+            public_key: format!("0x{}", hex::encode(&k.public_key)),
+            permissions: k.permissions,
+            permissions_names: qfc_qvm::stdlib::session_keys::describe_permissions(k.permissions)
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            spending_limit: k.spending_limit.to_string(),
+            spent_this_period: k.spent_this_period.to_string(),
+            period_duration: k.period_duration,
+            expires_at: k.expires_at,
+            nonce: k.nonce,
+            created_at: k.created_at,
         }
     }
 }
