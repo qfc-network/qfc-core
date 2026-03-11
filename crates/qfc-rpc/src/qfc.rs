@@ -357,10 +357,7 @@ pub trait QfcApi {
 
     /// Revoke (deactivate) an agent (write — creates a ContractCall transaction)
     #[method(name = "revokeAgent")]
-    async fn revoke_agent(
-        &self,
-        request: RpcRevokeAgentRequest,
-    ) -> RpcResult<RpcAgentWriteResult>;
+    async fn revoke_agent(&self, request: RpcRevokeAgentRequest) -> RpcResult<RpcAgentWriteResult>;
 }
 
 /// Faucet response

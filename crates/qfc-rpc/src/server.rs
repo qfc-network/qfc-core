@@ -3705,10 +3705,7 @@ impl QfcApiServer for RpcServer {
     ) -> RpcResult<RpcAgentWriteResult> {
         // Validate agent_id length
         if request.agent_id.is_empty() || request.agent_id.len() > 64 {
-            return Err(RpcError::InvalidParams(
-                "agent_id must be 1-64 characters".into(),
-            )
-            .into());
+            return Err(RpcError::InvalidParams("agent_id must be 1-64 characters".into()).into());
         }
 
         let owner_address = Self::parse_address(&request.owner)?;
@@ -3736,10 +3733,9 @@ impl QfcApiServer for RpcServer {
         let daily_limit = Self::parse_amount_u128(&request.daily_limit)?;
         let max_per_tx = Self::parse_amount_u128(&request.max_per_tx)?;
         if max_per_tx > daily_limit {
-            return Err(RpcError::InvalidParams(
-                "max_per_tx cannot exceed daily_limit".into(),
-            )
-            .into());
+            return Err(
+                RpcError::InvalidParams("max_per_tx cannot exceed daily_limit".into()).into(),
+            );
         }
 
         // Verify signature: sign(agent_id || owner || daily_limit || max_per_tx)
@@ -3756,20 +3752,27 @@ impl QfcApiServer for RpcServer {
             .unwrap_or(&request.signature);
         let sig_bytes = hex::decode(sig_hex)
             .map_err(|e| RpcError::InvalidParams(format!("Invalid signature hex: {}", e)))?;
-        let signature = qfc_types::Signature::from_slice(&sig_bytes)
-            .ok_or_else(|| RpcError::InvalidParams("Invalid signature: expected 64 bytes".into()))?;
+        let signature = qfc_types::Signature::from_slice(&sig_bytes).ok_or_else(|| {
+            RpcError::InvalidParams("Invalid signature: expected 64 bytes".into())
+        })?;
 
         if verify_hash_signature(&public_key, &payload_hash, &signature).is_err() {
-            return Err(
-                RpcError::Execution("Invalid signature: owner authorization failed".into()).into(),
-            );
+            return Err(RpcError::Execution(
+                "Invalid signature: owner authorization failed".into(),
+            )
+            .into());
         }
 
         // Build ABI calldata for registerAgent(string,uint8[],uint256,uint256)
         // selector: keccak256("registerAgent(string,uint8[],uint256,uint256)")[:4]
         let selector: [u8; 4] = [0xa8, 0x5e, 0xf5, 0x79];
-        let calldata =
-            abi_encode_register_agent(selector, &request.agent_id, &request.permissions, daily_limit, max_per_tx);
+        let calldata = abi_encode_register_agent(
+            selector,
+            &request.agent_id,
+            &request.permissions,
+            daily_limit,
+            max_per_tx,
+        );
 
         let tx_hash = self
             .submit_agent_contract_call(owner_address, public_key, calldata, U256::ZERO)
@@ -3832,14 +3835,15 @@ impl QfcApiServer for RpcServer {
             .unwrap_or(&request.signature);
         let sig_bytes = hex::decode(sig_hex)
             .map_err(|e| RpcError::InvalidParams(format!("Invalid signature hex: {}", e)))?;
-        let signature = qfc_types::Signature::from_slice(&sig_bytes)
-            .ok_or_else(|| RpcError::InvalidParams("Invalid signature: expected 64 bytes".into()))?;
+        let signature = qfc_types::Signature::from_slice(&sig_bytes).ok_or_else(|| {
+            RpcError::InvalidParams("Invalid signature: expected 64 bytes".into())
+        })?;
 
         if verify_hash_signature(&public_key, &payload_hash, &signature).is_err() {
-            return Err(
-                RpcError::Execution("Invalid signature: funder authorization failed".into())
-                    .into(),
-            );
+            return Err(RpcError::Execution(
+                "Invalid signature: funder authorization failed".into(),
+            )
+            .into());
         }
 
         // Build ABI calldata for fundAgent(string)
@@ -3869,10 +3873,7 @@ impl QfcApiServer for RpcServer {
         })
     }
 
-    async fn revoke_agent(
-        &self,
-        request: RpcRevokeAgentRequest,
-    ) -> RpcResult<RpcAgentWriteResult> {
+    async fn revoke_agent(&self, request: RpcRevokeAgentRequest) -> RpcResult<RpcAgentWriteResult> {
         if request.agent_id.is_empty() {
             return Err(RpcError::InvalidParams("agent_id is required".into()).into());
         }
@@ -3911,13 +3912,15 @@ impl QfcApiServer for RpcServer {
             .unwrap_or(&request.signature);
         let sig_bytes = hex::decode(sig_hex)
             .map_err(|e| RpcError::InvalidParams(format!("Invalid signature hex: {}", e)))?;
-        let signature = qfc_types::Signature::from_slice(&sig_bytes)
-            .ok_or_else(|| RpcError::InvalidParams("Invalid signature: expected 64 bytes".into()))?;
+        let signature = qfc_types::Signature::from_slice(&sig_bytes).ok_or_else(|| {
+            RpcError::InvalidParams("Invalid signature: expected 64 bytes".into())
+        })?;
 
         if verify_hash_signature(&public_key, &payload_hash, &signature).is_err() {
-            return Err(
-                RpcError::Execution("Invalid signature: owner authorization failed".into()).into(),
-            );
+            return Err(RpcError::Execution(
+                "Invalid signature: owner authorization failed".into(),
+            )
+            .into());
         }
 
         // Build ABI calldata for revokeAgent(string)
@@ -3958,7 +3961,7 @@ fn abi_encode_register_agent(
     // Each uint8 in the array is padded to 32 bytes in ABI encoding
     let total_size = 4 + 4 * 32 // selector + 4 head words (2 offsets + 2 uint256)
         + 32 + id_padded_len     // string: length word + padded data
-        + 32 + perm_count * 32;  // array: length word + elements
+        + 32 + perm_count * 32; // array: length word + elements
 
     let mut data = Vec::with_capacity(total_size);
     data.extend_from_slice(&selector);
@@ -4449,6 +4452,8 @@ mod tests_agent_write_rpcs {
         let sig = keypair.sign_hash(&hash_with);
         assert!(qfc_crypto::verify_hash_signature(&keypair.public_key(), &hash_with, &sig).is_ok());
         // But doesn't verify against the hash without "revoke"
-        assert!(qfc_crypto::verify_hash_signature(&keypair.public_key(), &hash_without, &sig).is_err());
+        assert!(
+            qfc_crypto::verify_hash_signature(&keypair.public_key(), &hash_without, &sig).is_err()
+        );
     }
 }
