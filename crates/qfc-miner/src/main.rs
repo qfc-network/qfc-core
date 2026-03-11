@@ -9,6 +9,7 @@
 mod config;
 pub mod dashboard;
 mod gpu;
+pub mod plugin;
 mod storage;
 mod submit;
 mod worker;
@@ -113,6 +114,25 @@ async fn main() -> anyhow::Result<()> {
     let (engine, actual_backend) = create_engine_with_fallback(backend)?;
     let backend = actual_backend;
     info!("Using backend: {}, max memory: {} MB", backend, max_memory);
+
+    // Initialize inference plugins if enabled
+    if cli.plugins {
+        let plugin_config = cli.plugin_config();
+        let plugin_registry = plugin::PluginRegistry::new(plugin_config);
+        let detected = plugin_registry.detected_plugins();
+        if detected.is_empty() {
+            tracing::warn!("No inference plugins detected. External runtimes unavailable.");
+        } else {
+            info!(
+                "Inference plugins enabled: {}",
+                detected
+                    .iter()
+                    .map(|p| format!("{}", p.runtime))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
 
     // Create config
     let validator_rpc = cli.validator_rpc.clone();
