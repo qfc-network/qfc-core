@@ -226,9 +226,7 @@ impl RpcServer {
             session_key_store: Arc::new(RwLock::new(
                 qfc_qvm::stdlib::session_keys::SessionKeyStore::new(),
             )),
-            agent_index: Arc::new(RwLock::new(
-                qfc_qvm::stdlib::agent_index::AgentIndex::new(),
-            )),
+            agent_index: Arc::new(RwLock::new(qfc_qvm::stdlib::agent_index::AgentIndex::new())),
         }
     }
 
@@ -3293,7 +3291,11 @@ impl QfcApiServer for RpcServer {
         drop(pool);
 
         // Fall back to RocksDB for persisted completed/expired tasks
-        if let Ok(Some(bytes)) = self.chain.db().get(qfc_storage::cf::TASKS, task_hash.as_bytes()) {
+        if let Ok(Some(bytes)) = self
+            .chain
+            .db()
+            .get(qfc_storage::cf::TASKS, task_hash.as_bytes())
+        {
             if let Some(task) = qfc_ai_coordinator::TaskPool::deserialize_task(&bytes) {
                 return Ok(Self::build_task_status(&task));
             }
@@ -3358,9 +3360,7 @@ impl QfcApiServer for RpcServer {
                                 qfc_ai_coordinator::task_pool::PublicTaskStatus::Completed {
                                     ..
                                 } => "Completed",
-                                qfc_ai_coordinator::task_pool::PublicTaskStatus::Failed => {
-                                    "Failed"
-                                }
+                                qfc_ai_coordinator::task_pool::PublicTaskStatus::Failed => "Failed",
                                 qfc_ai_coordinator::task_pool::PublicTaskStatus::Expired => {
                                     "Expired"
                                 }
@@ -4054,7 +4054,8 @@ impl QfcApiServer for RpcServer {
         let index = self.agent_index.read();
         let (agents, total) = index.list_agents(status, sort_by, sort_desc, limit, params.offset);
 
-        let agent_views: Vec<RpcAgentDetailView> = agents.iter().map(|a| self.agent_view_to_rpc(a)).collect();
+        let agent_views: Vec<RpcAgentDetailView> =
+            agents.iter().map(|a| self.agent_view_to_rpc(a)).collect();
 
         Ok(RpcListAgentsResponse {
             has_more: params.offset + agent_views.len() < total,
@@ -4071,12 +4072,8 @@ impl QfcApiServer for RpcServer {
         let limit = params.limit.max(1).min(200);
 
         let index = self.agent_index.read();
-        let results = index.query_by_capability(
-            &params.capability,
-            params.min_reputation,
-            min_stake,
-            limit,
-        );
+        let results =
+            index.query_by_capability(&params.capability, params.min_reputation, min_stake, limit);
 
         Ok(results.iter().map(|a| self.agent_view_to_rpc(a)).collect())
     }
@@ -4086,7 +4083,9 @@ impl QfcApiServer for RpcServer {
         protocol_digest: String,
     ) -> RpcResult<Vec<RpcAgentDetailView>> {
         let digest_bytes = hex::decode(
-            protocol_digest.strip_prefix("0x").unwrap_or(&protocol_digest),
+            protocol_digest
+                .strip_prefix("0x")
+                .unwrap_or(&protocol_digest),
         )
         .map_err(|e| RpcError::InvalidParams(format!("Invalid protocol_digest hex: {}", e)))?;
 
@@ -4104,10 +4103,8 @@ impl QfcApiServer for RpcServer {
     }
 
     async fn get_agent(&self, agent_id: String) -> RpcResult<RpcAgentDetailView> {
-        let id_bytes = hex::decode(
-            agent_id.strip_prefix("0x").unwrap_or(&agent_id),
-        )
-        .map_err(|e| RpcError::InvalidParams(format!("Invalid agent_id hex: {}", e)))?;
+        let id_bytes = hex::decode(agent_id.strip_prefix("0x").unwrap_or(&agent_id))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid agent_id hex: {}", e)))?;
 
         if id_bytes.len() != 32 {
             return Err(RpcError::InvalidParams("agent_id must be 32 bytes".into()).into());
@@ -4144,7 +4141,10 @@ impl QfcApiServer for RpcServer {
 
     async fn freeze_agent(&self, params: RpcFreezeAgentParams) -> RpcResult<RpcAgentWriteResult> {
         let id_bytes = hex::decode(
-            params.agent_id.strip_prefix("0x").unwrap_or(&params.agent_id),
+            params
+                .agent_id
+                .strip_prefix("0x")
+                .unwrap_or(&params.agent_id),
         )
         .map_err(|e| RpcError::InvalidParams(format!("Invalid agent_id hex: {}", e)))?;
 
@@ -4169,8 +4169,7 @@ impl QfcApiServer for RpcServer {
 
         // Update index
         if let Some(agent) = registry.get(&hash) {
-            let view =
-                qfc_qvm::stdlib::agent_index::AgentView::from_registration(agent);
+            let view = qfc_qvm::stdlib::agent_index::AgentView::from_registration(agent);
             self.agent_index.write().insert_agent(view);
         }
 
@@ -4186,7 +4185,10 @@ impl QfcApiServer for RpcServer {
         params: RpcIssueSessionKeyParams,
     ) -> RpcResult<RpcSessionKeyDetail> {
         let agent_id_bytes = hex::decode(
-            params.agent_id.strip_prefix("0x").unwrap_or(&params.agent_id),
+            params
+                .agent_id
+                .strip_prefix("0x")
+                .unwrap_or(&params.agent_id),
         )
         .map_err(|e| RpcError::InvalidParams(format!("Invalid agent_id hex: {}", e)))?;
 
@@ -4207,7 +4209,10 @@ impl QfcApiServer for RpcServer {
         }
 
         let pub_key_bytes = hex::decode(
-            params.public_key.strip_prefix("0x").unwrap_or(&params.public_key),
+            params
+                .public_key
+                .strip_prefix("0x")
+                .unwrap_or(&params.public_key),
         )
         .map_err(|e| RpcError::InvalidParams(format!("Invalid public_key hex: {}", e)))?;
 
@@ -4241,16 +4246,16 @@ impl QfcApiServer for RpcServer {
                 params.period_duration,
                 params.ttl_secs,
             )
-            .map_err(|e| RpcError::Internal(format!("Issue session key failed: error code {}", e)))?;
+            .map_err(|e| {
+                RpcError::Internal(format!("Issue session key failed: error code {}", e))
+            })?;
 
         Ok(self.session_key_to_rpc(key))
     }
 
     async fn revoke_session_key_v3(&self, key_id: String) -> RpcResult<RpcAgentWriteResult> {
-        let id_bytes = hex::decode(
-            key_id.strip_prefix("0x").unwrap_or(&key_id),
-        )
-        .map_err(|e| RpcError::InvalidParams(format!("Invalid key_id hex: {}", e)))?;
+        let id_bytes = hex::decode(key_id.strip_prefix("0x").unwrap_or(&key_id))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid key_id hex: {}", e)))?;
 
         if id_bytes.len() != 32 {
             return Err(RpcError::InvalidParams("key_id must be 32 bytes".into()).into());
@@ -4261,9 +4266,9 @@ impl QfcApiServer for RpcServer {
         let hash = Hash::from(hash_arr);
 
         let mut store = self.session_key_store.write();
-        store
-            .revoke(&hash)
-            .map_err(|e| RpcError::Internal(format!("Revoke session key failed: error code {}", e)))?;
+        store.revoke(&hash).map_err(|e| {
+            RpcError::Internal(format!("Revoke session key failed: error code {}", e))
+        })?;
 
         Ok(RpcAgentWriteResult {
             tx_hash: String::new(),
@@ -4273,10 +4278,8 @@ impl QfcApiServer for RpcServer {
     }
 
     async fn get_session_keys(&self, agent_id: String) -> RpcResult<Vec<RpcSessionKeyDetail>> {
-        let id_bytes = hex::decode(
-            agent_id.strip_prefix("0x").unwrap_or(&agent_id),
-        )
-        .map_err(|e| RpcError::InvalidParams(format!("Invalid agent_id hex: {}", e)))?;
+        let id_bytes = hex::decode(agent_id.strip_prefix("0x").unwrap_or(&agent_id))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid agent_id hex: {}", e)))?;
 
         if id_bytes.len() != 32 {
             return Err(RpcError::InvalidParams("agent_id must be 32 bytes".into()).into());
@@ -4299,10 +4302,8 @@ impl QfcApiServer for RpcServer {
     }
 
     async fn get_agent_balance(&self, agent_id: String) -> RpcResult<RpcAgentBalance> {
-        let id_bytes = hex::decode(
-            agent_id.strip_prefix("0x").unwrap_or(&agent_id),
-        )
-        .map_err(|e| RpcError::InvalidParams(format!("Invalid agent_id hex: {}", e)))?;
+        let id_bytes = hex::decode(agent_id.strip_prefix("0x").unwrap_or(&agent_id))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid agent_id hex: {}", e)))?;
 
         if id_bytes.len() != 32 {
             return Err(RpcError::InvalidParams("agent_id must be 32 bytes".into()).into());
