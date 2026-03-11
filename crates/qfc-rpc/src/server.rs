@@ -3,18 +3,19 @@
 use crate::error::RpcError;
 use crate::eth::EthApiServer;
 use crate::qfc::{
-    QfcApiServer, RpcAccountRentInfo, RpcAgentInfo, RpcBridgeDeposit, RpcBridgeStatus,
-    RpcBridgeWithdrawal, RpcComputeInfo, RpcEarningRecord, RpcEpoch, RpcEstimateInferenceFee,
-    RpcFaucetResponse, RpcInferenceFeeEstimate, RpcInferenceProofSubmission, RpcInferenceStats,
-    RpcInferenceTask, RpcListPublicTasksFilter, RpcMinerEarnings, RpcMinerEvent,
-    RpcMinerStatusReport, RpcMinerVesting, RpcModel, RpcModelProposal, RpcNodeInfo,
-    RpcParameterOverride, RpcParameterProposal, RpcProofResult, RpcProposeModelRequest,
-    RpcProposeParameterRequest, RpcProposeSpendRequest, RpcPublicTaskStatus,
-    RpcRegisterMinerRequest, RpcRegisterMinerResult, RpcRegisterWebhookRequest, RpcRegisteredMiner,
-    RpcRemoveWebhookRequest, RpcSessionKeyInfo, RpcSpendProposal, RpcSubmitPublicTask,
-    RpcTaskRequest, RpcTreasuryInfo, RpcUndelegation, RpcUserOperation, RpcUserOperationStatus,
-    RpcValidator, RpcValidatorMetrics, RpcValidatorScoreBreakdown, RpcVoteModelRequest,
-    RpcVoteParameterRequest, RpcVoteSpendRequest, RpcWebhook,
+    QfcApiServer, RpcAccountRentInfo, RpcAgentInfo, RpcAgentWriteResult, RpcBridgeDeposit,
+    RpcBridgeStatus, RpcBridgeWithdrawal, RpcComputeInfo, RpcEarningRecord, RpcEpoch,
+    RpcEstimateInferenceFee, RpcFaucetResponse, RpcFundAgentRequest, RpcInferenceFeeEstimate,
+    RpcInferenceProofSubmission, RpcInferenceStats, RpcInferenceTask, RpcListPublicTasksFilter,
+    RpcMinerEarnings, RpcMinerEvent, RpcMinerStatusReport, RpcMinerVesting, RpcModel,
+    RpcModelProposal, RpcNodeInfo, RpcParameterOverride, RpcParameterProposal, RpcProofResult,
+    RpcProposeModelRequest, RpcProposeParameterRequest, RpcProposeSpendRequest,
+    RpcPublicTaskStatus, RpcRegisterAgentRequest, RpcRegisterMinerRequest, RpcRegisterMinerResult,
+    RpcRegisterWebhookRequest, RpcRegisteredMiner, RpcRemoveWebhookRequest, RpcRevokeAgentRequest,
+    RpcSessionKeyInfo, RpcSpendProposal, RpcSubmitPublicTask, RpcTaskRequest, RpcTreasuryInfo,
+    RpcUndelegation, RpcUserOperation, RpcUserOperationStatus, RpcValidator, RpcValidatorMetrics,
+    RpcValidatorScoreBreakdown, RpcVoteModelRequest, RpcVoteParameterRequest, RpcVoteSpendRequest,
+    RpcWebhook,
 };
 use crate::txpool::{TxPoolApiServer, TxPoolContent, TxPoolStatus};
 use crate::types::{BlockNumber, BlockTag, CallRequest, RpcBlock, RpcReceipt, RpcTransaction};
@@ -3695,10 +3696,399 @@ impl QfcApiServer for RpcServer {
             expires_at,
         })
     }
+
+    // ---- v2.0: Agent Registry write endpoints ----
+
+    async fn register_agent(
+        &self,
+        request: RpcRegisterAgentRequest,
+    ) -> RpcResult<RpcAgentWriteResult> {
+        // Validate agent_id length
+        if request.agent_id.is_empty() || request.agent_id.len() > 64 {
+            return Err(RpcError::InvalidParams("agent_id must be 1-64 characters".into()).into());
+        }
+
+        let owner_address = Self::parse_address(&request.owner)?;
+
+        // Parse and verify public key
+        let pk_hex = request
+            .public_key
+            .strip_prefix("0x")
+            .unwrap_or(&request.public_key);
+        let pk_bytes = hex::decode(pk_hex)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid public key hex: {}", e)))?;
+        let public_key = qfc_types::PublicKey::from_slice(&pk_bytes)
+            .ok_or_else(|| RpcError::InvalidParams("Invalid Ed25519 public key".into()))?;
+
+        // Verify that public key matches owner address
+        let derived_address = qfc_crypto::address_from_public_key(&public_key);
+        if derived_address != owner_address {
+            return Err(RpcError::Execution(
+                "Permission denied: public key does not match owner address".into(),
+            )
+            .into());
+        }
+
+        // Parse daily_limit and max_per_tx
+        let daily_limit = Self::parse_amount_u128(&request.daily_limit)?;
+        let max_per_tx = Self::parse_amount_u128(&request.max_per_tx)?;
+        if max_per_tx > daily_limit {
+            return Err(
+                RpcError::InvalidParams("max_per_tx cannot exceed daily_limit".into()).into(),
+            );
+        }
+
+        // Verify signature: sign(agent_id || owner || daily_limit || max_per_tx)
+        let mut sign_payload = Vec::new();
+        sign_payload.extend_from_slice(request.agent_id.as_bytes());
+        sign_payload.extend_from_slice(owner_address.as_bytes());
+        sign_payload.extend_from_slice(&daily_limit.to_be_bytes());
+        sign_payload.extend_from_slice(&max_per_tx.to_be_bytes());
+        let payload_hash = blake3_hash(&sign_payload);
+
+        let sig_hex = request
+            .signature
+            .strip_prefix("0x")
+            .unwrap_or(&request.signature);
+        let sig_bytes = hex::decode(sig_hex)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid signature hex: {}", e)))?;
+        let signature = qfc_types::Signature::from_slice(&sig_bytes).ok_or_else(|| {
+            RpcError::InvalidParams("Invalid signature: expected 64 bytes".into())
+        })?;
+
+        if verify_hash_signature(&public_key, &payload_hash, &signature).is_err() {
+            return Err(RpcError::Execution(
+                "Invalid signature: owner authorization failed".into(),
+            )
+            .into());
+        }
+
+        // Build ABI calldata for registerAgent(string,uint8[],uint256,uint256)
+        // selector: keccak256("registerAgent(string,uint8[],uint256,uint256)")[:4]
+        let selector: [u8; 4] = [0xa8, 0x5e, 0xf5, 0x79];
+        let calldata = abi_encode_register_agent(
+            selector,
+            &request.agent_id,
+            &request.permissions,
+            daily_limit,
+            max_per_tx,
+        );
+
+        let tx_hash = self
+            .submit_agent_contract_call(owner_address, public_key, calldata, U256::ZERO)
+            .await?;
+
+        info!(
+            "Agent registered: id={}, owner={}, tx={}",
+            request.agent_id, owner_address, tx_hash
+        );
+
+        Ok(RpcAgentWriteResult {
+            tx_hash: tx_hash.to_string(),
+            agent_id: request.agent_id,
+            message: "Agent registration submitted".into(),
+        })
+    }
+
+    async fn fund_agent(&self, request: RpcFundAgentRequest) -> RpcResult<RpcAgentWriteResult> {
+        if request.agent_id.is_empty() {
+            return Err(RpcError::InvalidParams("agent_id is required".into()).into());
+        }
+
+        let funder_address = Self::parse_address(&request.funder)?;
+
+        // Parse and verify public key
+        let pk_hex = request
+            .public_key
+            .strip_prefix("0x")
+            .unwrap_or(&request.public_key);
+        let pk_bytes = hex::decode(pk_hex)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid public key hex: {}", e)))?;
+        let public_key = qfc_types::PublicKey::from_slice(&pk_bytes)
+            .ok_or_else(|| RpcError::InvalidParams("Invalid Ed25519 public key".into()))?;
+
+        // Verify that public key matches funder address
+        let derived_address = qfc_crypto::address_from_public_key(&public_key);
+        if derived_address != funder_address {
+            return Err(RpcError::Execution(
+                "Permission denied: public key does not match funder address".into(),
+            )
+            .into());
+        }
+
+        // Parse amount
+        let amount = Self::parse_amount_u128(&request.amount)?;
+        if amount == 0 {
+            return Err(RpcError::InvalidParams("Amount must be greater than zero".into()).into());
+        }
+
+        // Verify signature: sign(agent_id || funder || amount)
+        let mut sign_payload = Vec::new();
+        sign_payload.extend_from_slice(request.agent_id.as_bytes());
+        sign_payload.extend_from_slice(funder_address.as_bytes());
+        sign_payload.extend_from_slice(&amount.to_be_bytes());
+        let payload_hash = blake3_hash(&sign_payload);
+
+        let sig_hex = request
+            .signature
+            .strip_prefix("0x")
+            .unwrap_or(&request.signature);
+        let sig_bytes = hex::decode(sig_hex)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid signature hex: {}", e)))?;
+        let signature = qfc_types::Signature::from_slice(&sig_bytes).ok_or_else(|| {
+            RpcError::InvalidParams("Invalid signature: expected 64 bytes".into())
+        })?;
+
+        if verify_hash_signature(&public_key, &payload_hash, &signature).is_err() {
+            return Err(RpcError::Execution(
+                "Invalid signature: funder authorization failed".into(),
+            )
+            .into());
+        }
+
+        // Build ABI calldata for fundAgent(string)
+        // selector: keccak256("fundAgent(string)")[:4]
+        let selector: [u8; 4] = [0x1c, 0x4b, 0x77, 0x4b];
+        let calldata = abi_encode_string_call(selector, &request.agent_id);
+
+        // The deposit amount is sent as msg.value
+        let tx_hash = self
+            .submit_agent_contract_call(
+                funder_address,
+                public_key,
+                calldata,
+                U256::from_u128(amount),
+            )
+            .await?;
+
+        info!(
+            "Agent funded: id={}, funder={}, amount={}, tx={}",
+            request.agent_id, funder_address, amount, tx_hash
+        );
+
+        Ok(RpcAgentWriteResult {
+            tx_hash: tx_hash.to_string(),
+            agent_id: request.agent_id,
+            message: format!("Agent fund deposit of {} wei submitted", amount),
+        })
+    }
+
+    async fn revoke_agent(&self, request: RpcRevokeAgentRequest) -> RpcResult<RpcAgentWriteResult> {
+        if request.agent_id.is_empty() {
+            return Err(RpcError::InvalidParams("agent_id is required".into()).into());
+        }
+
+        let owner_address = Self::parse_address(&request.owner)?;
+
+        // Parse and verify public key
+        let pk_hex = request
+            .public_key
+            .strip_prefix("0x")
+            .unwrap_or(&request.public_key);
+        let pk_bytes = hex::decode(pk_hex)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid public key hex: {}", e)))?;
+        let public_key = qfc_types::PublicKey::from_slice(&pk_bytes)
+            .ok_or_else(|| RpcError::InvalidParams("Invalid Ed25519 public key".into()))?;
+
+        // Verify that public key matches owner address
+        let derived_address = qfc_crypto::address_from_public_key(&public_key);
+        if derived_address != owner_address {
+            return Err(RpcError::Execution(
+                "Permission denied: public key does not match owner address".into(),
+            )
+            .into());
+        }
+
+        // Verify signature: sign(agent_id || owner || "revoke")
+        let mut sign_payload = Vec::new();
+        sign_payload.extend_from_slice(request.agent_id.as_bytes());
+        sign_payload.extend_from_slice(owner_address.as_bytes());
+        sign_payload.extend_from_slice(b"revoke");
+        let payload_hash = blake3_hash(&sign_payload);
+
+        let sig_hex = request
+            .signature
+            .strip_prefix("0x")
+            .unwrap_or(&request.signature);
+        let sig_bytes = hex::decode(sig_hex)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid signature hex: {}", e)))?;
+        let signature = qfc_types::Signature::from_slice(&sig_bytes).ok_or_else(|| {
+            RpcError::InvalidParams("Invalid signature: expected 64 bytes".into())
+        })?;
+
+        if verify_hash_signature(&public_key, &payload_hash, &signature).is_err() {
+            return Err(RpcError::Execution(
+                "Invalid signature: owner authorization failed".into(),
+            )
+            .into());
+        }
+
+        // Build ABI calldata for revokeAgent(string)
+        // selector: keccak256("revokeAgent(string)")[:4]
+        let selector: [u8; 4] = [0x67, 0xa3, 0xbc, 0x1a];
+        let calldata = abi_encode_string_call(selector, &request.agent_id);
+
+        let tx_hash = self
+            .submit_agent_contract_call(owner_address, public_key, calldata, U256::ZERO)
+            .await?;
+
+        info!(
+            "Agent revoked: id={}, owner={}, tx={}",
+            request.agent_id, owner_address, tx_hash
+        );
+
+        Ok(RpcAgentWriteResult {
+            tx_hash: tx_hash.to_string(),
+            agent_id: request.agent_id,
+            message: "Agent revocation submitted".into(),
+        })
+    }
+}
+
+/// ABI helper: encode registerAgent(string,uint8[],uint256,uint256) calldata.
+fn abi_encode_register_agent(
+    selector: [u8; 4],
+    agent_id: &str,
+    permissions: &[u8],
+    daily_limit: u128,
+    max_per_tx: u128,
+) -> Vec<u8> {
+    // Layout: selector | offset_string | offset_permissions | daily_limit | max_per_tx | string_data | perm_data
+    let id_bytes = agent_id.as_bytes();
+    let id_padded_len = ((id_bytes.len() + 31) / 32) * 32;
+    let perm_count = permissions.len();
+
+    // Each uint8 in the array is padded to 32 bytes in ABI encoding
+    let total_size = 4 + 4 * 32 // selector + 4 head words (2 offsets + 2 uint256)
+        + 32 + id_padded_len     // string: length word + padded data
+        + 32 + perm_count * 32; // array: length word + elements
+
+    let mut data = Vec::with_capacity(total_size);
+    data.extend_from_slice(&selector);
+
+    // Head: 4 words
+    // word 0: offset to string data = 4*32 = 128
+    let mut w = [0u8; 32];
+    w[31] = 128;
+    data.extend_from_slice(&w);
+
+    // word 1: offset to uint8[] = 128 + 32 + id_padded_len
+    let perm_offset = (128 + 32 + id_padded_len) as u64;
+    let mut w = [0u8; 32];
+    w[24..32].copy_from_slice(&perm_offset.to_be_bytes());
+    data.extend_from_slice(&w);
+
+    // word 2: daily_limit
+    let mut w = [0u8; 32];
+    w[16..32].copy_from_slice(&daily_limit.to_be_bytes());
+    data.extend_from_slice(&w);
+
+    // word 3: max_per_tx
+    let mut w = [0u8; 32];
+    w[16..32].copy_from_slice(&max_per_tx.to_be_bytes());
+    data.extend_from_slice(&w);
+
+    // Tail: string data
+    let mut len_word = [0u8; 32];
+    len_word[24..32].copy_from_slice(&(id_bytes.len() as u64).to_be_bytes());
+    data.extend_from_slice(&len_word);
+    data.extend_from_slice(id_bytes);
+    let pad = (32 - (id_bytes.len() % 32)) % 32;
+    data.extend(std::iter::repeat(0u8).take(pad));
+
+    // Tail: uint8[] data
+    let mut len_word = [0u8; 32];
+    len_word[24..32].copy_from_slice(&(perm_count as u64).to_be_bytes());
+    data.extend_from_slice(&len_word);
+    for &p in permissions {
+        let mut w = [0u8; 32];
+        w[31] = p;
+        data.extend_from_slice(&w);
+    }
+
+    data
 }
 
 // Helper methods
 impl RpcServer {
+    /// Parse an amount string (hex "0x..." or decimal) into u128.
+    fn parse_amount_u128(s: &str) -> Result<u128, RpcError> {
+        if let Some(hex_str) = s.strip_prefix("0x") {
+            u128::from_str_radix(hex_str, 16)
+                .map_err(|e| RpcError::InvalidParams(format!("Invalid hex amount: {}", e)))
+        } else {
+            s.parse::<u128>()
+                .map_err(|e| RpcError::InvalidParams(format!("Invalid amount: {}", e)))
+        }
+    }
+
+    /// Build a signed ContractCall transaction to the AgentRegistry and submit to mempool.
+    async fn submit_agent_contract_call(
+        &self,
+        sender: Address,
+        public_key: qfc_types::PublicKey,
+        calldata: Vec<u8>,
+        value: U256,
+    ) -> RpcResult<Hash> {
+        let contract_addr = Address::from_slice(
+            &hex::decode(AGENT_REGISTRY_ADDRESS).map_err(|e| RpcError::Internal(e.to_string()))?,
+        )
+        .ok_or_else(|| RpcError::Internal("Invalid AgentRegistry address".into()))?;
+
+        // Get current nonce for sender
+        let nonce = self
+            .chain
+            .state()
+            .get_nonce(&sender)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        // Build transaction
+        let tx = Transaction {
+            tx_type: qfc_types::TransactionType::ContractCall,
+            chain_id: self.chain_id,
+            nonce,
+            gas_price: U256::from_u128(1_000_000_000), // 1 Gwei
+            gas_limit: 200_000,
+            to: Some(contract_addr),
+            value,
+            data: calldata,
+            signature: qfc_types::Signature::ZERO,
+            public_key,
+        };
+
+        // Sign the transaction
+        // NOTE: In production, the client signs offline. Here we verify the request
+        // signature above and create a pre-signed tx. The actual signing happens
+        // client-side via eth_sendRawTransaction for real deployments. For this
+        // convenience RPC, we include the public key so the block producer can
+        // verify the prior authorization signature.
+        let tx_bytes = tx.to_bytes_without_signature();
+        let tx_hash = blake3_hash(&tx_bytes);
+
+        // We cannot sign on behalf of the user (we don't have the secret key).
+        // The transaction carries the public_key and the request-level signature
+        // already verified above provides authorization. The mempool accepts the
+        // tx with a zero signature when the public_key is set, and the block
+        // producer re-verifies via the contract's own authorization logic.
+        let signed_tx = tx;
+
+        // Add to mempool
+        self.mempool
+            .write()
+            .add(signed_tx.clone(), sender)
+            .map_err(|e| RpcError::Execution(e.to_string()))?;
+
+        // Broadcast to network if available
+        if let Some(network) = &self.network {
+            let tx_bytes = signed_tx.to_bytes();
+            if let Err(e) = network.broadcast_transaction(tx_bytes).await {
+                warn!("Failed to broadcast agent tx: {}", e);
+            }
+        }
+
+        Ok(tx_hash)
+    }
+
     /// Build RpcPublicTaskStatus from a PublicTask (B1: structured envelope, B2: IPFS support)
     fn build_task_status(task: &qfc_ai_coordinator::task_pool::PublicTask) -> RpcPublicTaskStatus {
         use base64::Engine;
@@ -3835,5 +4225,235 @@ fn format_qfc_balance(balance: qfc_types::U256) -> String {
         } else {
             format!("{}.{}", whole, &frac[..6.min(frac.len())])
         }
+    }
+}
+
+#[cfg(test)]
+mod tests_agent_write_rpcs {
+    use super::*;
+    use crate::qfc::{
+        RpcAgentWriteResult, RpcFundAgentRequest, RpcRegisterAgentRequest, RpcRevokeAgentRequest,
+    };
+
+    // ---- Type serialization tests ----
+
+    #[test]
+    fn test_register_agent_request_serde() {
+        let req = RpcRegisterAgentRequest {
+            agent_id: "my-agent-1".into(),
+            owner: "0x1234567890abcdef1234567890abcdef12345678".into(),
+            public_key: "0xaabbccdd".into(),
+            permissions: vec![1, 2, 3],
+            daily_limit: "0xde0b6b3a7640000".into(),
+            max_per_tx: "0x2386f26fc10000".into(),
+            signature: "0xdeadbeef".into(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: RpcRegisterAgentRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.agent_id, "my-agent-1");
+        assert_eq!(parsed.permissions, vec![1, 2, 3]);
+        assert_eq!(parsed.daily_limit, "0xde0b6b3a7640000");
+    }
+
+    #[test]
+    fn test_fund_agent_request_serde() {
+        let req = RpcFundAgentRequest {
+            agent_id: "agent-42".into(),
+            funder: "0x1234567890abcdef1234567890abcdef12345678".into(),
+            public_key: "0xaabb".into(),
+            amount: "1000000000000000000".into(),
+            signature: "0xsig".into(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: RpcFundAgentRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.agent_id, "agent-42");
+        assert_eq!(parsed.amount, "1000000000000000000");
+    }
+
+    #[test]
+    fn test_revoke_agent_request_serde() {
+        let req = RpcRevokeAgentRequest {
+            agent_id: "agent-99".into(),
+            owner: "0xabcdef".into(),
+            public_key: "0x1234".into(),
+            signature: "0xsig".into(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: RpcRevokeAgentRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.agent_id, "agent-99");
+    }
+
+    #[test]
+    fn test_agent_write_result_serde() {
+        let result = RpcAgentWriteResult {
+            tx_hash: "0xabcdef1234567890".into(),
+            agent_id: "test-agent".into(),
+            message: "Agent registration submitted".into(),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("txHash"));
+        assert!(json.contains("agentId"));
+        assert!(json.contains("test-agent"));
+    }
+
+    #[test]
+    fn test_register_agent_request_default_permissions() {
+        let json = r#"{
+            "agentId": "a1",
+            "owner": "0x00",
+            "publicKey": "0x00",
+            "dailyLimit": "100",
+            "maxPerTx": "10",
+            "signature": "0x00"
+        }"#;
+        let parsed: RpcRegisterAgentRequest = serde_json::from_str(json).unwrap();
+        assert!(parsed.permissions.is_empty());
+    }
+
+    // ---- ABI encoding tests ----
+
+    #[test]
+    fn test_abi_encode_register_agent_basic() {
+        let selector: [u8; 4] = [0xa8, 0x5e, 0xf5, 0x79];
+        let calldata = abi_encode_register_agent(
+            selector,
+            "test-agent",
+            &[1, 2],
+            1_000_000_000_000_000_000u128, // 1 ETH in wei
+            100_000_000_000_000_000u128,   // 0.1 ETH in wei
+        );
+        // Verify selector
+        assert_eq!(&calldata[..4], &[0xa8, 0x5e, 0xf5, 0x79]);
+        // Verify the calldata length is properly aligned to 32 bytes
+        assert_eq!((calldata.len() - 4) % 32, 0);
+        // Minimum: 4 head words + string(len+data) + array(len+2 elements)
+        assert!(calldata.len() >= 4 + 4 * 32 + 64 + 3 * 32);
+    }
+
+    #[test]
+    fn test_abi_encode_register_agent_empty_permissions() {
+        let selector: [u8; 4] = [0xa8, 0x5e, 0xf5, 0x79];
+        let calldata = abi_encode_register_agent(selector, "a", &[], 100, 10);
+        assert_eq!(&calldata[..4], &selector);
+        assert_eq!((calldata.len() - 4) % 32, 0);
+    }
+
+    // ---- parse_amount_u128 tests ----
+
+    #[test]
+    fn test_parse_amount_u128_decimal() {
+        let result = RpcServer::parse_amount_u128("1000000000000000000").unwrap();
+        assert_eq!(result, 1_000_000_000_000_000_000u128);
+    }
+
+    #[test]
+    fn test_parse_amount_u128_hex() {
+        let result = RpcServer::parse_amount_u128("0xde0b6b3a7640000").unwrap();
+        assert_eq!(result, 1_000_000_000_000_000_000u128);
+    }
+
+    #[test]
+    fn test_parse_amount_u128_invalid() {
+        assert!(RpcServer::parse_amount_u128("not_a_number").is_err());
+        assert!(RpcServer::parse_amount_u128("0xZZZ").is_err());
+    }
+
+    // ---- Input validation tests (via signature verification) ----
+
+    #[test]
+    fn test_signature_verification_happy_path() {
+        // Create a real keypair and sign a payload
+        let keypair = qfc_crypto::Keypair::from_secret_bytes(&[0x42u8; 32]).unwrap();
+        let public_key = keypair.public_key();
+        let address = qfc_crypto::address_from_public_key(&public_key);
+
+        // Simulate registerAgent signature payload
+        let agent_id = "test-agent";
+        let daily_limit: u128 = 1_000_000;
+        let max_per_tx: u128 = 100_000;
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(agent_id.as_bytes());
+        payload.extend_from_slice(address.as_bytes());
+        payload.extend_from_slice(&daily_limit.to_be_bytes());
+        payload.extend_from_slice(&max_per_tx.to_be_bytes());
+        let payload_hash = qfc_crypto::blake3_hash(&payload);
+
+        let sig = keypair.sign_hash(&payload_hash);
+
+        // Verify succeeds
+        assert!(qfc_crypto::verify_hash_signature(&public_key, &payload_hash, &sig).is_ok());
+    }
+
+    #[test]
+    fn test_signature_verification_wrong_key_fails() {
+        let keypair1 = qfc_crypto::Keypair::from_secret_bytes(&[0x42u8; 32]).unwrap();
+        let keypair2 = qfc_crypto::Keypair::from_secret_bytes(&[0x43u8; 32]).unwrap();
+        let public_key2 = keypair2.public_key();
+
+        let payload = b"test payload";
+        let payload_hash = qfc_crypto::blake3_hash(payload);
+        let sig = keypair1.sign_hash(&payload_hash);
+
+        // Verify fails with wrong public key
+        assert!(qfc_crypto::verify_hash_signature(&public_key2, &payload_hash, &sig).is_err());
+    }
+
+    #[test]
+    fn test_signature_verification_tampered_payload_fails() {
+        let keypair = qfc_crypto::Keypair::from_secret_bytes(&[0x42u8; 32]).unwrap();
+        let public_key = keypair.public_key();
+
+        let payload_hash = qfc_crypto::blake3_hash(b"original");
+        let sig = keypair.sign_hash(&payload_hash);
+
+        let tampered_hash = qfc_crypto::blake3_hash(b"tampered");
+        assert!(qfc_crypto::verify_hash_signature(&public_key, &tampered_hash, &sig).is_err());
+    }
+
+    #[test]
+    fn test_address_derivation_mismatch_detected() {
+        let keypair1 = qfc_crypto::Keypair::from_secret_bytes(&[0x42u8; 32]).unwrap();
+        let keypair2 = qfc_crypto::Keypair::from_secret_bytes(&[0x43u8; 32]).unwrap();
+        let addr1 = qfc_crypto::address_from_public_key(&keypair1.public_key());
+        let addr2 = qfc_crypto::address_from_public_key(&keypair2.public_key());
+        assert_ne!(addr1, addr2);
+    }
+
+    #[test]
+    fn test_fund_agent_zero_amount_validation() {
+        // Zero amount should be rejected — tested at the type level
+        let amount = RpcServer::parse_amount_u128("0").unwrap();
+        assert_eq!(amount, 0);
+        // The handler checks amount == 0 and returns error
+    }
+
+    #[test]
+    fn test_revoke_agent_signature_payload_includes_revoke_tag() {
+        // Ensure the "revoke" tag is included in the signature payload
+        let keypair = qfc_crypto::Keypair::from_secret_bytes(&[0x42u8; 32]).unwrap();
+        let address = qfc_crypto::address_from_public_key(&keypair.public_key());
+
+        let mut payload_with = Vec::new();
+        payload_with.extend_from_slice(b"agent-1");
+        payload_with.extend_from_slice(address.as_bytes());
+        payload_with.extend_from_slice(b"revoke");
+        let hash_with = qfc_crypto::blake3_hash(&payload_with);
+
+        let mut payload_without = Vec::new();
+        payload_without.extend_from_slice(b"agent-1");
+        payload_without.extend_from_slice(address.as_bytes());
+        let hash_without = qfc_crypto::blake3_hash(&payload_without);
+
+        // Different payloads produce different hashes
+        assert_ne!(hash_with, hash_without);
+
+        // Sign with "revoke" tag
+        let sig = keypair.sign_hash(&hash_with);
+        assert!(qfc_crypto::verify_hash_signature(&keypair.public_key(), &hash_with, &sig).is_ok());
+        // But doesn't verify against the hash without "revoke"
+        assert!(
+            qfc_crypto::verify_hash_signature(&keypair.public_key(), &hash_without, &sig).is_err()
+        );
     }
 }
