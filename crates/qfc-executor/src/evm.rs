@@ -7,7 +7,7 @@ use revm::{
     db::CacheDB,
     primitives::{
         AccountInfo, Address as RevmAddress, Bytecode, Bytes, CreateScheme,
-        ExecutionResult as RevmResult, Output, TransactTo, B256, U256 as RevmU256,
+        ExecutionResult as RevmResult, Output, SpecId, TransactTo, B256, U256 as RevmU256,
     },
     Database as _, Evm,
 };
@@ -246,6 +246,10 @@ impl<'a> EvmExecutor<'a> {
 
         // Configure chain
         evm.cfg_mut().chain_id = self.chain_id;
+
+        // Explicitly lock to Cancun spec for deterministic behavior.
+        // Without this, revm defaults to LATEST which changes across revm upgrades.
+        evm.modify_spec_id(SpecId::CANCUN);
 
         evm
     }
