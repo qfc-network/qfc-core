@@ -378,7 +378,7 @@ impl BlockProducer {
 
         // Prune expired tasks and refund submitters
         let expired = task_pool.prune_expired_public(now_ms());
-        for task in expired {
+        for task in &expired {
             if task.submitter != qfc_types::Address::ZERO {
                 let refund = U256::from_u128(task.max_fee);
                 if let Err(e) = state.add_balance(&task.submitter, refund) {
@@ -392,6 +392,30 @@ impl BlockProducer {
                     );
                 }
             }
+        }
+
+        // Persist expired tasks to RocksDB for long-term querying
+        let db = self.chain.db();
+        for task in &expired {
+            if let Some(bytes) = TaskPool::serialize_task(task) {
+                if let Err(e) = db.put(qfc_storage::cf::TASKS, task.task_id.as_bytes(), &bytes) {
+                    warn!("Failed to persist expired task: {}", e);
+                }
+            }
+        }
+
+        // Prune in-memory completed tasks that have passed retention period,
+        // persisting them to RocksDB first
+        let pruned = task_pool.prune_retained_completed();
+        for task in &pruned {
+            if let Some(bytes) = TaskPool::serialize_task(task) {
+                if let Err(e) = db.put(qfc_storage::cf::TASKS, task.task_id.as_bytes(), &bytes) {
+                    warn!("Failed to persist completed task: {}", e);
+                }
+            }
+        }
+        if !pruned.is_empty() {
+            debug!("Persisted {} completed tasks to storage", pruned.len());
         }
     }
 

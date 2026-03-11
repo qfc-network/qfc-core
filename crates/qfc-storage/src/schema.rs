@@ -55,6 +55,10 @@ pub mod cf {
     /// Indexed by miner address for efficient per-miner queries
     pub const MINER_EARNINGS: &str = "miner_earnings";
 
+    /// Inference tasks: task_id (32 bytes Hash) -> PublicTask (borsh)
+    /// Persists completed/expired/failed tasks for long-term querying
+    pub const TASKS: &str = "tasks";
+
     /// All column families
     pub const ALL: &[&str] = &[
         BLOCK_HEADERS,
@@ -74,6 +78,7 @@ pub mod cf {
         WORK_PROOFS,
         ETH_TX_INDEX,
         MINER_EARNINGS,
+        TASKS,
     ];
 }
 
