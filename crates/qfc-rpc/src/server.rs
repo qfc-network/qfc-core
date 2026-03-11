@@ -2164,7 +2164,7 @@ impl QfcApiServer for RpcServer {
                                 );
                                 ResultStorage::Ipfs {
                                     cid: upload_result.cid,
-                                    size: upload_result.size,
+                                    size: upload_result.size as u64,
                                     preview,
                                 }
                             }
@@ -3260,10 +3260,20 @@ impl QfcApiServer for RpcServer {
         let task_hash = Self::parse_hash(&task_id)?;
         let pool = self.task_pool.read();
 
-        match pool.get_public_task(&task_hash) {
-            Some(task) => Ok(Self::build_task_status(task)),
-            None => Err(RpcError::InvalidParams("Task not found".to_string()).into()),
+        // Check in-memory first (active + recently completed)
+        if let Some(task) = pool.get_public_task(&task_hash) {
+            return Ok(Self::build_task_status(task));
         }
+        drop(pool);
+
+        // Fall back to RocksDB for persisted completed/expired tasks
+        if let Ok(Some(bytes)) = self.chain.db().get(qfc_storage::cf::TASKS, task_hash.as_bytes()) {
+            if let Some(task) = qfc_ai_coordinator::TaskPool::deserialize_task(&bytes) {
+                return Ok(Self::build_task_status(&task));
+            }
+        }
+
+        Err(RpcError::InvalidParams("Task not found".to_string()).into())
     }
 
     async fn list_public_tasks(
@@ -3278,17 +3288,70 @@ impl QfcApiServer for RpcServer {
 
         let pool_filter = qfc_ai_coordinator::PublicTaskFilter {
             submitter,
-            status: filter.status,
+            status: filter.status.clone(),
             limit: filter.limit,
             offset: filter.offset,
         };
 
         let pool = self.task_pool.read();
-        let tasks = pool
+        let mut tasks: Vec<RpcPublicTaskStatus> = pool
             .list_public_tasks(&pool_filter)
             .into_iter()
             .map(Self::build_task_status)
             .collect();
+        drop(pool);
+
+        // If in-memory results are fewer than requested, supplement from RocksDB
+        let limit = filter.limit.min(200).max(1);
+        if tasks.len() < limit {
+            let remaining = limit - tasks.len();
+            let in_memory_ids: std::collections::HashSet<String> =
+                tasks.iter().map(|t| t.task_id.clone()).collect();
+
+            if let Ok(iter) = self.chain.db().iter(qfc_storage::cf::TASKS) {
+                for (_, value) in iter.take(remaining * 2) {
+                    if let Some(task) = qfc_ai_coordinator::TaskPool::deserialize_task(&value) {
+                        let tid = hex::encode(task.task_id.as_bytes());
+                        if in_memory_ids.contains(&tid) {
+                            continue;
+                        }
+                        // Apply filters
+                        if let Some(ref sub) = submitter {
+                            if task.submitter != *sub {
+                                continue;
+                            }
+                        }
+                        if let Some(ref status) = filter.status {
+                            let task_status = match &task.status {
+                                qfc_ai_coordinator::task_pool::PublicTaskStatus::Pending => {
+                                    "Pending"
+                                }
+                                qfc_ai_coordinator::task_pool::PublicTaskStatus::Assigned => {
+                                    "Assigned"
+                                }
+                                qfc_ai_coordinator::task_pool::PublicTaskStatus::Completed {
+                                    ..
+                                } => "Completed",
+                                qfc_ai_coordinator::task_pool::PublicTaskStatus::Failed => {
+                                    "Failed"
+                                }
+                                qfc_ai_coordinator::task_pool::PublicTaskStatus::Expired => {
+                                    "Expired"
+                                }
+                            };
+                            if task_status != status.as_str() {
+                                continue;
+                            }
+                        }
+                        tasks.push(Self::build_task_status(&task));
+                        if tasks.len() >= limit {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(tasks)
     }
 
@@ -4135,7 +4198,7 @@ impl RpcServer {
                 ResultStorage::Ipfs { cid, size, preview } => (
                     "Completed".into(),
                     None,
-                    Some(*size),
+                    Some(*size as usize),
                     Some("ipfs".to_string()),
                     Some(cid.clone()),
                     Some(base64::engine::general_purpose::STANDARD.encode(preview)),
