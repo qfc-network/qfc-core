@@ -692,7 +692,11 @@ mod tests {
         let restored = TaskPool::deserialize_task(&bytes).expect("deserialize");
 
         match &restored.status {
-            PublicTaskStatus::Completed { result, miner, execution_time_ms } => {
+            PublicTaskStatus::Completed {
+                result,
+                miner,
+                execution_time_ms,
+            } => {
                 match result {
                     ResultStorage::Inline(data) => assert_eq!(data, &[10, 20, 30, 40]),
                     _ => panic!("expected Inline result"),

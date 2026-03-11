@@ -107,10 +107,7 @@ impl AgentIndex {
                 .insert(rep_key.clone());
         }
         for digest in &view.protocol_digests {
-            self.by_protocol
-                .entry(*digest)
-                .or_default()
-                .insert(id);
+            self.by_protocol.entry(*digest).or_default().insert(id);
         }
 
         self.agents.insert(id, view);
@@ -119,8 +116,7 @@ impl AgentIndex {
     /// Remove an agent from the index
     pub fn remove_agent(&mut self, agent_id: &Hash) {
         if let Some(old) = self.agents.remove(agent_id) {
-            let old_key =
-                ReputationKey(std::cmp::Reverse(old.reputation_score), *agent_id);
+            let old_key = ReputationKey(std::cmp::Reverse(old.reputation_score), *agent_id);
             for cap in &old.capabilities {
                 if let Some(set) = self.by_capability.get_mut(cap) {
                     set.remove(&old_key);
@@ -434,16 +430,31 @@ mod tests {
         frozen.frozen = true;
         idx.insert_agent(frozen);
 
-        let (active, _) =
-            idx.list_agents(AgentStatusFilter::Active, AgentSortField::ReputationScore, true, 10, 0);
+        let (active, _) = idx.list_agents(
+            AgentStatusFilter::Active,
+            AgentSortField::ReputationScore,
+            true,
+            10,
+            0,
+        );
         assert_eq!(active.len(), 1);
 
-        let (frozen_list, _) =
-            idx.list_agents(AgentStatusFilter::Frozen, AgentSortField::ReputationScore, true, 10, 0);
+        let (frozen_list, _) = idx.list_agents(
+            AgentStatusFilter::Frozen,
+            AgentSortField::ReputationScore,
+            true,
+            10,
+            0,
+        );
         assert_eq!(frozen_list.len(), 1);
 
-        let (all, total) =
-            idx.list_agents(AgentStatusFilter::All, AgentSortField::ReputationScore, true, 10, 0);
+        let (all, total) = idx.list_agents(
+            AgentStatusFilter::All,
+            AgentSortField::ReputationScore,
+            true,
+            10,
+            0,
+        );
         assert_eq!(all.len(), 2);
         assert_eq!(total, 2);
     }
@@ -455,8 +466,13 @@ mod tests {
         idx.insert_agent(make_view(b"s2", vec![], 9000, 1000));
         idx.insert_agent(make_view(b"s3", vec![], 6000, 1000));
 
-        let (agents, _) =
-            idx.list_agents(AgentStatusFilter::All, AgentSortField::ReputationScore, true, 10, 0);
+        let (agents, _) = idx.list_agents(
+            AgentStatusFilter::All,
+            AgentSortField::ReputationScore,
+            true,
+            10,
+            0,
+        );
         assert_eq!(agents[0].reputation_score, 9000);
         assert_eq!(agents[1].reputation_score, 6000);
         assert_eq!(agents[2].reputation_score, 3000);
@@ -471,13 +487,23 @@ mod tests {
             idx.insert_agent(v);
         }
 
-        let (page1, total) =
-            idx.list_agents(AgentStatusFilter::All, AgentSortField::CreatedAt, true, 2, 0);
+        let (page1, total) = idx.list_agents(
+            AgentStatusFilter::All,
+            AgentSortField::CreatedAt,
+            true,
+            2,
+            0,
+        );
         assert_eq!(page1.len(), 2);
         assert_eq!(total, 5);
 
-        let (page2, _) =
-            idx.list_agents(AgentStatusFilter::All, AgentSortField::CreatedAt, true, 2, 2);
+        let (page2, _) = idx.list_agents(
+            AgentStatusFilter::All,
+            AgentSortField::CreatedAt,
+            true,
+            2,
+            2,
+        );
         assert_eq!(page2.len(), 2);
     }
 

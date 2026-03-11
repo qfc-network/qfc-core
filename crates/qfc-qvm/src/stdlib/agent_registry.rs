@@ -207,10 +207,7 @@ impl AgentRegistry {
             revoke_initiated_at: 0,
         };
 
-        self.owner_index
-            .entry(owner)
-            .or_default()
-            .push(agent_id);
+        self.owner_index.entry(owner).or_default().push(agent_id);
         self.agents.insert(agent_id, agent);
 
         self.events.push(AgentEvent::Registered {
@@ -237,11 +234,7 @@ impl AgentRegistry {
     pub fn list_by_owner(&self, owner: &H160) -> Vec<&AgentRegistration> {
         self.owner_index
             .get(owner)
-            .map(|ids| {
-                ids.iter()
-                    .filter_map(|id| self.agents.get(id))
-                    .collect()
-            })
+            .map(|ids| ids.iter().filter_map(|id| self.agents.get(id)).collect())
             .unwrap_or_default()
     }
 
@@ -358,12 +351,7 @@ impl AgentRegistry {
     }
 
     /// Slash stake (called by verification system on misbehavior)
-    pub fn slash(
-        &mut self,
-        agent_id: &Hash,
-        amount: u64,
-        reason: String,
-    ) -> Result<u64, u64> {
+    pub fn slash(&mut self, agent_id: &Hash, amount: u64, reason: String) -> Result<u64, u64> {
         let agent = self.agents.get_mut(agent_id).ok_or(E_NOT_FOUND)?;
         let slash_amount = amount.min(agent.stake);
         agent.stake -= slash_amount;
@@ -372,9 +360,7 @@ impl AgentRegistry {
             .saturating_sub(REPUTATION_SLASH_DELTA);
 
         // Auto-freeze if reputation drops below threshold after consecutive failures
-        if agent.total_tasks_failed >= 3
-            && agent.reputation_score < 2000
-        {
+        if agent.total_tasks_failed >= 3 && agent.reputation_score < 2000 {
             agent.frozen = true;
         }
 
@@ -401,11 +387,7 @@ impl AgentRegistry {
     }
 
     /// Record task result (called by AI Coordinator)
-    pub fn record_task_result(
-        &mut self,
-        agent_id: &Hash,
-        success: bool,
-    ) -> Result<(), u64> {
+    pub fn record_task_result(&mut self, agent_id: &Hash, success: bool) -> Result<(), u64> {
         let agent = self.agents.get_mut(agent_id).ok_or(E_NOT_FOUND)?;
         if success {
             agent.total_tasks_completed += 1;
@@ -421,11 +403,7 @@ impl AgentRegistry {
     }
 
     /// Initiate agent revocation (starts cooldown)
-    pub fn initiate_revoke(
-        &mut self,
-        agent_id: &Hash,
-        caller: H160,
-    ) -> Result<(), u64> {
+    pub fn initiate_revoke(&mut self, agent_id: &Hash, caller: H160) -> Result<(), u64> {
         let agent = self.agents.get_mut(agent_id).ok_or(E_NOT_FOUND)?;
         if agent.owner != caller {
             return Err(E_NOT_OWNER);
@@ -436,11 +414,7 @@ impl AgentRegistry {
     }
 
     /// Complete revocation after cooldown, returns stake to reclaim
-    pub fn complete_revoke(
-        &mut self,
-        agent_id: &Hash,
-        caller: H160,
-    ) -> Result<u64, u64> {
+    pub fn complete_revoke(&mut self, agent_id: &Hash, caller: H160) -> Result<u64, u64> {
         let agent = self.agents.get(agent_id).ok_or(E_NOT_FOUND)?;
         if agent.owner != caller {
             return Err(E_NOT_OWNER);
@@ -592,9 +566,18 @@ mod tests {
     fn test_stake_tiers() {
         assert_eq!(StakeTier::from_stake(0), None);
         assert_eq!(StakeTier::from_stake(MIN_STAKE_BASIC - 1), None);
-        assert_eq!(StakeTier::from_stake(MIN_STAKE_BASIC), Some(StakeTier::Basic));
-        assert_eq!(StakeTier::from_stake(MIN_STAKE_VERIFIED), Some(StakeTier::Verified));
-        assert_eq!(StakeTier::from_stake(MIN_STAKE_PREMIUM), Some(StakeTier::Premium));
+        assert_eq!(
+            StakeTier::from_stake(MIN_STAKE_BASIC),
+            Some(StakeTier::Basic)
+        );
+        assert_eq!(
+            StakeTier::from_stake(MIN_STAKE_VERIFIED),
+            Some(StakeTier::Verified)
+        );
+        assert_eq!(
+            StakeTier::from_stake(MIN_STAKE_PREMIUM),
+            Some(StakeTier::Premium)
+        );
         assert_eq!(StakeTier::from_stake(u64::MAX), Some(StakeTier::Premium));
     }
 
@@ -628,7 +611,8 @@ mod tests {
         let id = register_basic(&mut reg, b"epf", owner);
         reg.freeze(&id, owner, "test".to_string(), false).unwrap();
         assert_eq!(
-            reg.update_endpoint(&id, owner, "x".to_string()).unwrap_err(),
+            reg.update_endpoint(&id, owner, "x".to_string())
+                .unwrap_err(),
             E_AGENT_FROZEN
         );
     }
@@ -867,7 +851,8 @@ mod tests {
         let owner = owner_addr(1);
         let id = register_basic(&mut reg, b"pd", owner);
         let digest = test_hash(b"protocol-v2");
-        reg.update_protocol_digests(&id, owner, vec![digest]).unwrap();
+        reg.update_protocol_digests(&id, owner, vec![digest])
+            .unwrap();
         assert_eq!(reg.get(&id).unwrap().protocol_digests, vec![digest]);
     }
 

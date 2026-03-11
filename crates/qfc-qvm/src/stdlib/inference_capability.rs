@@ -176,9 +176,7 @@ impl CapabilityStore {
         if cap.expires_at != 0 && self.now >= cap.expires_at {
             return Err(E_CAPABILITY_EXPIRED);
         }
-        if !cap.allowed_models.is_empty()
-            && !cap.allowed_models.iter().any(|m| m == model_id)
-        {
+        if !cap.allowed_models.is_empty() && !cap.allowed_models.iter().any(|m| m == model_id) {
             return Err(E_MODEL_NOT_ALLOWED);
         }
         if cap.remaining_budget < fee {
@@ -200,12 +198,7 @@ impl CapabilityStore {
     }
 
     /// Top up budget
-    pub fn top_up(
-        &mut self,
-        capability_id: &Hash,
-        caller: H160,
-        amount: u64,
-    ) -> Result<(), u64> {
+    pub fn top_up(&mut self, capability_id: &Hash, caller: H160, amount: u64) -> Result<(), u64> {
         let cap = self
             .capabilities
             .get_mut(capability_id)
@@ -269,11 +262,7 @@ impl CapabilityStore {
     }
 
     /// Destroy capability and return remaining budget
-    pub fn destroy(
-        &mut self,
-        capability_id: &Hash,
-        caller: H160,
-    ) -> Result<u64, u64> {
+    pub fn destroy(&mut self, capability_id: &Hash, caller: H160) -> Result<u64, u64> {
         let cap = self.capabilities.get(capability_id).ok_or(E_NOT_FOUND)?;
         if cap.owner != caller {
             return Err(E_NOT_OWNER);
@@ -346,13 +335,7 @@ mod tests {
         let mut store = make_store(1000);
         let id = test_hash(b"cap1");
         let cap = store
-            .create(
-                id,
-                owner(1),
-                5000,
-                vec!["bert-v1".to_string()],
-                2000,
-            )
+            .create(id, owner(1), 5000, vec!["bert-v1".to_string()], 2000)
             .unwrap();
         assert_eq!(cap.remaining_budget, 5000);
         assert_eq!(cap.expires_at, 2000);
@@ -397,9 +380,7 @@ mod tests {
         let mut store = make_store(1000);
         let id = create_basic(&mut store, b"model", owner(1));
         assert_eq!(
-            store
-                .use_for_inference(&id, "gpt-4", 100)
-                .unwrap_err(),
+            store.use_for_inference(&id, "gpt-4", 100).unwrap_err(),
             E_MODEL_NOT_ALLOWED
         );
     }

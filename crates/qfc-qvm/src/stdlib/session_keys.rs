@@ -439,7 +439,16 @@ mod tests {
         let mut store = make_store(1000);
         assert_eq!(
             store
-                .issue(test_hash(b"k"), test_hash(b"a"), H160::zero(), vec![], 0, 0, 0, 3600)
+                .issue(
+                    test_hash(b"k"),
+                    test_hash(b"a"),
+                    H160::zero(),
+                    vec![],
+                    0,
+                    0,
+                    0,
+                    3600
+                )
                 .unwrap_err(),
             E_ZERO_PERMISSIONS
         );
@@ -451,7 +460,16 @@ mod tests {
         // TTL = 0
         assert_eq!(
             store
-                .issue(test_hash(b"k"), test_hash(b"a"), H160::zero(), vec![], PERM_INFERENCE, 0, 0, 0)
+                .issue(
+                    test_hash(b"k"),
+                    test_hash(b"a"),
+                    H160::zero(),
+                    vec![],
+                    PERM_INFERENCE,
+                    0,
+                    0,
+                    0
+                )
                 .unwrap_err(),
             E_INVALID_TTL
         );
@@ -580,7 +598,9 @@ mod tests {
             )
             .unwrap();
         // Should allow any amount
-        store.validate(&key_id, PERM_INFERENCE, u64::MAX, 0).unwrap();
+        store
+            .validate(&key_id, PERM_INFERENCE, u64::MAX, 0)
+            .unwrap();
     }
 
     #[test]
