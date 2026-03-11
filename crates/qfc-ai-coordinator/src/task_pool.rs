@@ -2,27 +2,28 @@
 
 use std::collections::{HashMap, VecDeque};
 
+use borsh::BorshDeserialize;
 use qfc_inference::{GpuTier, InferenceTask};
 use qfc_types::{Address, Hash};
 
 use crate::task_types::{synthetic_task_for_tier, task_requirements};
 
 /// How the result data is stored
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub enum ResultStorage {
     /// Result stored inline (small results)
     Inline(Vec<u8>),
     /// Result stored on IPFS (large results)
     Ipfs {
         cid: String,
-        size: usize,
+        size: u64,
         /// First 1KB preview
         preview: Vec<u8>,
     },
 }
 
 /// Status of a publicly submitted inference task
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub enum PublicTaskStatus {
     Pending,
     Assigned,
@@ -49,7 +50,7 @@ pub struct PublicTaskFilter {
 }
 
 /// A publicly submitted inference task (paid)
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub struct PublicTask {
     pub task_id: Hash,
     pub submitter: Address,
@@ -410,10 +411,34 @@ impl TaskPool {
         expired
     }
 
-    /// Remove entries from completed_tasks whose retention period has elapsed
-    pub fn prune_retained_completed(&mut self) {
+    /// Remove entries from completed_tasks whose retention period has elapsed.
+    /// Returns the pruned tasks so the caller can persist them to storage if needed.
+    pub fn prune_retained_completed(&mut self) -> Vec<PublicTask> {
         let now = now_ms();
-        self.completed_tasks.retain(|_, (_, expiry)| now < *expiry);
+        let expired_ids: Vec<Hash> = self
+            .completed_tasks
+            .iter()
+            .filter(|(_, (_, expiry))| now >= *expiry)
+            .map(|(id, _)| *id)
+            .collect();
+
+        let mut pruned = Vec::new();
+        for id in expired_ids {
+            if let Some((task, _)) = self.completed_tasks.remove(&id) {
+                pruned.push(task);
+            }
+        }
+        pruned
+    }
+
+    /// Serialize a PublicTask to bytes for storage
+    pub fn serialize_task(task: &PublicTask) -> Option<Vec<u8>> {
+        borsh::to_vec(task).ok()
+    }
+
+    /// Deserialize a PublicTask from bytes
+    pub fn deserialize_task(bytes: &[u8]) -> Option<PublicTask> {
+        PublicTask::try_from_slice(bytes).ok()
     }
 
     /// Generate a unique task ID
@@ -605,5 +630,215 @@ mod tests {
         // Very low memory should not match any task
         let task = pool.fetch_task(GpuTier::Hot, 0);
         assert!(task.is_none());
+    }
+
+    #[test]
+    fn test_serialize_deserialize_pending_task() {
+        let task = PublicTask {
+            task_id: qfc_crypto::blake3_hash(b"task-ser-1"),
+            submitter: Address::new([0xAB; 20]),
+            inner_task: InferenceTask::new(
+                qfc_crypto::blake3_hash(b"task-ser-1"),
+                5,
+                qfc_inference::task::ComputeTaskType::Embedding {
+                    model_id: qfc_inference::task::ModelId::new("bert", "v1"),
+                    input_hash: qfc_crypto::blake3_hash(b"input"),
+                },
+                vec![1, 2, 3],
+                1000,
+                u64::MAX,
+            ),
+            max_fee: 5000,
+            status: PublicTaskStatus::Pending,
+            submitted_at: 1000,
+        };
+
+        let bytes = TaskPool::serialize_task(&task).expect("serialize");
+        let restored = TaskPool::deserialize_task(&bytes).expect("deserialize");
+
+        assert_eq!(restored.task_id, task.task_id);
+        assert_eq!(restored.submitter, task.submitter);
+        assert_eq!(restored.max_fee, task.max_fee);
+        assert_eq!(restored.submitted_at, task.submitted_at);
+        assert!(matches!(restored.status, PublicTaskStatus::Pending));
+    }
+
+    #[test]
+    fn test_serialize_deserialize_completed_inline() {
+        let task = PublicTask {
+            task_id: qfc_crypto::blake3_hash(b"task-ser-2"),
+            submitter: Address::new([0x01; 20]),
+            inner_task: InferenceTask::new(
+                qfc_crypto::blake3_hash(b"task-ser-2"),
+                3,
+                qfc_inference::task::ComputeTaskType::Embedding {
+                    model_id: qfc_inference::task::ModelId::new("bert", "v1"),
+                    input_hash: qfc_crypto::blake3_hash(b"data2"),
+                },
+                vec![],
+                500,
+                u64::MAX,
+            ),
+            max_fee: 1000,
+            status: PublicTaskStatus::Completed {
+                result: ResultStorage::Inline(vec![10, 20, 30, 40]),
+                miner: Address::new([0xCC; 20]),
+                execution_time_ms: 250,
+            },
+            submitted_at: 500,
+        };
+
+        let bytes = TaskPool::serialize_task(&task).expect("serialize");
+        let restored = TaskPool::deserialize_task(&bytes).expect("deserialize");
+
+        match &restored.status {
+            PublicTaskStatus::Completed { result, miner, execution_time_ms } => {
+                match result {
+                    ResultStorage::Inline(data) => assert_eq!(data, &[10, 20, 30, 40]),
+                    _ => panic!("expected Inline result"),
+                }
+                assert_eq!(*miner, Address::new([0xCC; 20]));
+                assert_eq!(*execution_time_ms, 250);
+            }
+            _ => panic!("expected Completed status"),
+        }
+    }
+
+    #[test]
+    fn test_serialize_deserialize_completed_ipfs() {
+        let task = PublicTask {
+            task_id: qfc_crypto::blake3_hash(b"task-ser-3"),
+            submitter: Address::ZERO,
+            inner_task: InferenceTask::new(
+                qfc_crypto::blake3_hash(b"task-ser-3"),
+                1,
+                qfc_inference::task::ComputeTaskType::Embedding {
+                    model_id: qfc_inference::task::ModelId::new("llama", "v2"),
+                    input_hash: qfc_crypto::blake3_hash(b"large-input"),
+                },
+                vec![],
+                100,
+                u64::MAX,
+            ),
+            max_fee: 50000,
+            status: PublicTaskStatus::Completed {
+                result: ResultStorage::Ipfs {
+                    cid: "QmTestCid123456".to_string(),
+                    size: 1_048_576,
+                    preview: vec![0xFF; 128],
+                },
+                miner: Address::new([0x42; 20]),
+                execution_time_ms: 5000,
+            },
+            submitted_at: 100,
+        };
+
+        let bytes = TaskPool::serialize_task(&task).expect("serialize");
+        let restored = TaskPool::deserialize_task(&bytes).expect("deserialize");
+
+        match &restored.status {
+            PublicTaskStatus::Completed { result, .. } => match result {
+                ResultStorage::Ipfs { cid, size, preview } => {
+                    assert_eq!(cid, "QmTestCid123456");
+                    assert_eq!(*size, 1_048_576);
+                    assert_eq!(preview.len(), 128);
+                }
+                _ => panic!("expected Ipfs result"),
+            },
+            _ => panic!("expected Completed status"),
+        }
+    }
+
+    #[test]
+    fn test_serialize_deserialize_expired() {
+        let task = PublicTask {
+            task_id: qfc_crypto::blake3_hash(b"task-ser-4"),
+            submitter: Address::new([0x55; 20]),
+            inner_task: InferenceTask::new(
+                qfc_crypto::blake3_hash(b"task-ser-4"),
+                2,
+                qfc_inference::task::ComputeTaskType::Embedding {
+                    model_id: qfc_inference::task::ModelId::new("bert", "v1"),
+                    input_hash: qfc_crypto::blake3_hash(b"expired-input"),
+                },
+                vec![],
+                100,
+                200, // short deadline
+            ),
+            max_fee: 100,
+            status: PublicTaskStatus::Expired,
+            submitted_at: 100,
+        };
+
+        let bytes = TaskPool::serialize_task(&task).expect("serialize");
+        let restored = TaskPool::deserialize_task(&bytes).expect("deserialize");
+
+        assert!(matches!(restored.status, PublicTaskStatus::Expired));
+        assert_eq!(restored.task_id, task.task_id);
+        assert_eq!(restored.submitter, Address::new([0x55; 20]));
+    }
+
+    #[test]
+    fn test_serialize_deserialize_failed() {
+        let task = PublicTask {
+            task_id: qfc_crypto::blake3_hash(b"task-ser-5"),
+            submitter: Address::ZERO,
+            inner_task: InferenceTask::new(
+                qfc_crypto::blake3_hash(b"task-ser-5"),
+                1,
+                qfc_inference::task::ComputeTaskType::Embedding {
+                    model_id: qfc_inference::task::ModelId::new("bert", "v1"),
+                    input_hash: qfc_crypto::blake3_hash(b"failed-input"),
+                },
+                vec![],
+                100,
+                u64::MAX,
+            ),
+            max_fee: 200,
+            status: PublicTaskStatus::Failed,
+            submitted_at: 100,
+        };
+
+        let bytes = TaskPool::serialize_task(&task).expect("serialize");
+        let restored = TaskPool::deserialize_task(&bytes).expect("deserialize");
+        assert!(matches!(restored.status, PublicTaskStatus::Failed));
+    }
+
+    #[test]
+    fn test_prune_retained_completed_returns_tasks() {
+        let mut pool = TaskPool::new();
+        let input_hash = qfc_crypto::blake3_hash(b"prune-test");
+        let task_type = qfc_inference::task::ComputeTaskType::Embedding {
+            model_id: qfc_inference::task::ModelId::new("bert", "v1"),
+            input_hash,
+        };
+        let task_id = qfc_crypto::blake3_hash(b"task-prune");
+        let task = InferenceTask::new(task_id, 1, task_type, vec![], now_ms(), u64::MAX);
+
+        pool.submit_public_task(Address::ZERO, task, 500);
+        pool.complete_public_task(
+            &task_id,
+            ResultStorage::Inline(vec![1, 2, 3]),
+            Address::new([1; 20]),
+            100,
+        );
+
+        // Task is in completed_tasks but retention hasn't expired yet
+        let pruned = pool.prune_retained_completed();
+        assert!(pruned.is_empty());
+        assert!(pool.get_public_task(&task_id).is_some());
+
+        // Manually expire the retention by backdating
+        if let Some((_, expiry)) = pool.completed_tasks.get_mut(&task_id) {
+            *expiry = 0; // already expired
+        }
+
+        // Now prune should return the task
+        let pruned = pool.prune_retained_completed();
+        assert_eq!(pruned.len(), 1);
+        assert_eq!(pruned[0].task_id, task_id);
+
+        // Task should no longer be in memory
+        assert!(pool.get_public_task(&task_id).is_none());
     }
 }
