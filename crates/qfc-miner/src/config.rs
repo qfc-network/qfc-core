@@ -60,6 +60,38 @@ pub struct MinerCli {
     /// Generate a new Ed25519 miner wallet and exit
     #[arg(long)]
     pub generate_wallet: bool,
+
+    /// Enable external inference plugins (llama.cpp, whisper.cpp, stable-diffusion.cpp)
+    #[arg(long, env = "QFC_MINER_PLUGINS")]
+    pub plugins: bool,
+
+    /// Miner tier for inference plugin (1=basic, 2=mid, 3=high)
+    #[arg(long, default_value = "1", env = "QFC_MINER_TIER")]
+    pub tier: u8,
+
+    /// Comma-separated list of model names for plugin inference
+    #[arg(long, default_value = "", env = "QFC_MINER_PLUGIN_MODELS")]
+    pub plugin_models: String,
+
+    /// Custom llama.cpp binary path
+    #[arg(long, env = "QFC_MINER_LLAMA_PATH")]
+    pub llama_path: Option<PathBuf>,
+
+    /// Custom whisper.cpp binary path
+    #[arg(long, env = "QFC_MINER_WHISPER_PATH")]
+    pub whisper_path: Option<PathBuf>,
+
+    /// Custom stable-diffusion.cpp binary path
+    #[arg(long, env = "QFC_MINER_SD_PATH")]
+    pub sd_path: Option<PathBuf>,
+
+    /// Number of GPU layers to offload (llama.cpp -ngl)
+    #[arg(long, default_value = "999", env = "QFC_MINER_GPU_LAYERS")]
+    pub gpu_layers: u32,
+
+    /// Plugin execution timeout in seconds
+    #[arg(long, default_value = "300", env = "QFC_MINER_PLUGIN_TIMEOUT")]
+    pub plugin_timeout: u64,
 }
 
 impl MinerCli {
@@ -70,6 +102,40 @@ impl MinerCli {
             "metal" => BackendType::Metal,
             "cpu" => BackendType::Cpu,
             _ => qfc_inference::runtime::detect_backend(), // auto
+        }
+    }
+
+    /// Build plugin configuration from CLI args
+    pub fn plugin_config(&self) -> crate::plugin::PluginConfig {
+        let mut binary_paths = std::collections::HashMap::new();
+        if let Some(ref p) = self.llama_path {
+            binary_paths.insert("llama-cli".to_string(), p.clone());
+        }
+        if let Some(ref p) = self.whisper_path {
+            binary_paths.insert("whisper-cli".to_string(), p.clone());
+        }
+        if let Some(ref p) = self.sd_path {
+            binary_paths.insert("sd".to_string(), p.clone());
+        }
+
+        let models: Vec<String> = self
+            .plugin_models
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        crate::plugin::PluginConfig {
+            enabled: self.plugins,
+            tier: self.tier,
+            models,
+            model_dir: self.model_dir.clone(),
+            binary_paths,
+            timeout_secs: self.plugin_timeout,
+            gpu_layers: self.gpu_layers,
+            threads: std::thread::available_parallelism()
+                .map(|n| n.get() as u32)
+                .unwrap_or(4),
         }
     }
 }
