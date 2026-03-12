@@ -1604,6 +1604,7 @@ impl QfcApiServer for RpcServer {
             "CUDA" => Some(qfc_types::BackendType::Cuda),
             "METAL" => Some(qfc_types::BackendType::Metal),
             "ROCM" => Some(qfc_types::BackendType::Rocm),
+            "OPENCL" => Some(qfc_types::BackendType::OpenCl),
             "CPU" => Some(qfc_types::BackendType::Cpu),
             _ => None,
         };
