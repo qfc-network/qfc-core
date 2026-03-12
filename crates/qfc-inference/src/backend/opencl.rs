@@ -57,11 +57,11 @@ impl OpenClEngine {
             InferenceError::ExecutionFailed(format!("ONNX model load error: {}", e))
         };
 
-        tracing::info!("Creating ONNX session with CPU execution provider (OpenCL device detected)");
+        tracing::info!(
+            "Creating ONNX session with CPU execution provider (OpenCL device detected)"
+        );
         let mut builder = ort::session::Session::builder().map_err(map_builder_err)?;
-        let session = builder
-            .commit_from_file(model_path)
-            .map_err(map_load_err)?;
+        let session = builder.commit_from_file(model_path).map_err(map_load_err)?;
         Ok(session)
     }
 }
@@ -90,14 +90,13 @@ impl InferenceEngine for OpenClEngine {
             model_id
         );
 
-        let model_path =
-            crate::backend::onnx::OnnxEngine::get_onnx_model_path(&model_id.name)
-                .ok_or_else(|| {
-                    InferenceError::ModelNotFound(format!(
-                        "No ONNX model mapping for: {}",
-                        model_id.name
-                    ))
-                })?;
+        let model_path = crate::backend::onnx::OnnxEngine::get_onnx_model_path(&model_id.name)
+            .ok_or_else(|| {
+                InferenceError::ModelNotFound(format!(
+                    "No ONNX model mapping for: {}",
+                    model_id.name
+                ))
+            })?;
 
         let (repo_id, onnx_file) = model_path;
         let cache_dir = std::env::var("HOME")
@@ -124,9 +123,7 @@ impl InferenceEngine for OpenClEngine {
                 .arg(&onnx_path)
                 .arg(&url)
                 .output()
-                .map_err(|e| {
-                    InferenceError::ExecutionFailed(format!("curl failed: {}", e))
-                })?;
+                .map_err(|e| InferenceError::ExecutionFailed(format!("curl failed: {}", e)))?;
 
             if !output.status.success() {
                 return Err(InferenceError::ExecutionFailed(format!(
@@ -239,9 +236,7 @@ fn run_onnx_inference(
         .map_err(map_err)?;
 
     let output_value = &outputs[0];
-    let (_, output_data) = output_value
-        .try_extract_tensor::<f32>()
-        .map_err(map_err)?;
+    let (_, output_data) = output_value.try_extract_tensor::<f32>().map_err(map_err)?;
 
     let output_bytes: Vec<u8> = output_data.iter().flat_map(|v| v.to_le_bytes()).collect();
     Ok(output_bytes)
