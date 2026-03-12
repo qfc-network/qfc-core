@@ -1,4 +1,4 @@
-//! Inference backends (CUDA, Metal, ROCm/ONNX, CPU)
+//! Inference backends (CUDA, Metal, ROCm/ONNX, OpenCL, CPU)
 
 pub mod cpu;
 
@@ -10,3 +10,6 @@ pub mod metal;
 
 #[cfg(feature = "onnx")]
 pub mod onnx;
+
+#[cfg(feature = "opencl")]
+pub mod opencl;

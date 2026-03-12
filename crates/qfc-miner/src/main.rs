@@ -305,7 +305,7 @@ fn create_engine_with_fallback(
 ) -> anyhow::Result<(Box<dyn InferenceEngine>, BackendType)> {
     match qfc_inference::create_engine_for_backend(backend) {
         Ok(engine) => Ok((engine, backend)),
-        Err(e) if backend != BackendType::Cpu => {
+        Err(_e) if backend != BackendType::Cpu => {
             tracing::info!(
                 "{} backend not available, using CPU instead (compile with --features {} for GPU acceleration)",
                 backend,

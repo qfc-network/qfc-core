@@ -1,12 +1,32 @@
-# QFC AI Inference Mining Guide (macOS)
+# QFC AI Inference Mining Guide
 
-This guide explains how to compile and run the QFC miner with real AI inference on macOS with Apple Silicon GPU acceleration.
+This guide explains how to compile and run the QFC miner with real AI inference and GPU acceleration.
+
+## Supported Backends
+
+| Backend | Platform | Feature Flag | Detection | Hardware |
+|---------|----------|-------------|-----------|----------|
+| **Metal** | macOS | `metal` | Auto (Apple Silicon) | M1/M2/M3/M4 |
+| **CUDA** | Linux | `cuda` | `nvidia-smi` | NVIDIA GPUs |
+| **ROCm** | Linux | `rocm` | `rocm-smi` / `/opt/rocm` | AMD GPUs (ROCm-supported) |
+| **OpenCL** | Linux | `opencl` | `clinfo` | AMD Polaris/older, Intel GPUs |
+| **CPU** | Any | `cpu` (default) | Always | Any |
+
+Backend selection priority (when `--backend auto`): Metal → CUDA → ROCm → OpenCL → CPU.
 
 ## System Requirements
 
+### macOS
 - **macOS 13 (Ventura)** or later
 - **Apple Silicon** (M1 / M2 / M3 / M4) — Intel Macs can use CPU-only mode
 - **Xcode Command Line Tools**: `xcode-select --install`
+
+### Linux (OpenCL)
+- OpenCL ICD loader and GPU driver (e.g. Mesa Rusticl, Intel compute-runtime)
+- `clinfo` for device detection: `sudo apt install clinfo`
+- Works with AMD Polaris/Baffin GPUs, Intel integrated/discrete GPUs
+
+### All platforms
 - **Rust 1.75+**: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
 - **16 GB+ RAM** recommended (8 GB minimum for Cold tier)
 
@@ -18,7 +38,16 @@ cd qfc-core
 # Apple Silicon (Metal GPU + candle ML backend)
 cargo build --release --features metal,candle --bin qfc-miner
 
-# CPU-only (Intel Mac or no GPU acceleration)
+# Linux AMD/Intel with OpenCL
+cargo build --release --features opencl --bin qfc-miner
+
+# Linux NVIDIA with CUDA
+cargo build --release --features cuda --bin qfc-miner
+
+# Linux AMD with ROCm
+cargo build --release --features rocm --bin qfc-miner
+
+# CPU-only (any platform)
 cargo build --release --features candle --bin qfc-miner
 ```
 
@@ -111,6 +140,19 @@ docker build -f Dockerfile.miner -t qfc-miner .
 ```
 
 ## Troubleshooting
+
+### `OpenCL (not compiled with opencl feature)`
+
+You compiled without `--features opencl`. Rebuild:
+```bash
+cargo build --release --features opencl --bin qfc-miner
+```
+
+Verify OpenCL is working on your system:
+```bash
+clinfo --list   # Should show your GPU
+clpeak          # Optional: verify GPU compute throughput
+```
 
 ### `Metal (not compiled with metal feature)`
 

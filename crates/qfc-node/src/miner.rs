@@ -185,6 +185,7 @@ impl MiningService {
         let backend = match self.config.inference_backend.as_deref() {
             Some("cuda") => qfc_inference::BackendType::Cuda,
             Some("metal") => qfc_inference::BackendType::Metal,
+            Some("opencl") => qfc_inference::BackendType::OpenCl,
             Some("cpu") => qfc_inference::BackendType::Cpu,
             _ => qfc_inference::runtime::detect_backend(),
         };

@@ -1,4 +1,4 @@
-//! Runtime detection (CUDA, Metal, CPU)
+//! Runtime detection (CUDA, Metal, OpenCL, CPU)
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
@@ -26,6 +26,8 @@ pub enum BackendType {
     Rocm,
     /// CPU-only fallback
     Cpu,
+    /// OpenCL GPU (AMD/Intel without ROCm, via ONNX Runtime)
+    OpenCl,
 }
 
 impl fmt::Display for BackendType {
@@ -34,6 +36,7 @@ impl fmt::Display for BackendType {
             BackendType::Cuda => write!(f, "CUDA"),
             BackendType::Metal => write!(f, "Metal"),
             BackendType::Rocm => write!(f, "ROCm"),
+            BackendType::OpenCl => write!(f, "OpenCL"),
             BackendType::Cpu => write!(f, "CPU"),
         }
     }
@@ -139,6 +142,8 @@ pub fn detect_backend() -> BackendType {
         BackendType::Metal
     } else if is_rocm_available() {
         BackendType::Rocm
+    } else if is_opencl_available() {
+        BackendType::OpenCl
     } else {
         BackendType::Cpu
     }
@@ -151,6 +156,7 @@ pub fn detect_hardware() -> HardwareInfo {
         BackendType::Cuda => detect_cuda_hardware(),
         BackendType::Metal => detect_metal_hardware(),
         BackendType::Rocm => detect_rocm_hardware(),
+        BackendType::OpenCl => detect_opencl_hardware(),
         BackendType::Cpu => detect_cpu_hardware(),
     };
     let tier = classify_tier(backend, memory_mb);
@@ -186,7 +192,7 @@ pub fn classify_tier(backend: BackendType, memory_mb: u64) -> GpuTier {
                 GpuTier::Cold // M1/M2/M3 base with 8GB
             }
         }
-        BackendType::Rocm => {
+        BackendType::Rocm | BackendType::OpenCl => {
             if memory_mb >= 24_000 {
                 GpuTier::Hot
             } else if memory_mb >= 8_000 {
@@ -236,6 +242,100 @@ fn is_rocm_available() -> bool {
     }
     #[cfg(not(feature = "rocm"))]
     false
+}
+
+/// Check if OpenCL is available (Linux AMD/Intel GPUs without ROCm)
+fn is_opencl_available() -> bool {
+    #[cfg(feature = "opencl")]
+    {
+        // Only consider OpenCL on Linux where ROCm is not available
+        if cfg!(target_os = "linux") {
+            // Check for clinfo to detect OpenCL-capable devices
+            if let Ok(output) = std::process::Command::new("clinfo")
+                .arg("--list")
+                .output()
+            {
+                if output.status.success() {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    // Look for at least one GPU device (not just CPU OpenCL)
+                    return stdout.to_lowercase().contains("gpu")
+                        || stdout.contains("Platform #")
+                        || stdout.lines().count() > 1;
+                }
+            }
+            // Fallback: check if any OpenCL ICD files exist
+            std::path::Path::new("/etc/OpenCL/vendors").exists()
+        } else {
+            false
+        }
+    }
+    #[cfg(not(feature = "opencl"))]
+    false
+}
+
+/// Detect OpenCL GPU hardware info
+fn detect_opencl_hardware() -> (u64, u32, String) {
+    // Try clinfo for detailed device info
+    if let Ok(output) = std::process::Command::new("clinfo").output() {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let mut device_name = String::new();
+            let mut global_mem_bytes: u64 = 0;
+            let mut compute_units: u32 = 0;
+
+            for line in stdout.lines() {
+                let trimmed = line.trim();
+                if device_name.is_empty() && trimmed.starts_with("Device Name") {
+                    device_name = trimmed
+                        .split_once(|c: char| c == ':' || c == '\t')
+                        .map(|(_, v)| v.trim().to_string())
+                        .unwrap_or_default();
+                }
+                if global_mem_bytes == 0 && trimmed.starts_with("Global memory size") {
+                    global_mem_bytes = trimmed
+                        .split_whitespace()
+                        .filter_map(|w| w.parse::<u64>().ok())
+                        .next()
+                        .unwrap_or(0);
+                }
+                if compute_units == 0 && trimmed.starts_with("Max compute units") {
+                    compute_units = trimmed
+                        .split_whitespace()
+                        .filter_map(|w| w.parse::<u32>().ok())
+                        .next()
+                        .unwrap_or(0);
+                }
+            }
+
+            if !device_name.is_empty() {
+                let mem_mb = global_mem_bytes / (1024 * 1024);
+                return (mem_mb, compute_units, format!("{} (OpenCL)", device_name));
+            }
+        }
+    }
+
+    // Fallback: check lspci for AMD/Intel GPU
+    let name = std::process::Command::new("lspci")
+        .output()
+        .ok()
+        .and_then(|o| {
+            String::from_utf8(o.stdout).ok().and_then(|s| {
+                s.lines()
+                    .find(|l| {
+                        let lower = l.to_lowercase();
+                        lower.contains("vga")
+                            && (lower.contains("amd")
+                                || lower.contains("radeon")
+                                || lower.contains("intel"))
+                    })
+                    .map(|l| l.to_string())
+            })
+        })
+        .unwrap_or_else(|| "GPU (OpenCL)".to_string());
+
+    // Use system memory as approximation
+    let mem = get_system_memory_mb();
+    (mem / 4, 0, format!("{} (OpenCL)", name))
 }
 
 /// Detect AMD ROCm GPU hardware info
@@ -382,6 +482,7 @@ mod tests {
         assert_eq!(format!("{}", BackendType::Cuda), "CUDA");
         assert_eq!(format!("{}", BackendType::Metal), "Metal");
         assert_eq!(format!("{}", BackendType::Rocm), "ROCm");
+        assert_eq!(format!("{}", BackendType::OpenCl), "OpenCL");
         assert_eq!(format!("{}", BackendType::Cpu), "CPU");
     }
 
@@ -410,7 +511,7 @@ mod tests {
         // (unless cuda or metal features are enabled AND hardware is present)
         assert!(matches!(
             backend,
-            BackendType::Cpu | BackendType::Metal | BackendType::Cuda
+            BackendType::Cpu | BackendType::Metal | BackendType::Cuda | BackendType::OpenCl
         ));
     }
 

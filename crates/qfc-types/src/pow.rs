@@ -216,6 +216,8 @@ pub enum BackendType {
     Rocm,
     /// CPU-only fallback
     Cpu,
+    /// OpenCL GPU (AMD/Intel without ROCm, via ONNX Runtime)
+    OpenCl,
 }
 
 impl std::fmt::Display for BackendType {
@@ -224,6 +226,7 @@ impl std::fmt::Display for BackendType {
             BackendType::Cuda => write!(f, "CUDA"),
             BackendType::Metal => write!(f, "Metal"),
             BackendType::Rocm => write!(f, "ROCm"),
+            BackendType::OpenCl => write!(f, "OpenCL"),
             BackendType::Cpu => write!(f, "CPU"),
         }
     }
@@ -596,6 +599,7 @@ mod tests {
         assert_eq!(format!("{}", BackendType::Cuda), "CUDA");
         assert_eq!(format!("{}", BackendType::Metal), "Metal");
         assert_eq!(format!("{}", BackendType::Rocm), "ROCm");
+        assert_eq!(format!("{}", BackendType::OpenCl), "OpenCL");
         assert_eq!(format!("{}", BackendType::Cpu), "CPU");
     }
 
