@@ -58,7 +58,7 @@ impl OpenClEngine {
         };
 
         tracing::info!("Creating ONNX session with CPU execution provider (OpenCL device detected)");
-        let builder = ort::session::Session::builder().map_err(map_builder_err)?;
+        let mut builder = ort::session::Session::builder().map_err(map_builder_err)?;
         let session = builder
             .commit_from_file(model_path)
             .map_err(map_load_err)?;
