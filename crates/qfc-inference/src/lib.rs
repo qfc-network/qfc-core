@@ -10,6 +10,7 @@
 //! - **CUDA**: NVIDIA GPUs via candle-core CUDA backend (requires `cuda` feature)
 //! - **Metal**: Apple Silicon via candle-core Metal backend (requires `metal` feature)
 //! - **ROCm**: AMD GPUs via ONNX Runtime ROCm backend (requires `rocm` feature)
+//! - **OpenCL**: AMD/Intel GPUs on Linux via ONNX Runtime (requires `opencl` feature)
 //!
 //! # Feature Flags
 //!
@@ -18,6 +19,7 @@
 //! - `metal`: Enable Apple Metal GPU support (macOS only)
 //! - `onnx`: Enable ONNX Runtime inference
 //! - `rocm`: Enable AMD ROCm GPU support (implies `onnx`)
+//! - `opencl`: Enable OpenCL GPU support for Linux AMD/Intel GPUs (implies `onnx`)
 
 pub mod backend;
 pub mod data_store;
@@ -141,6 +143,16 @@ pub fn create_engine_for_backend(
             "ROCm (not compiled with rocm feature)".to_string(),
         )),
 
+        #[cfg(feature = "opencl")]
+        BackendType::OpenCl => {
+            let engine = backend::opencl::OpenClEngine::new()?;
+            Ok(Box::new(engine))
+        }
+        #[cfg(not(feature = "opencl"))]
+        BackendType::OpenCl => Err(InferenceError::BackendUnavailable(
+            "OpenCL (not compiled with opencl feature)".to_string(),
+        )),
+
         BackendType::Cpu => {
             let engine = backend::cpu::CpuEngine::new();
             Ok(Box::new(engine))
@@ -158,7 +170,7 @@ mod tests {
         let engine = create_engine().unwrap();
         assert!(matches!(
             engine.backend_type(),
-            BackendType::Cpu | BackendType::Metal | BackendType::Cuda | BackendType::Rocm
+            BackendType::Cpu | BackendType::Metal | BackendType::Cuda | BackendType::Rocm | BackendType::OpenCl
         ));
     }
 

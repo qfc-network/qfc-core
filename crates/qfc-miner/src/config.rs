@@ -21,7 +21,7 @@ pub struct MinerCli {
     #[arg(long, default_value = "", env = "QFC_MINER_WALLET")]
     pub wallet: String,
 
-    /// Inference backend: auto, cuda, metal, cpu
+    /// Inference backend: auto, cuda, metal, opencl, cpu
     #[arg(long, default_value = "auto", env = "QFC_MINER_BACKEND")]
     pub backend: String,
 
@@ -100,6 +100,7 @@ impl MinerCli {
         match self.backend.to_lowercase().as_str() {
             "cuda" => BackendType::Cuda,
             "metal" => BackendType::Metal,
+            "opencl" => BackendType::OpenCl,
             "cpu" => BackendType::Cpu,
             _ => qfc_inference::runtime::detect_backend(), // auto
         }

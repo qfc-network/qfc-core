@@ -42,9 +42,11 @@ candle = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:hf
 cuda = ["candle", "candle-core/cuda"]
 # Metal GPU support for Apple Silicon (implies candle)
 metal = ["candle", "candle-core/metal"]
-# ONNX Runtime support (AMD ROCm, DirectML, CPU)
+# ONNX Runtime support (AMD ROCm, OpenCL, DirectML, CPU)
 onnx = ["dep:ort"]
 # AMD ROCm GPU support via ONNX Runtime
 rocm = ["onnx"]
+# OpenCL GPU support for Linux AMD/Intel GPUs (via ONNX Runtime)
+opencl = ["onnx"]
 # CoreML (Apple Silicon Metal/ANE) via ONNX Runtime
 coreml = ["onnx", "ort/coreml"]

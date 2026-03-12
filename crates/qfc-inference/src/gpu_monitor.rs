@@ -29,6 +29,7 @@ pub fn collect_gpu_metrics(backend: BackendType) -> GpuMetrics {
         BackendType::Cuda => collect_nvidia_metrics(),
         BackendType::Metal => collect_metal_metrics(),
         BackendType::Rocm => collect_rocm_metrics(),
+        BackendType::OpenCl => collect_opencl_metrics(),
         BackendType::Cpu => collect_cpu_metrics(),
     }
 }
@@ -135,6 +136,51 @@ fn collect_rocm_metrics() -> GpuMetrics {
         memory_used_mb: 0,
         memory_total_mb: 0,
         backend: "ROCm".to_string(),
+    }
+}
+
+/// Collect OpenCL GPU metrics via clinfo
+fn collect_opencl_metrics() -> GpuMetrics {
+    // Parse clinfo for memory info
+    if let Ok(output) = std::process::Command::new("clinfo").output() {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let mut mem_total: u64 = 0;
+
+            for line in stdout.lines() {
+                let trimmed = line.trim();
+                if mem_total == 0 && trimmed.starts_with("Global memory size") {
+                    mem_total = trimmed
+                        .split_whitespace()
+                        .filter_map(|w| w.parse::<u64>().ok())
+                        .next()
+                        .unwrap_or(0)
+                        / (1024 * 1024);
+                }
+            }
+
+            if mem_total > 0 {
+                return GpuMetrics {
+                    temperature_c: 0,
+                    power_watts: 0,
+                    utilization_percent: 0,
+                    memory_used_mb: 0, // OpenCL doesn't expose used memory easily
+                    memory_total_mb: mem_total,
+                    backend: "OpenCL".to_string(),
+                };
+            }
+        }
+    }
+
+    // Fallback: use system memory estimate
+    let (used, total) = get_system_memory();
+    GpuMetrics {
+        temperature_c: 0,
+        power_watts: 0,
+        utilization_percent: 0,
+        memory_used_mb: used,
+        memory_total_mb: total,
+        backend: "OpenCL".to_string(),
     }
 }
 

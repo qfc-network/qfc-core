@@ -85,7 +85,7 @@ struct Args {
     #[arg(long, default_value = "pow", env = "QFC_COMPUTE_MODE")]
     compute_mode: String,
 
-    /// Inference backend: auto, cuda, metal, cpu (for inference mode)
+    /// Inference backend: auto, cuda, metal, opencl, cpu (for inference mode)
     #[arg(long, default_value = "auto", env = "QFC_INFERENCE_BACKEND")]
     inference_backend: String,
 
