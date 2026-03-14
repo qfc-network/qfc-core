@@ -20,7 +20,10 @@ use crate::qfc::{
     RpcVoteSpendRequest, RpcWebhook,
 };
 use crate::txpool::{TxPoolApiServer, TxPoolContent, TxPoolStatus};
-use crate::types::{AddressFilter, BlockNumber, BlockTag, CallRequest, LogFilter, RpcBlock, RpcLog, RpcReceipt, RpcTransaction, TopicFilter};
+use crate::types::{
+    AddressFilter, BlockNumber, BlockTag, CallRequest, LogFilter, RpcBlock, RpcLog, RpcReceipt,
+    RpcTransaction, TopicFilter,
+};
 use jsonrpsee::core::{RpcResult, SubscriptionResult};
 use jsonrpsee::server::{ServerBuilder, ServerHandle};
 use parking_lot::RwLock;
@@ -1160,10 +1163,9 @@ impl EthApiServer for RpcServer {
 
         // Limit range to prevent DoS (max 10000 blocks)
         if to_block > from_block + 10_000 {
-            return Err(RpcError::InvalidParams(
-                "block range too large, max 10000 blocks".into(),
-            )
-            .into());
+            return Err(
+                RpcError::InvalidParams("block range too large, max 10000 blocks".into()).into(),
+            );
         }
 
         // Parse address filter
@@ -1223,9 +1225,7 @@ impl EthApiServer for RpcServer {
 
                 for log in &receipt.logs {
                     // Filter by address
-                    if !filter_addresses.is_empty()
-                        && !filter_addresses.contains(&log.address)
-                    {
+                    if !filter_addresses.is_empty() && !filter_addresses.contains(&log.address) {
                         global_log_index += 1;
                         continue;
                     }

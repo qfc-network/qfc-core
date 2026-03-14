@@ -251,10 +251,7 @@ fn is_opencl_available() -> bool {
         // Only consider OpenCL on Linux where ROCm is not available
         if cfg!(target_os = "linux") {
             // Check for clinfo to detect OpenCL-capable devices
-            if let Ok(output) = std::process::Command::new("clinfo")
-                .arg("--list")
-                .output()
-            {
+            if let Ok(output) = std::process::Command::new("clinfo").arg("--list").output() {
                 if output.status.success() {
                     let stdout = String::from_utf8_lossy(&output.stdout);
                     // Look for at least one GPU device (not just CPU OpenCL)

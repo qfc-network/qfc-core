@@ -1,6 +1,8 @@
 //! Ethereum-compatible RPC methods
 
-use crate::types::{BlockNumber, CallRequest, LogFilter, RpcBlock, RpcLog, RpcReceipt, RpcTransaction};
+use crate::types::{
+    BlockNumber, CallRequest, LogFilter, RpcBlock, RpcLog, RpcReceipt, RpcTransaction,
+};
 use jsonrpsee::core::{RpcResult, SubscriptionResult};
 use jsonrpsee::proc_macros::rpc;
 use serde::{Deserialize, Serialize};

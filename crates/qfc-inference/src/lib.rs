@@ -170,7 +170,11 @@ mod tests {
         let engine = create_engine().unwrap();
         assert!(matches!(
             engine.backend_type(),
-            BackendType::Cpu | BackendType::Metal | BackendType::Cuda | BackendType::Rocm | BackendType::OpenCl
+            BackendType::Cpu
+                | BackendType::Metal
+                | BackendType::Cuda
+                | BackendType::Rocm
+                | BackendType::OpenCl
         ));
     }
 
