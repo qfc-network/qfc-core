@@ -1,6 +1,6 @@
 //! Ethereum-compatible RPC methods
 
-use crate::types::{BlockNumber, CallRequest, RpcBlock, RpcReceipt, RpcTransaction};
+use crate::types::{BlockNumber, CallRequest, LogFilter, RpcBlock, RpcLog, RpcReceipt, RpcTransaction};
 use jsonrpsee::core::{RpcResult, SubscriptionResult};
 use jsonrpsee::proc_macros::rpc;
 use serde::{Deserialize, Serialize};
@@ -103,6 +103,10 @@ pub trait EthApi {
         storage_keys: Vec<String>,
         block: Option<BlockNumber>,
     ) -> RpcResult<RpcAccountProof>;
+
+    /// Returns logs matching a filter
+    #[method(name = "getLogs")]
+    async fn get_logs(&self, filter: LogFilter) -> RpcResult<Vec<RpcLog>>;
 
     /// Subscribe to new block headers
     #[subscription(name = "subscribe" => "subscription", unsubscribe = "unsubscribe", item = serde_json::Value)]
