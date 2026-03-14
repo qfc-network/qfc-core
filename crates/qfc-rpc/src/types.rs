@@ -296,7 +296,20 @@ impl RpcReceipt {
             cumulative_gas_used: format!("0x{:x}", receipt.cumulative_gas_used),
             gas_used: format!("0x{:x}", receipt.gas_used),
             contract_address: receipt.contract_address.map(|a| a.to_string()),
-            logs: receipt.logs.iter().map(RpcLog::from_log).collect(),
+            logs: receipt
+                .logs
+                .iter()
+                .enumerate()
+                .map(|(i, log)| {
+                    let mut rpc_log = RpcLog::from_log(log);
+                    rpc_log.block_number = block_number.map(|n| format!("0x{:x}", n));
+                    rpc_log.block_hash = block_hash.map(|h| h.to_string());
+                    rpc_log.transaction_hash = Some(receipt.tx_hash.to_string());
+                    rpc_log.transaction_index = Some(format!("0x{:x}", receipt.tx_index));
+                    rpc_log.log_index = Some(format!("0x{:x}", i));
+                    rpc_log
+                })
+                .collect(),
             logs_bloom: format!("0x{}", hex::encode(&receipt.logs_bloom.0)),
             status: format!("0x{}", if receipt.is_success() { "1" } else { "0" }),
         }
@@ -330,6 +343,63 @@ impl RpcLog {
             log_index: None,
         }
     }
+
+    pub fn from_log_with_meta(
+        log: &qfc_types::Log,
+        block_number: u64,
+        block_hash: Hash,
+        tx_hash: Hash,
+        tx_index: u32,
+        log_index: u32,
+    ) -> Self {
+        Self {
+            address: log.address.to_string(),
+            topics: log.topics.iter().map(|t| t.to_string()).collect(),
+            data: format!("0x{}", hex::encode(&log.data)),
+            block_number: Some(format!("0x{:x}", block_number)),
+            block_hash: Some(block_hash.to_string()),
+            transaction_hash: Some(tx_hash.to_string()),
+            transaction_index: Some(format!("0x{:x}", tx_index)),
+            log_index: Some(format!("0x{:x}", log_index)),
+        }
+    }
+}
+
+/// Log filter for eth_getLogs
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogFilter {
+    /// From block (default: latest)
+    #[serde(default)]
+    pub from_block: Option<BlockNumber>,
+    /// To block (default: latest)
+    #[serde(default)]
+    pub to_block: Option<BlockNumber>,
+    /// Contract address or list of addresses
+    #[serde(default)]
+    pub address: Option<AddressFilter>,
+    /// Topic filters (position-based, up to 4 topics)
+    #[serde(default)]
+    pub topics: Option<Vec<Option<TopicFilter>>>,
+    /// Block hash (overrides fromBlock/toBlock)
+    #[serde(default)]
+    pub block_hash: Option<String>,
+}
+
+/// Address filter: single address or array of addresses
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AddressFilter {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+/// Topic filter: single topic or array of topics (OR logic)
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum TopicFilter {
+    Single(String),
+    Multiple(Vec<String>),
 }
 
 /// Call request

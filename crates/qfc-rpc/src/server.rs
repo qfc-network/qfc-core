@@ -20,7 +20,7 @@ use crate::qfc::{
     RpcVoteSpendRequest, RpcWebhook,
 };
 use crate::txpool::{TxPoolApiServer, TxPoolContent, TxPoolStatus};
-use crate::types::{BlockNumber, BlockTag, CallRequest, RpcBlock, RpcReceipt, RpcTransaction};
+use crate::types::{AddressFilter, BlockNumber, BlockTag, CallRequest, LogFilter, RpcBlock, RpcLog, RpcReceipt, RpcTransaction, TopicFilter};
 use jsonrpsee::core::{RpcResult, SubscriptionResult};
 use jsonrpsee::server::{ServerBuilder, ServerHandle};
 use parking_lot::RwLock;
@@ -1138,6 +1138,142 @@ impl EthApiServer for RpcServer {
             storage_hash: format!("0x{}", hex::encode(state.root().as_bytes())),
             storage_proof: storage_proofs,
         })
+    }
+
+    async fn get_logs(&self, filter: LogFilter) -> RpcResult<Vec<RpcLog>> {
+        // Determine block range
+        let (from_block, to_block) = if let Some(ref bh) = filter.block_hash {
+            // blockHash mode: single block
+            let hash = Self::parse_hash(bh)?;
+            let block = self
+                .chain
+                .get_block_by_hash(&hash)
+                .map_err(|e| RpcError::Internal(e.to_string()))?
+                .ok_or_else(|| RpcError::InvalidParams("block not found".into()))?;
+            let num = block.number();
+            (num, num)
+        } else {
+            let from = self.resolve_block_number(filter.from_block);
+            let to = self.resolve_block_number(filter.to_block);
+            (from, to)
+        };
+
+        // Limit range to prevent DoS (max 10000 blocks)
+        if to_block > from_block + 10_000 {
+            return Err(RpcError::InvalidParams(
+                "block range too large, max 10000 blocks".into(),
+            )
+            .into());
+        }
+
+        // Parse address filter
+        let filter_addresses: Vec<qfc_types::Address> = match &filter.address {
+            Some(AddressFilter::Single(addr)) => vec![Self::parse_address(addr)?],
+            Some(AddressFilter::Multiple(addrs)) => addrs
+                .iter()
+                .map(|a| Self::parse_address(a))
+                .collect::<Result<Vec<_>, _>>()?,
+            None => vec![],
+        };
+
+        // Parse topic filters
+        let topic_filters: Vec<Option<Vec<qfc_types::Hash>>> = match &filter.topics {
+            Some(topics) => topics
+                .iter()
+                .take(4)
+                .map(|t| match t {
+                    Some(TopicFilter::Single(s)) => Ok(Some(vec![Self::parse_hash(s)?])),
+                    Some(TopicFilter::Multiple(arr)) => Ok(Some(
+                        arr.iter()
+                            .map(|s| Self::parse_hash(s))
+                            .collect::<Result<Vec<_>, _>>()?,
+                    )),
+                    None => Ok(None),
+                })
+                .collect::<Result<Vec<_>, RpcError>>()?,
+            None => vec![],
+        };
+
+        let mut result_logs: Vec<RpcLog> = Vec::new();
+        let mut global_log_index: u32 = 0;
+
+        for block_num in from_block..=to_block {
+            let block = match self
+                .chain
+                .get_block_by_number(block_num)
+                .map_err(|e| RpcError::Internal(e.to_string()))?
+            {
+                Some(b) => b,
+                None => continue,
+            };
+
+            let block_hash = blake3_hash(&block.header_bytes());
+
+            for (tx_index, tx) in block.transactions.iter().enumerate() {
+                let tx_hash = blake3_hash(&tx.to_bytes_without_signature());
+
+                let receipt = match self
+                    .chain
+                    .get_receipt(&tx_hash)
+                    .map_err(|e| RpcError::Internal(e.to_string()))?
+                {
+                    Some(r) => r,
+                    None => continue,
+                };
+
+                for log in &receipt.logs {
+                    // Filter by address
+                    if !filter_addresses.is_empty()
+                        && !filter_addresses.contains(&log.address)
+                    {
+                        global_log_index += 1;
+                        continue;
+                    }
+
+                    // Filter by topics
+                    let mut topics_match = true;
+                    for (i, topic_filter) in topic_filters.iter().enumerate() {
+                        if let Some(allowed_topics) = topic_filter {
+                            match log.topics.get(i) {
+                                Some(log_topic) => {
+                                    if !allowed_topics.contains(log_topic) {
+                                        topics_match = false;
+                                        break;
+                                    }
+                                }
+                                None => {
+                                    topics_match = false;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if topics_match {
+                        result_logs.push(RpcLog::from_log_with_meta(
+                            log,
+                            block_num,
+                            block_hash,
+                            tx_hash,
+                            tx_index as u32,
+                            global_log_index,
+                        ));
+                    }
+
+                    global_log_index += 1;
+                }
+            }
+        }
+
+        // Limit result size (max 10000 logs)
+        if result_logs.len() > 10_000 {
+            return Err(RpcError::InvalidParams(
+                "query returned more than 10000 results, narrow your filter".into(),
+            )
+            .into());
+        }
+
+        Ok(result_logs)
     }
 
     async fn eth_subscribe(
