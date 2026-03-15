@@ -37,8 +37,8 @@ pub use gpu_monitor::{collect_gpu_metrics, GpuMetrics};
 pub use model::CanonicalFormat;
 pub use proof::{ComputeProof, InferenceProof, InferenceResult};
 pub use runtime::{
-    compute_benchmark_score, validate_gpu_claim, BackendType, BenchmarkResult, GpuTier,
-    HardwareInfo,
+    compute_benchmark_score, find_nvidia_smi, validate_gpu_claim, BackendType, BenchmarkResult,
+    GpuTier, HardwareInfo,
 };
 pub use task::{ComputeTaskType, InferenceTask, ModelId};
 

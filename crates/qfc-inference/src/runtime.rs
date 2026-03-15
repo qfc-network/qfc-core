@@ -209,8 +209,9 @@ pub fn classify_tier(backend: BackendType, memory_mb: u64) -> GpuTier {
 fn is_cuda_available() -> bool {
     #[cfg(feature = "cuda")]
     {
-        // Check for nvidia-smi or CUDA runtime
-        std::process::Command::new("nvidia-smi")
+        // Check for nvidia-smi using platform-aware path resolution
+        let nvidia_smi = find_nvidia_smi();
+        std::process::Command::new(&nvidia_smi)
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)
@@ -395,10 +396,63 @@ fn detect_rocm_hardware() -> (u64, u32, String) {
     (mem / 4, 0, name) // rough estimate: 1/4 system memory
 }
 
-/// Detect CUDA GPU hardware info
+/// Detect CUDA GPU hardware info via nvidia-smi
 fn detect_cuda_hardware() -> (u64, u32, String) {
-    // Placeholder — will use candle or nvidia-smi for real detection
-    (0, 0, "CUDA GPU (detection pending)".to_string())
+    // nvidia-smi lives in PATH on Linux; on Windows it is typically in
+    // "C:\Windows\System32\nvidia-smi.exe" (driver install) or the CUDA bin dir.
+    let nvidia_smi = find_nvidia_smi();
+
+    let output = std::process::Command::new(&nvidia_smi)
+        .args([
+            "--query-gpu=memory.total,name",
+            "--format=csv,noheader,nounits",
+        ])
+        .output();
+
+    match output {
+        Ok(o) if o.status.success() => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            let line = stdout.lines().next().unwrap_or("");
+            let parts: Vec<&str> = line.split(", ").collect();
+            let memory_mb = parts
+                .first()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .unwrap_or(0);
+            let name = parts
+                .get(1)
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|| "NVIDIA GPU".to_string());
+            (memory_mb, 0, name)
+        }
+        _ => {
+            // Fallback: report system memory / 4 as rough GPU estimate
+            let mem = get_system_memory_mb();
+            (mem / 4, 0, "NVIDIA GPU (nvidia-smi unavailable)".to_string())
+        }
+    }
+}
+
+/// Locate nvidia-smi, checking the standard Windows driver path if needed
+pub fn find_nvidia_smi() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        // nvidia-smi is installed by the NVIDIA driver into System32
+        let sys32 = std::env::var("SystemRoot")
+            .unwrap_or_else(|_| r"C:\Windows".to_string());
+        let sys32_path =
+            std::path::Path::new(&sys32).join("System32").join("nvidia-smi.exe");
+        if sys32_path.exists() {
+            return sys32_path.to_string_lossy().to_string();
+        }
+        // Also check CUDA_PATH\bin
+        if let Ok(cuda) = std::env::var("CUDA_PATH") {
+            let cuda_bin = std::path::Path::new(&cuda).join("bin").join("nvidia-smi.exe");
+            if cuda_bin.exists() {
+                return cuda_bin.to_string_lossy().to_string();
+            }
+        }
+    }
+    "nvidia-smi".to_string()
 }
 
 /// Detect Metal/Apple Silicon hardware info
@@ -449,10 +503,51 @@ fn get_system_memory_mb() -> u64 {
             .map(|kb| kb / 1024) // KB to MB
             .unwrap_or(0)
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        get_windows_memory_mb()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         0
     }
+}
+
+/// Get total physical memory on Windows via `wmic` or `systeminfo`
+#[cfg(target_os = "windows")]
+fn get_windows_memory_mb() -> u64 {
+    // Method 1: wmic (fast, structured output)
+    if let Ok(output) = std::process::Command::new("wmic")
+        .args(["ComputerSystem", "get", "TotalPhysicalMemory", "/value"])
+        .output()
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                if let Some(val) = line.strip_prefix("TotalPhysicalMemory=") {
+                    if let Ok(bytes) = val.trim().parse::<u64>() {
+                        return bytes / (1024 * 1024);
+                    }
+                }
+            }
+        }
+    }
+
+    // Method 2: PowerShell (fallback)
+    if let Ok(output) = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command",
+               "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory"])
+        .output()
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if let Ok(bytes) = stdout.trim().parse::<u64>() {
+                return bytes / (1024 * 1024);
+            }
+        }
+    }
+
+    0
 }
 
 #[cfg(target_os = "macos")]

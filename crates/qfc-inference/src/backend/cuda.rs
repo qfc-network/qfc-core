@@ -151,7 +151,8 @@ fn estimate_flops_cuda(task_type: &ComputeTaskType) -> u64 {
 }
 
 fn detect_cuda_device() -> Result<(u64, String), InferenceError> {
-    let output = std::process::Command::new("nvidia-smi")
+    let nvidia_smi = crate::runtime::find_nvidia_smi();
+    let output = std::process::Command::new(&nvidia_smi)
         .args([
             "--query-gpu=memory.total,name",
             "--format=csv,noheader,nounits",
