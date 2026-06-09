@@ -1,5 +1,7 @@
 # QFC AI v3 Roadmap — Decentralized Training (Parameter Server) & Sharded Inference
 
+*🌐 [中文](ROADMAP-AI-V3.zh.md)*
+
 **Status:** design roadmap, not scheduled. Builds on the shipped v2.x AI-compute stack.
 **Owner:** Larry. **Created:** 2026-06-10.
 
@@ -41,6 +43,37 @@ v2.x miners contribute *inference* (frozen weights). The natural next step is co
 │ verifiers: spot-check re-execution of sampled training steps   │
 │   (generalizes proof_pool / redundant / challenge)             │
 └────────────────────────────────────────────────────────────────┘
+```
+
+Rendered version of the same architecture:
+
+```mermaid
+flowchart TB
+    subgraph CHAIN["On-chain (qfc-core)"]
+        REG["Model registry:<br/>version commitments (CID + hash)"]
+        EPOCH["Training-epoch records:<br/>who contributed, how much"]
+        STAKE["Stake / slash:<br/>PS operators & training miners"]
+    end
+
+    subgraph OFF["Off-chain"]
+        subgraph PS["qfc-ps (new crate) — sharded parameter service"]
+            AGG["Byzantine-robust aggregation<br/>(trimmed mean / Krum — NOT plain FedAvg)"]
+            SHARDS["Key-range shards<br/>(ps-lite-style range push/pull,<br/>qfc-storage as local persistence)"]
+        end
+        MINERS["Training miners:<br/>pull params → train on data shard → push"]
+        VERIF["Verifiers:<br/>sampled re-execution of training steps<br/>(generalizes proof_pool / redundant / challenge)"]
+    end
+
+    MINERS <-->|"push / pull<br/>(SSP bounded staleness)"| SHARDS
+    SHARDS --- AGG
+    VERIF -.->|"spot-check gradient hash<br/>(tolerance band)"| MINERS
+    PS ==>|"epoch barrier:<br/>commit new version (CID)"| REG
+    VERIF -->|"accept / reject contribution"| EPOCH
+    EPOCH --> STAKE
+    STAKE -.->|"slash on failed verification"| MINERS
+
+    classDef chain fill:#e8f0fe,stroke:#1a56db;
+    class REG,EPOCH,STAKE chain
 ```
 
 Key design decisions (each needs an ADR before code):
@@ -85,6 +118,40 @@ Wall-clock depends on session spacing; total ≈ **23–33 Claude session hours*
 - Honest constraint to state up front: pipeline parallelism over WAN latencies is unproven for interactive inference — target batch/async workloads first (the task pool already models async tasks), interactive only if latency data supports it.
 - Verification: per-stage activation commitments (hash of layer-boundary tensors) so a spot-check can re-execute *one stage*, not the whole pipeline.
 - Failure handling: a dead group member invalidates the assignment → reassign; reward splits per stage, metered like `flops_estimated`.
+
+### Architecture (both stages)
+
+```mermaid
+flowchart LR
+    subgraph CHAIN2["On-chain"]
+        MAN["Registry shard manifest:<br/>(CID, hash, size, layer range) × N"]
+    end
+    IPFS["IPFS — weight shards"]
+
+    subgraph B1["B-1: sharded distribution, single-miner execution"]
+        SOLO["Miner with enough total memory:<br/>pull shard-by-shard → per-shard hash verify →<br/>assemble; cache shards across versions"]
+    end
+
+    subgraph B2["B-2: multi-miner pipeline (gated on WAN latency)"]
+        direction LR
+        G1["Miner 1<br/>layers 0–15"] -->|"activations"| G2["Miner 2<br/>layers 16–31"] -->|"activations"| G3["Miner 3<br/>layers 32–47"]
+    end
+
+    STAGECHK["Staged spot-check:<br/>re-execute ONE stage from<br/>activation commitments (hashes)"]
+
+    MAN --> SOLO
+    IPFS -->|"per-shard pull + verify"| SOLO
+    MAN --> G1
+    IPFS --> G1
+    IPFS --> G2
+    IPFS --> G3
+    G1 -.->|"activation commitment"| STAGECHK
+    G2 -.-> STAGECHK
+    G3 -.-> STAGECHK
+
+    classDef chain fill:#e8f0fe,stroke:#1a56db;
+    class MAN chain
+```
 
 ### Milestones (estimates = Claude session hours)
 
