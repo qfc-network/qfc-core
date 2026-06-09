@@ -326,6 +326,10 @@ async fn main() -> Result<()> {
         None => (None, None),
     };
 
+    // T2.2: RPC metrics registry, shared between the RPC middleware (writer)
+    // and the Prometheus exporter (reader)
+    let rpc_metrics = Arc::new(qfc_rpc::metrics::RpcMetrics::new());
+
     // Start RPC server (with network for transaction broadcasting)
     let _rpc_handle = if args.rpc {
         let rpc_config = RpcConfig {
@@ -343,6 +347,7 @@ async fn main() -> Result<()> {
         // Attach CPU inference engine for spot-check verification
         let rpc_engine = qfc_inference::create_engine_for_backend(qfc_inference::BackendType::Cpu)?;
         rpc_server = rpc_server
+            .with_metrics(rpc_metrics.clone())
             .with_inference_engine(rpc_engine)
             .with_proof_pool(proof_pool.clone())
             .with_task_pool(task_pool.clone())
@@ -457,7 +462,7 @@ async fn main() -> Result<()> {
     };
 
     // Start Prometheus metrics server
-    let metrics_server = metrics::MetricsServer::new(
+    let mut metrics_server = metrics::MetricsServer::new(
         args.metrics_addr,
         chain.clone(),
         consensus.clone(),
@@ -465,7 +470,12 @@ async fn main() -> Result<()> {
         _network_service.clone(),
         proof_pool.clone(),
         args.chain_id,
-    );
+    )
+    .with_rpc_metrics(rpc_metrics.clone());
+    if let Some(ref sync) = _sync_manager {
+        metrics_server =
+            metrics_server.with_sync_status(sync.clone() as Arc<dyn qfc_rpc::SyncStatusProvider>);
+    }
     metrics_server.start();
 
     // Print startup info
