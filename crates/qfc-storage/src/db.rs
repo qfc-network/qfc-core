@@ -3,14 +3,62 @@
 use crate::batch::{BatchOp, WriteBatch};
 use crate::error::{Result, StorageError};
 use crate::schema::{cf, meta, DB_VERSION};
+use rocksdb::statistics::StatsLevel;
 use rocksdb::{
-    BoundColumnFamily, DBWithThreadMode, MultiThreaded, Options, WriteBatch as RocksWriteBatch,
+    BlockBasedOptions, BoundColumnFamily, Cache, DBWithThreadMode, MultiThreaded, Options,
+    WriteBatch as RocksWriteBatch,
 };
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use tracing::{debug, info};
 
+// Re-exported so consumers (e.g. an observability exporter) can query tickers
+// without taking a direct `rocksdb` dependency.
+pub use rocksdb::statistics::Ticker;
+
 type RocksDB = DBWithThreadMode<MultiThreaded>;
+
+/// A key-value pair yielded by database iterators.
+pub type KvPair = (Box<[u8]>, Box<[u8]>);
+
+const MIB: usize = 1024 * 1024;
+
+/// Column families whose dominant access pattern is exact-key point lookups
+/// (hash-keyed, effectively random). These get a bloom filter (~10 bits/key,
+/// ~1% false-positive rate) plus index/filter blocks cached and pinned, so a
+/// negative lookup usually costs zero disk reads.
+///
+/// - `TRANSACTIONS`, `RECEIPTS`: get-by-tx-hash from RPC and chain.
+/// - `STATE`: trie nodes fetched by node hash during execution (hottest CF).
+/// - `CODE`: contract code by code hash.
+/// - `TX_INDEX`, `ETH_TX_INDEX`, `BLOCK_HASH_INDEX`: hash -> location indexes,
+///   pure point lookups, frequently queried for keys that do not exist.
+/// - `TASKS`: inference tasks fetched by 32-byte task id.
+///
+/// Deliberately *not* in this list:
+/// - `BLOCK_HEADERS`, `BLOCK_BODIES`, `REWARDS`, `CHECKPOINTS`, `WORK_PROOFS`:
+///   keyed by dense sequential u64-BE heights/epochs; lookups rarely miss, so
+///   bloom filters would be pure overhead.
+/// - `UNDELEGATIONS`, `DELEGATIONS`, `MINER_EARNINGS`, `VALIDATORS`: consumed
+///   via prefix scans / full iteration (state_db.rs, RPC earnings scan), where
+///   whole-key blooms do not help.
+/// - `METADATA`: a handful of hot keys, always in memtable or block cache.
+const POINT_LOOKUP_CFS: &[&str] = &[
+    cf::TRANSACTIONS,
+    cf::RECEIPTS,
+    cf::STATE,
+    cf::CODE,
+    cf::TX_INDEX,
+    cf::ETH_TX_INDEX,
+    cf::BLOCK_HASH_INDEX,
+    cf::TASKS,
+];
+
+/// Column families that receive the bulk of write traffic during block import
+/// and therefore get a larger memtable share (see write-buffer math in
+/// [`Database::open`]).
+const WRITE_HEAVY_CFS: &[&str] = &[cf::STATE, cf::BLOCK_BODIES, cf::TRANSACTIONS, cf::RECEIPTS];
 
 /// Storage configuration
 #[derive(Clone, Debug)]
@@ -18,10 +66,10 @@ pub struct StorageConfig {
     /// Path to the database directory
     pub path: std::path::PathBuf,
 
-    /// Block cache size in MB
+    /// Block cache size in MB (one cache shared by all column families)
     pub block_cache_size_mb: usize,
 
-    /// Write buffer size in MB
+    /// Total write buffer (memtable) budget in MB across all column families
     pub write_buffer_size_mb: usize,
 
     /// Maximum number of open files
@@ -32,6 +80,12 @@ pub struct StorageConfig {
 
     /// Create if missing
     pub create_if_missing: bool,
+
+    /// Collect RocksDB statistics (tickers + histograms, excluding detailed
+    /// timers). Costs a few percent of throughput; off by default. When
+    /// enabled, read them via [`Database::statistics`] /
+    /// [`Database::statistics_ticker`].
+    pub enable_statistics: bool,
 }
 
 impl Default for StorageConfig {
@@ -43,6 +97,7 @@ impl Default for StorageConfig {
             max_open_files: 1024,
             enable_compression: true,
             create_if_missing: true,
+            enable_statistics: false,
         }
     }
 }
@@ -50,7 +105,15 @@ impl Default for StorageConfig {
 /// Database wrapper
 pub struct Database {
     db: Arc<RocksDB>,
+    /// DB-level options retained after open: they own the statistics handle
+    /// shared with the running DB, which is the only way to read tickers back.
+    db_opts: Arc<Options>,
     config: StorageConfig,
+    /// For [`Database::open_temp`]: keeps the temp directory alive while any
+    /// clone of this database exists, and removes it from disk afterwards.
+    /// Declared after `db` so the RocksDB instance is closed before the
+    /// directory is deleted.
+    temp_dir: Option<Arc<tempfile::TempDir>>,
 }
 
 impl Database {
@@ -62,17 +125,53 @@ impl Database {
         opts.create_if_missing(config.create_if_missing);
         opts.create_missing_column_families(true);
         opts.set_max_open_files(config.max_open_files);
-        opts.set_write_buffer_size(config.write_buffer_size_mb * 1024 * 1024);
+
+        // Memtable budget math
+        // --------------------
+        // `set_db_write_buffer_size` is a *DB-wide* cap: when the aggregate
+        // size of all memtables across all CFs reaches it, RocksDB flushes the
+        // largest one. Per-CF `write_buffer_size` below is only an upper bound
+        // per memtable, so total memtable memory stays <= write_buffer_size_mb
+        // (default 64 MB) regardless of CF count (currently 18).
+        opts.set_db_write_buffer_size(config.write_buffer_size_mb * MIB);
 
         if config.enable_compression {
             opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
         }
 
-        // Create block cache
-        let cache = rocksdb::Cache::new_lru_cache(config.block_cache_size_mb * 1024 * 1024);
-        let mut block_opts = rocksdb::BlockBasedOptions::default();
-        block_opts.set_block_cache(&cache);
-        opts.set_block_based_table_factory(&block_opts);
+        if config.enable_statistics {
+            opts.enable_statistics();
+            opts.set_statistics_level(StatsLevel::ExceptDetailedTimers);
+        }
+
+        // One block cache shared by every column family (and the default CF).
+        // Total block-cache memory is therefore block_cache_size_mb (default
+        // 512 MB), not per-CF. For point-lookup CFs the index and filter
+        // blocks are charged to this same cache (and L0 ones pinned), so they
+        // are bounded too instead of growing off-heap per open file.
+        let cache = Cache::new_lru_cache(config.block_cache_size_mb * MIB);
+
+        let mut base_block_opts = BlockBasedOptions::default();
+        base_block_opts.set_block_cache(&cache);
+        opts.set_block_based_table_factory(&base_block_opts);
+
+        let mut point_lookup_block_opts = BlockBasedOptions::default();
+        point_lookup_block_opts.set_block_cache(&cache);
+        // ~10 bits/key full (non-block-based) bloom filter: ~1% false
+        // positives, ~1.25 bytes/key.
+        point_lookup_block_opts.set_bloom_filter(10.0, false);
+        point_lookup_block_opts.set_cache_index_and_filter_blocks(true);
+        point_lookup_block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+
+        // Per-CF memtable upper bounds. Write-heavy CFs (state trie, block
+        // bodies, transactions, receipts) get total/4 each; the long tail gets
+        // total/8. With the 64 MB default that is 16 MB / 8 MB. The nominal
+        // sum over 18 CFs (4*16 + 14*8 = 176 MB) exceeds the budget on
+        // purpose: the DB-wide cap above is what actually bounds memory, while
+        // the generous per-CF bound lets whichever CF is hot use a meaningful
+        // chunk of the budget before flushing.
+        let heavy_buf = ((config.write_buffer_size_mb / 4).max(8)) * MIB;
+        let light_buf = ((config.write_buffer_size_mb / 8).max(4)) * MIB;
 
         // Open with column families
         let cf_descriptors: Vec<_> = cf::ALL
@@ -84,6 +183,16 @@ impl Database {
                 } else {
                     rocksdb::DBCompressionType::None
                 });
+                if POINT_LOOKUP_CFS.contains(name) {
+                    cf_opts.set_block_based_table_factory(&point_lookup_block_opts);
+                } else {
+                    cf_opts.set_block_based_table_factory(&base_block_opts);
+                }
+                cf_opts.set_write_buffer_size(if WRITE_HEAVY_CFS.contains(name) {
+                    heavy_buf
+                } else {
+                    light_buf
+                });
                 rocksdb::ColumnFamilyDescriptor::new(*name, cf_opts)
             })
             .collect();
@@ -92,7 +201,9 @@ impl Database {
 
         let db = Self {
             db: Arc::new(db),
+            db_opts: Arc::new(opts),
             config,
+            temp_dir: None,
         };
 
         // Initialize metadata if needed
@@ -101,18 +212,18 @@ impl Database {
         Ok(db)
     }
 
-    /// Open a temporary database for testing
+    /// Open a temporary database for testing. The backing directory is
+    /// removed from disk when the last clone of the returned database drops.
     pub fn open_temp() -> Result<Self> {
-        let dir = tempfile::tempdir().map_err(|e| StorageError::Io(e.into()))?;
-        let path = dir.path().to_path_buf();
-        // Keep the directory by forgetting it (prevent cleanup on drop)
-        std::mem::forget(dir);
+        let dir = tempfile::tempdir().map_err(StorageError::Io)?;
         let config = StorageConfig {
-            path,
+            path: dir.path().to_path_buf(),
             create_if_missing: true,
             ..Default::default()
         };
-        Self::open(config)
+        let mut db = Self::open(config)?;
+        db.temp_dir = Some(Arc::new(dir));
+        Ok(db)
     }
 
     fn init_metadata(&self) -> Result<()> {
@@ -148,46 +259,102 @@ impl Database {
         Ok(self.db.delete_cf(&cf, key)?)
     }
 
-    /// Check if a key exists
+    /// Check if a key exists.
+    ///
+    /// Uses `key_may_exist_cf` first: on bloom-filtered CFs a definite
+    /// negative is answered from the filter/memtable without touching data
+    /// blocks. A "maybe" is confirmed with a pinned get (no value copy).
     pub fn contains(&self, cf_name: &str, key: &[u8]) -> Result<bool> {
-        Ok(self.get(cf_name, key)?.is_some())
+        let cf = self.get_cf(cf_name)?;
+        if !self.db.key_may_exist_cf(&cf, key) {
+            return Ok(false);
+        }
+        Ok(self.db.get_pinned_cf(&cf, key)?.is_some())
     }
 
     /// Write a batch of operations atomically
     pub fn write_batch(&self, batch: WriteBatch) -> Result<()> {
         let mut rocks_batch = RocksWriteBatch::default();
 
+        // Batches routinely contain many ops against the same few CFs (e.g.
+        // a block commit writing hundreds of state nodes). Resolve each CF
+        // handle once instead of taking the cf_handle lock per op.
+        let mut handles: HashMap<&str, Arc<BoundColumnFamily<'_>>> = HashMap::new();
+
         for op in batch.ops() {
+            let cf_name = match op {
+                BatchOp::Put { cf, .. } | BatchOp::Delete { cf, .. } => cf.as_str(),
+            };
+            if !handles.contains_key(cf_name) {
+                handles.insert(cf_name, self.get_cf(cf_name)?);
+            }
+            let handle = &handles[cf_name];
             match op {
-                BatchOp::Put { cf, key, value } => {
-                    let cf_handle = self.get_cf(cf)?;
-                    rocks_batch.put_cf(&cf_handle, key, value);
-                }
-                BatchOp::Delete { cf, key } => {
-                    let cf_handle = self.get_cf(cf)?;
-                    rocks_batch.delete_cf(&cf_handle, key);
-                }
+                BatchOp::Put { key, value, .. } => rocks_batch.put_cf(handle, key, value),
+                BatchOp::Delete { key, .. } => rocks_batch.delete_cf(handle, key),
             }
         }
 
         Ok(self.db.write(rocks_batch)?)
     }
 
-    /// Get an iterator over a column family
-    pub fn iter(&self, cf_name: &str) -> Result<impl Iterator<Item = (Box<[u8]>, Box<[u8]>)> + '_> {
-        let cf = self.get_cf(cf_name)?;
+    /// Get an iterator over a column family.
+    ///
+    /// NOTE: panics if RocksDB reports an error mid-iteration (e.g. a corrupt
+    /// SST). Prefer [`Database::try_iter`], which propagates the error;
+    /// this method is kept for existing callers and will be migrated.
+    pub fn iter(&self, cf_name: &str) -> Result<impl Iterator<Item = KvPair> + '_> {
         Ok(self
-            .db
-            .iterator_cf(&cf, rocksdb::IteratorMode::Start)
-            .map(|r| r.unwrap()))
+            .try_iter(cf_name)?
+            .map(|r| r.expect("RocksDB iterator error (corrupt SST?)")))
     }
 
-    /// Get an iterator starting from a key
+    /// Get an iterator starting from a key.
+    ///
+    /// NOTE: panics on mid-iteration RocksDB errors; prefer
+    /// [`Database::try_iter_from`].
     pub fn iter_from(
         &self,
         cf_name: &str,
         start_key: &[u8],
-    ) -> Result<impl Iterator<Item = (Box<[u8]>, Box<[u8]>)> + '_> {
+    ) -> Result<impl Iterator<Item = KvPair> + '_> {
+        Ok(self
+            .try_iter_from(cf_name, start_key)?
+            .map(|r| r.expect("RocksDB iterator error (corrupt SST?)")))
+    }
+
+    /// Get an iterator in reverse order.
+    ///
+    /// NOTE: panics on mid-iteration RocksDB errors; prefer
+    /// [`Database::try_iter_reverse`].
+    pub fn iter_reverse(
+        &self,
+        cf_name: &str,
+    ) -> Result<impl Iterator<Item = KvPair> + '_> {
+        Ok(self
+            .try_iter_reverse(cf_name)?
+            .map(|r| r.expect("RocksDB iterator error (corrupt SST?)")))
+    }
+
+    /// Get an iterator over a column family, propagating iteration errors
+    /// (e.g. corrupt SST / checksum mismatch) instead of panicking.
+    pub fn try_iter(
+        &self,
+        cf_name: &str,
+    ) -> Result<impl Iterator<Item = Result<KvPair>> + '_> {
+        let cf = self.get_cf(cf_name)?;
+        Ok(self
+            .db
+            .iterator_cf(&cf, rocksdb::IteratorMode::Start)
+            .map(|r| r.map_err(StorageError::from)))
+    }
+
+    /// Get an iterator starting from a key, propagating iteration errors.
+    pub fn try_iter_from(
+        &self,
+        cf_name: &str,
+        start_key: &[u8],
+    ) -> Result<impl Iterator<Item = Result<KvPair>> + '_> {
         let cf = self.get_cf(cf_name)?;
         Ok(self
             .db
@@ -195,19 +362,46 @@ impl Database {
                 &cf,
                 rocksdb::IteratorMode::From(start_key, rocksdb::Direction::Forward),
             )
-            .map(|r| r.unwrap()))
+            .map(|r| r.map_err(StorageError::from)))
     }
 
-    /// Get an iterator in reverse order
-    pub fn iter_reverse(
+    /// Get an iterator in reverse order, propagating iteration errors.
+    pub fn try_iter_reverse(
         &self,
         cf_name: &str,
-    ) -> Result<impl Iterator<Item = (Box<[u8]>, Box<[u8]>)> + '_> {
+    ) -> Result<impl Iterator<Item = Result<KvPair>> + '_> {
         let cf = self.get_cf(cf_name)?;
         Ok(self
             .db
             .iterator_cf(&cf, rocksdb::IteratorMode::End)
-            .map(|r| r.unwrap()))
+            .map(|r| r.map_err(StorageError::from)))
+    }
+
+    /// Whether RocksDB statistics collection is enabled for this database.
+    pub fn statistics_enabled(&self) -> bool {
+        self.config.enable_statistics
+    }
+
+    /// Full RocksDB statistics dump (tickers + histograms) as a string.
+    ///
+    /// Returns `None` unless [`StorageConfig::enable_statistics`] was set when
+    /// the database was opened.
+    pub fn statistics(&self) -> Option<String> {
+        if !self.config.enable_statistics {
+            return None;
+        }
+        self.db_opts.get_statistics()
+    }
+
+    /// Cumulative value of a single statistics ticker (e.g.
+    /// [`Ticker::BlockCacheHit`]).
+    ///
+    /// Returns `None` unless statistics collection is enabled.
+    pub fn statistics_ticker(&self, ticker: Ticker) -> Option<u64> {
+        if !self.config.enable_statistics {
+            return None;
+        }
+        Some(self.db_opts.get_ticker_count(ticker))
     }
 
     /// Flush the database
@@ -238,7 +432,9 @@ impl Clone for Database {
     fn clone(&self) -> Self {
         Self {
             db: Arc::clone(&self.db),
+            db_opts: Arc::clone(&self.db_opts),
             config: self.config.clone(),
+            temp_dir: self.temp_dir.clone(),
         }
     }
 }
@@ -246,6 +442,17 @@ impl Clone for Database {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn open_temp_with(f: impl FnOnce(&mut StorageConfig)) -> (Database, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = StorageConfig {
+            path: dir.path().to_path_buf(),
+            create_if_missing: true,
+            ..Default::default()
+        };
+        f(&mut config);
+        (Database::open(config).unwrap(), dir)
+    }
 
     #[test]
     fn test_database_open() {
@@ -274,6 +481,24 @@ mod tests {
     }
 
     #[test]
+    fn test_contains_on_bloom_filtered_cf() {
+        // cf::STATE has a bloom filter + key_may_exist fast path; verify
+        // correctness for present, absent, and flushed (SST-resident) keys.
+        let db = Database::open_temp().unwrap();
+
+        db.put(cf::STATE, b"present", b"v").unwrap();
+        assert!(db.contains(cf::STATE, b"present").unwrap());
+        assert!(!db.contains(cf::STATE, b"absent").unwrap());
+
+        db.flush().unwrap();
+        assert!(db.contains(cf::STATE, b"present").unwrap());
+        assert!(!db.contains(cf::STATE, b"absent").unwrap());
+
+        db.delete(cf::STATE, b"present").unwrap();
+        assert!(!db.contains(cf::STATE, b"present").unwrap());
+    }
+
+    #[test]
     fn test_write_batch() {
         let db = Database::open_temp().unwrap();
 
@@ -294,6 +519,27 @@ mod tests {
     }
 
     #[test]
+    fn test_write_batch_multi_cf() {
+        // Exercises the per-batch CF handle cache across several CFs.
+        let db = Database::open_temp().unwrap();
+
+        let mut batch = WriteBatch::new();
+        batch.put(cf::STATE, b"s1".to_vec(), b"v1".to_vec());
+        batch.put(cf::TRANSACTIONS, b"t1".to_vec(), b"v2".to_vec());
+        batch.put(cf::STATE, b"s2".to_vec(), b"v3".to_vec());
+        batch.delete(cf::STATE, b"s1".to_vec());
+
+        db.write_batch(batch).unwrap();
+
+        assert_eq!(db.get(cf::STATE, b"s1").unwrap(), None);
+        assert_eq!(db.get(cf::STATE, b"s2").unwrap(), Some(b"v3".to_vec()));
+        assert_eq!(
+            db.get(cf::TRANSACTIONS, b"t1").unwrap(),
+            Some(b"v2".to_vec())
+        );
+    }
+
+    #[test]
     fn test_iterator() {
         let db = Database::open_temp().unwrap();
 
@@ -304,5 +550,74 @@ mod tests {
         let items: Vec<_> = db.iter(cf::METADATA).unwrap().collect();
         // Note: db_version is also in METADATA
         assert!(items.len() >= 3);
+    }
+
+    #[test]
+    fn test_try_iter() {
+        let db = Database::open_temp().unwrap();
+
+        db.put(cf::STATE, b"a", b"1").unwrap();
+        db.put(cf::STATE, b"b", b"2").unwrap();
+
+        let items: Vec<_> = db
+            .try_iter(cf::STATE)
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(items.len(), 2);
+
+        let from_b: Vec<_> = db
+            .try_iter_from(cf::STATE, b"b")
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(from_b.len(), 1);
+
+        let rev: Vec<_> = db
+            .try_iter_reverse(cf::STATE)
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(rev.first().unwrap().0.as_ref(), b"b");
+    }
+
+    #[test]
+    fn test_statistics_disabled_by_default() {
+        let db = Database::open_temp().unwrap();
+        assert!(!db.statistics_enabled());
+        assert!(db.statistics().is_none());
+        assert!(db.statistics_ticker(Ticker::BytesWritten).is_none());
+    }
+
+    #[test]
+    fn test_statistics_enabled() {
+        let (db, _dir) = open_temp_with(|c| c.enable_statistics = true);
+        assert!(db.statistics_enabled());
+
+        db.put(cf::STATE, b"k", b"some value bytes").unwrap();
+        let _ = db.get(cf::STATE, b"k").unwrap();
+
+        let stats = db.statistics().expect("stats string when enabled");
+        assert!(stats.contains("rocksdb"));
+
+        let written = db
+            .statistics_ticker(Ticker::BytesWritten)
+            .expect("ticker when enabled");
+        assert!(written > 0, "BytesWritten should count the put");
+    }
+
+    #[test]
+    fn test_open_temp_cleans_up_directory() {
+        let db = Database::open_temp().unwrap();
+        let path = db.path().to_path_buf();
+        assert!(path.exists());
+
+        let clone = db.clone();
+        drop(db);
+        // Still alive while a clone exists
+        assert!(path.exists());
+
+        drop(clone);
+        assert!(!path.exists(), "temp dir should be removed on last drop");
     }
 }
