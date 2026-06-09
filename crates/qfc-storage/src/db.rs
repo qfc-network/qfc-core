@@ -327,10 +327,7 @@ impl Database {
     ///
     /// NOTE: panics on mid-iteration RocksDB errors; prefer
     /// [`Database::try_iter_reverse`].
-    pub fn iter_reverse(
-        &self,
-        cf_name: &str,
-    ) -> Result<impl Iterator<Item = KvPair> + '_> {
+    pub fn iter_reverse(&self, cf_name: &str) -> Result<impl Iterator<Item = KvPair> + '_> {
         Ok(self
             .try_iter_reverse(cf_name)?
             .map(|r| r.expect("RocksDB iterator error (corrupt SST?)")))
@@ -338,10 +335,7 @@ impl Database {
 
     /// Get an iterator over a column family, propagating iteration errors
     /// (e.g. corrupt SST / checksum mismatch) instead of panicking.
-    pub fn try_iter(
-        &self,
-        cf_name: &str,
-    ) -> Result<impl Iterator<Item = Result<KvPair>> + '_> {
+    pub fn try_iter(&self, cf_name: &str) -> Result<impl Iterator<Item = Result<KvPair>> + '_> {
         let cf = self.get_cf(cf_name)?;
         Ok(self
             .db

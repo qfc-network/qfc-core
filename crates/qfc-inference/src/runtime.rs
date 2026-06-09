@@ -427,7 +427,11 @@ fn detect_cuda_hardware() -> (u64, u32, String) {
         _ => {
             // Fallback: report system memory / 4 as rough GPU estimate
             let mem = get_system_memory_mb();
-            (mem / 4, 0, "NVIDIA GPU (nvidia-smi unavailable)".to_string())
+            (
+                mem / 4,
+                0,
+                "NVIDIA GPU (nvidia-smi unavailable)".to_string(),
+            )
         }
     }
 }
@@ -437,16 +441,18 @@ pub fn find_nvidia_smi() -> String {
     #[cfg(target_os = "windows")]
     {
         // nvidia-smi is installed by the NVIDIA driver into System32
-        let sys32 = std::env::var("SystemRoot")
-            .unwrap_or_else(|_| r"C:\Windows".to_string());
-        let sys32_path =
-            std::path::Path::new(&sys32).join("System32").join("nvidia-smi.exe");
+        let sys32 = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+        let sys32_path = std::path::Path::new(&sys32)
+            .join("System32")
+            .join("nvidia-smi.exe");
         if sys32_path.exists() {
             return sys32_path.to_string_lossy().to_string();
         }
         // Also check CUDA_PATH\bin
         if let Ok(cuda) = std::env::var("CUDA_PATH") {
-            let cuda_bin = std::path::Path::new(&cuda).join("bin").join("nvidia-smi.exe");
+            let cuda_bin = std::path::Path::new(&cuda)
+                .join("bin")
+                .join("nvidia-smi.exe");
             if cuda_bin.exists() {
                 return cuda_bin.to_string_lossy().to_string();
             }
@@ -535,8 +541,11 @@ fn get_windows_memory_mb() -> u64 {
 
     // Method 2: PowerShell (fallback)
     if let Ok(output) = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-Command",
-               "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory"])
+        .args([
+            "-NoProfile",
+            "-Command",
+            "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory",
+        ])
         .output()
     {
         if output.status.success() {
