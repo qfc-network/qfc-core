@@ -61,7 +61,14 @@ pub struct ModelInfo {
     /// Blake3 hash of the model weight file (for integrity verification).
     /// If set, downloaded weights are verified against this hash.
     /// Prevents supply-chain attacks and ensures all miners use identical weights.
+    #[serde(default)]
     pub weights_hash: Option<qfc_types::Hash>,
+    /// Sharded distribution manifest (ADR-0001: sharded model distribution).
+    /// `None` means the existing single-artifact download path.
+    /// If both this and `weights_hash` are set, `shard_manifest.assembled_hash`
+    /// must equal `weights_hash` (checked at assembly time).
+    #[serde(default)]
+    pub shard_manifest: Option<crate::shard::ShardManifest>,
 }
 
 /// Local model cache with LRU eviction and auto-download
@@ -171,8 +178,23 @@ impl ModelCache {
 
             if let Some(id) = lru_id {
                 if let Some(entry) = self.cached.remove(&id) {
-                    // Best-effort delete from disk
-                    let _ = std::fs::remove_file(&entry.path);
+                    // Entry paths can be directories (sharded models register
+                    // the model dir; candle ensure_model registers a dir too)
+                    // or single files — delete accordingly, and surface
+                    // failures instead of silently leaking disk.
+                    let result = if entry.path.is_dir() {
+                        std::fs::remove_dir_all(&entry.path)
+                    } else {
+                        std::fs::remove_file(&entry.path)
+                    };
+                    if let Err(e) = result {
+                        tracing::warn!(
+                            "Failed to delete evicted model {} at {}: {}",
+                            id,
+                            entry.path.display(),
+                            e
+                        );
+                    }
                     tracing::info!(
                         "Evicted model {} ({} bytes) from cache",
                         id,
@@ -227,6 +249,53 @@ impl ModelCache {
 
         Ok(model_dir)
     }
+
+    /// Ensure a sharded model is cached, downloading and assembling its
+    /// shards if necessary (ADR-0001 / Roadmap AI-V3 B-1).
+    ///
+    /// Requires `info.shard_manifest` to be set. If `info.weights_hash` is
+    /// also set, it must equal the manifest's `assembled_hash`.
+    /// Returns the model directory containing the assembled `weights.bin`.
+    pub fn ensure_sharded_model(
+        &mut self,
+        info: &ModelInfo,
+        downloader: &crate::shard::ShardDownloader,
+    ) -> Result<PathBuf, crate::InferenceError> {
+        // Already cached — return path
+        if let Some(entry) = self.cached.get_mut(&info.id) {
+            entry.last_accessed = now_ms();
+            return Ok(entry.path.clone());
+        }
+
+        let manifest = info.shard_manifest.as_ref().ok_or_else(|| {
+            crate::InferenceError::ModelNotFound(format!(
+                "Model {} has no shard manifest (use the single-artifact path instead)",
+                info.id
+            ))
+        })?;
+
+        // ADR-0001 Decision 1: if both are set, they must agree.
+        if let Some(weights_hash) = info.weights_hash {
+            if weights_hash != manifest.assembled_hash {
+                return Err(crate::InferenceError::ShardVerification(format!(
+                    "Model {}: weights_hash {} does not match manifest assembled_hash {}",
+                    info.id, weights_hash, manifest.assembled_hash
+                )));
+            }
+        }
+
+        let model_dir = self
+            .cache_dir
+            .join(format!("{}-{}", info.id.name, info.id.version));
+        let dest = model_dir.join("weights.bin");
+
+        downloader.download_and_assemble(manifest, &dest)?;
+
+        self.register(info.id.clone(), model_dir.clone(), manifest.total_size_bytes);
+        self.evict_lru();
+
+        Ok(model_dir)
+    }
 }
 
 /// Approved model registry (controlled by on-chain governance)
@@ -259,6 +328,7 @@ impl ModelRegistry {
                 approved: true,
                 canonical_format: CanonicalFormat::SafetensorsFp32,
                 weights_hash: None,
+                shard_manifest: None,
             },
             ModelInfo {
                 id: ModelId::new("qfc-embed-medium", "v1.0"),
@@ -270,6 +340,7 @@ impl ModelRegistry {
                 approved: true,
                 canonical_format: CanonicalFormat::SafetensorsFp32,
                 weights_hash: None,
+                shard_manifest: None,
             },
             ModelInfo {
                 id: ModelId::new("qfc-classify-small", "v1.0"),
@@ -281,6 +352,7 @@ impl ModelRegistry {
                 approved: true,
                 canonical_format: CanonicalFormat::SafetensorsFp32,
                 weights_hash: None,
+                shard_manifest: None,
             },
             ModelInfo {
                 id: ModelId::new("qfc-llm-0.5b", "v1.0"),
@@ -293,6 +365,7 @@ impl ModelRegistry {
                 approved: true,
                 canonical_format: CanonicalFormat::SafetensorsFp32,
                 weights_hash: None,
+                shard_manifest: None,
             },
             ModelInfo {
                 id: ModelId::new("qfc-llm-3b", "v1.0"),
@@ -305,6 +378,7 @@ impl ModelRegistry {
                 approved: true,
                 canonical_format: CanonicalFormat::GgufQ4KM,
                 weights_hash: None,
+                shard_manifest: None,
             },
             ModelInfo {
                 id: ModelId::new("qfc-llm-7b", "v1.0"),
@@ -317,6 +391,7 @@ impl ModelRegistry {
                 approved: true,
                 canonical_format: CanonicalFormat::GgufQ4KM,
                 weights_hash: None,
+                shard_manifest: None,
             },
             ModelInfo {
                 id: ModelId::new("qfc-whisper-base", "v1.0"),
@@ -328,6 +403,7 @@ impl ModelRegistry {
                 approved: true,
                 canonical_format: CanonicalFormat::SafetensorsFp32,
                 weights_hash: None,
+                shard_manifest: None,
             },
             ModelInfo {
                 id: ModelId::new("qfc-whisper-large", "v1.0"),
@@ -339,6 +415,7 @@ impl ModelRegistry {
                 approved: true,
                 canonical_format: CanonicalFormat::SafetensorsFp32,
                 weights_hash: None,
+                shard_manifest: None,
             },
             ModelInfo {
                 id: ModelId::new("qfc-sd-1.5", "v1.0"),
@@ -351,6 +428,7 @@ impl ModelRegistry {
                 approved: true,
                 canonical_format: CanonicalFormat::SafetensorsFp32,
                 weights_hash: None,
+                shard_manifest: None,
             },
         ];
 
@@ -437,7 +515,7 @@ mod tests {
 
         // Add 3 models, each 1MB
         for i in 0..3 {
-            let id = ModelId::new(&format!("model-{}", i), "v1");
+            let id = ModelId::new(format!("model-{}", i), "v1");
             cache.register(
                 id,
                 PathBuf::from(format!("/tmp/models/m{}.bin", i)),
@@ -446,7 +524,7 @@ mod tests {
             // Stagger last_accessed so eviction order is deterministic
             if let Some(entry) = cache
                 .cached
-                .get_mut(&ModelId::new(&format!("model-{}", i), "v1"))
+                .get_mut(&ModelId::new(format!("model-{}", i), "v1"))
             {
                 entry.last_accessed = i as u64;
             }
@@ -461,6 +539,32 @@ mod tests {
         assert!(!cache.is_cached(&ModelId::new("model-0", "v1")));
         assert!(cache.is_cached(&ModelId::new("model-1", "v1")));
         assert!(cache.is_cached(&ModelId::new("model-2", "v1")));
+    }
+
+    #[test]
+    fn test_evict_lru_removes_directory_from_disk() {
+        let dir = std::env::temp_dir().join(format!("qfc_evict_dir_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // A real model directory containing a file (sharded models register
+        // the model dir as the cache entry path).
+        let model_dir = dir.join("test-sharded-v1.0");
+        std::fs::create_dir_all(&model_dir).unwrap();
+        std::fs::write(model_dir.join("weights.bin"), vec![0u8; 256]).unwrap();
+
+        let mut cache = ModelCache::with_max_size(dir.clone(), 100);
+        cache.register(ModelId::new("test-sharded", "v1.0"), model_dir.clone(), 256);
+        assert!(cache.total_size_bytes() > 100);
+
+        let evicted = cache.evict_lru();
+        assert_eq!(evicted, 1);
+        assert!(
+            !model_dir.exists(),
+            "evicted model directory must be deleted from disk"
+        );
+        assert!(!cache.is_cached(&ModelId::new("test-sharded", "v1.0")));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -484,6 +588,116 @@ mod tests {
         // Hot tier: all models (Warm + llm-7b)
         let hot_models = registry.models_for_tier(GpuTier::Hot);
         assert_eq!(hot_models.len(), 9);
+    }
+
+    fn sharded_test_model(manifest: crate::shard::ShardManifest) -> ModelInfo {
+        ModelInfo {
+            id: ModelId::new("test-sharded", "v1.0"),
+            description: "Sharded test model".to_string(),
+            min_memory_mb: 512,
+            min_tier: GpuTier::Cold,
+            size_mb: 1,
+            approved: true,
+            canonical_format: CanonicalFormat::SafetensorsFp32,
+            weights_hash: Some(manifest.assembled_hash),
+            shard_manifest: Some(manifest),
+        }
+    }
+
+    #[test]
+    fn test_ensure_sharded_model_pre_seeded() {
+        let dir = std::env::temp_dir().join(format!("qfc_sharded_model_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let downloader =
+            crate::shard::ShardDownloader::new("http://invalid.invalid:1", dir.join("shards"))
+                .unwrap();
+
+        // Pre-seed two shards in the store — no network needed.
+        let shard_a: Vec<u8> = vec![0x01; 800];
+        let shard_b: Vec<u8> = vec![0x02; 300];
+        downloader.store().put(&shard_a).unwrap();
+        downloader.store().put(&shard_b).unwrap();
+
+        let mut full = shard_a.clone();
+        full.extend_from_slice(&shard_b);
+        let manifest = crate::shard::ShardManifest {
+            shards: vec![
+                crate::shard::ShardEntry {
+                    cid: String::new(),
+                    hash: qfc_crypto::blake3_hash(&shard_a),
+                    size_bytes: shard_a.len() as u64,
+                    layer_range: None,
+                },
+                crate::shard::ShardEntry {
+                    cid: String::new(),
+                    hash: qfc_crypto::blake3_hash(&shard_b),
+                    size_bytes: shard_b.len() as u64,
+                    layer_range: None,
+                },
+            ],
+            total_size_bytes: full.len() as u64,
+            assembled_hash: qfc_crypto::blake3_hash(&full),
+        };
+        let info = sharded_test_model(manifest.clone());
+
+        let mut cache = ModelCache::new(dir.join("models"));
+        let model_dir = cache.ensure_sharded_model(&info, &downloader).unwrap();
+
+        // Assembled file exists, content hash-checks, model is registered.
+        let weights_path = model_dir.join("weights.bin");
+        assert!(weights_path.exists());
+        let assembled = std::fs::read(&weights_path).unwrap();
+        assert_eq!(qfc_crypto::blake3_hash(&assembled), manifest.assembled_hash);
+        assert!(cache.is_cached(&info.id));
+        assert_eq!(cache.total_size_bytes(), manifest.total_size_bytes);
+
+        // Second call hits the cache and returns the same path.
+        let again = cache.ensure_sharded_model(&info, &downloader).unwrap();
+        assert_eq!(again, model_dir);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_ensure_sharded_model_weights_hash_mismatch() {
+        let dir =
+            std::env::temp_dir().join(format!("qfc_sharded_mismatch_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let downloader =
+            crate::shard::ShardDownloader::new("http://invalid.invalid:1", dir.join("shards"))
+                .unwrap();
+
+        let shard: Vec<u8> = vec![0x05; 128];
+        downloader.store().put(&shard).unwrap();
+        let manifest = crate::shard::ShardManifest {
+            shards: vec![crate::shard::ShardEntry {
+                cid: String::new(),
+                hash: qfc_crypto::blake3_hash(&shard),
+                size_bytes: shard.len() as u64,
+                layer_range: None,
+            }],
+            total_size_bytes: shard.len() as u64,
+            assembled_hash: qfc_crypto::blake3_hash(&shard),
+        };
+
+        let mut info = sharded_test_model(manifest);
+        // Registry weights_hash disagrees with the manifest — must be rejected.
+        info.weights_hash = Some(qfc_types::Hash::new([0x99; 32]));
+
+        let mut cache = ModelCache::new(dir.join("models"));
+        let err = cache.ensure_sharded_model(&info, &downloader).unwrap_err();
+        assert!(err.to_string().contains("does not match"));
+        assert!(!cache.is_cached(&info.id));
+
+        // Missing manifest → ModelNotFound-style error.
+        info.weights_hash = None;
+        info.shard_manifest = None;
+        let err = cache.ensure_sharded_model(&info, &downloader).unwrap_err();
+        assert!(err.to_string().contains("no shard manifest"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

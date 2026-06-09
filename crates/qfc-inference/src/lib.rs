@@ -30,6 +30,7 @@ pub mod models;
 pub mod proof;
 pub mod runtime;
 pub mod scheduler;
+pub mod shard;
 pub mod task;
 
 pub use data_store::{DataRef, LocalDataStore, TaskData, MAX_INLINE_SIZE};
@@ -40,6 +41,7 @@ pub use runtime::{
     compute_benchmark_score, find_nvidia_smi, validate_gpu_claim, BackendType, BenchmarkResult,
     GpuTier, HardwareInfo,
 };
+pub use shard::{ShardDownloader, ShardEntry, ShardManifest};
 pub use task::{ComputeTaskType, InferenceTask, ModelId};
 
 use async_trait::async_trait;
@@ -71,6 +73,9 @@ pub enum InferenceError {
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("Shard verification failed: {0}")]
+    ShardVerification(String),
 }
 
 /// Core inference engine trait — implemented by each backend
