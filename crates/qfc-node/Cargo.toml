@@ -38,3 +38,4 @@ qfc-ai-coordinator.workspace = true
 tiny_http.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true

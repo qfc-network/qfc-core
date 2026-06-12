@@ -141,6 +141,8 @@ pub struct RpcServer {
     session_key_store: Arc<RwLock<qfc_qvm::stdlib::session_keys::SessionKeyStore>>,
     /// v3.0: Agent discovery index
     agent_index: Arc<RwLock<qfc_qvm::stdlib::agent_index::AgentIndex>>,
+    /// T2.2: RPC observability metrics (latency histograms, in-flight, errors)
+    metrics: Option<Arc<crate::metrics::RpcMetrics>>,
 }
 
 impl Clone for RpcServer {
@@ -174,6 +176,7 @@ impl Clone for RpcServer {
             capability_store: self.capability_store.clone(),
             session_key_store: self.session_key_store.clone(),
             agent_index: self.agent_index.clone(),
+            metrics: self.metrics.clone(),
         }
     }
 }
@@ -230,7 +233,16 @@ impl RpcServer {
                 qfc_qvm::stdlib::session_keys::SessionKeyStore::new(),
             )),
             agent_index: Arc::new(RwLock::new(qfc_qvm::stdlib::agent_index::AgentIndex::new())),
+            metrics: None,
         }
+    }
+
+    /// Set the RPC metrics registry (T2.2). When set, every JSON-RPC call is
+    /// timed and counted via middleware; the registry is rendered by the
+    /// node's Prometheus exporter.
+    pub fn with_metrics(mut self, metrics: Arc<crate::metrics::RpcMetrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     /// Set the challenge generator (P2)
@@ -310,7 +322,22 @@ impl RpcServer {
 
         info!("Starting RPC server on {}", config.http_addr);
 
-        let server = ServerBuilder::default().build(config.http_addr).await?;
+        // T2.2: per-method latency/error/in-flight metrics middleware.
+        // If no registry was attached via `with_metrics`, record into a
+        // private throwaway registry so the server type stays uniform.
+        let metrics = self
+            .metrics
+            .clone()
+            .unwrap_or_else(|| Arc::new(crate::metrics::RpcMetrics::new()));
+        let rpc_middleware =
+            jsonrpsee::server::middleware::rpc::RpcServiceBuilder::new().layer_fn(move |service| {
+                crate::metrics::MetricsMiddleware::new(service, metrics.clone())
+            });
+
+        let server = ServerBuilder::default()
+            .set_rpc_middleware(rpc_middleware)
+            .build(config.http_addr)
+            .await?;
 
         // Merge all RPC modules
         let mut eth_module = EthApiServer::into_rpc(self.clone());

@@ -1,0 +1,425 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "description": "",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "title": "QFC Node Observability (T2)",
+  "uid": "qfc-node-observability",
+  "tags": ["qfc", "blockchain", "sre"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "15s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "instance",
+        "type": "query",
+        "label": "Instance",
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "query": "label_values(qfc_block_height, instance)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": false,
+        "current": { "selected": false, "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Block production",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Block height",
+      "gridPos": { "h": 5, "w": 4, "x": 0, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "max(qfc_block_height{instance=~\"$instance\"})", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none", "decimals": 0 }, "overrides": [] }
+    },
+    {
+      "type": "stat",
+      "title": "Reorgs detected (24h)",
+      "gridPos": { "h": 5, "w": 4, "x": 4, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "sum(increase(qfc_reorgs_detected_total{instance=~\"$instance\"}[24h]))", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Time since last block (block-production SLI, alert at 30s)",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "qfc_time_since_last_block_seconds{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 10 },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 30 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Block production rate (blocks/min) & block time",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "rate(qfc_blocks_produced_total{instance=~\"$instance\"}[5m]) * 60",
+          "legendFormat": "blocks/min {{instance}}",
+          "refId": "A"
+        },
+        {
+          "expr": "qfc_block_time_seconds{instance=~\"$instance\"}",
+          "legendFormat": "block time (s) {{instance}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 5 } },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Transactions processed (rate)",
+      "gridPos": { "h": 3, "w": 8, "x": 0, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "rate(qfc_transactions_total{instance=~\"$instance\"}[5m])",
+          "legendFormat": "tx/s {{instance}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "type": "row",
+      "title": "Sync & network",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Sync lag vs peers (blocks)",
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 10 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "qfc_sync_lag_blocks{instance=~\"$instance\"}",
+          "legendFormat": "lag {{instance}}",
+          "refId": "A"
+        },
+        {
+          "expr": "qfc_sync_pending_blocks{instance=~\"$instance\"}",
+          "legendFormat": "pending parents {{instance}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "fillOpacity": 10 },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 10 },
+              { "color": "red", "value": 50 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Local height vs highest peer",
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 10 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "qfc_block_height{instance=~\"$instance\"}",
+          "legendFormat": "local {{instance}}",
+          "refId": "A"
+        },
+        {
+          "expr": "qfc_sync_highest_peer_block{instance=~\"$instance\"}",
+          "legendFormat": "highest peer {{instance}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line" } }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "Peers / validators / syncing",
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 10 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "qfc_peer_count{instance=~\"$instance\"}",
+          "legendFormat": "peers {{instance}}",
+          "refId": "A"
+        },
+        {
+          "expr": "qfc_active_validators{instance=~\"$instance\"}",
+          "legendFormat": "active validators {{instance}}",
+          "refId": "B"
+        },
+        {
+          "expr": "qfc_sync_syncing{instance=~\"$instance\"}",
+          "legendFormat": "syncing (0/1) {{instance}}",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line" } }, "overrides": [] }
+    },
+    {
+      "type": "row",
+      "title": "Mempool",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 17 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Mempool depth",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 18 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "qfc_mempool_size{instance=~\"$instance\"}",
+          "legendFormat": "pending txs {{instance}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 20 } },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Oldest pending tx age (alert at 15m)",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 18 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "qfc_mempool_oldest_tx_age_seconds{instance=~\"$instance\"}",
+          "legendFormat": "oldest tx age {{instance}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 10 },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 900 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "RPC — latency & error SLOs",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 25 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "RPC latency p50 / p99 / p999 (all methods)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 26 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(qfc_rpc_request_duration_seconds_bucket{instance=~\"$instance\"}[5m])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(qfc_rpc_request_duration_seconds_bucket{instance=~\"$instance\"}[5m])))",
+          "legendFormat": "p99",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.999, sum by (le) (rate(qfc_rpc_request_duration_seconds_bucket{instance=~\"$instance\"}[5m])))",
+          "legendFormat": "p999",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 5 },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 0.25 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "RPC p99 latency by method (top consumers)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 26 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, method) (rate(qfc_rpc_request_duration_seconds_bucket{instance=~\"$instance\"}[5m])))",
+          "legendFormat": "{{method}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "drawStyle": "line" } },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "RPC request rate by method",
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 34 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (method) (rate(qfc_rpc_requests_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{method}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "stacking": { "mode": "normal" }, "fillOpacity": 30 } },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "RPC error ratio (availability SLO 99.9% — budget line 0.1%)",
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 34 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum(rate(qfc_rpc_errors_total{instance=~\"$instance\",code!~\"-32700|-32600|-32601|-32602\"}[5m])) / clamp_min(sum(rate(qfc_rpc_requests_total{instance=~\"$instance\"}[5m])), 1e-10)",
+          "legendFormat": "server error ratio (5m)",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (method, code) (rate(qfc_rpc_errors_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{method}} {{code}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": { "drawStyle": "line", "fillOpacity": 10 },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 0.001 }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byFrameRefID", "options": "B" },
+            "properties": [{ "id": "unit", "value": "ops" }]
+          }
+        ]
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "RPC slow-request ratio (>250ms; latency SLO 99% — budget line 1%) & in-flight",
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 34 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "1 - (sum(rate(qfc_rpc_request_duration_seconds_bucket{instance=~\"$instance\",le=\"0.25\"}[5m])) / clamp_min(sum(rate(qfc_rpc_request_duration_seconds_count{instance=~\"$instance\"}[5m])), 1e-10))",
+          "legendFormat": "slow ratio (5m)",
+          "refId": "A"
+        },
+        {
+          "expr": "qfc_rpc_requests_in_flight{instance=~\"$instance\"}",
+          "legendFormat": "in-flight {{instance}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": { "drawStyle": "line", "fillOpacity": 10 },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 0.01 }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byFrameRefID", "options": "B" },
+            "properties": [{ "id": "unit", "value": "none" }]
+          }
+        ]
+      }
+    }
+  ]
+}
