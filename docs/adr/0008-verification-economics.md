@@ -29,6 +29,13 @@ Challenge traps (ADR-0005) raise effective `p` above the nominal 5% for free
 on a per-miner basis; the ratio is calibrated to nominal `p` so traps are
 margin, not load-bearing.
 
+`p` holds only if the sampling entropy source is worker-independent — a
+worker that can grind the sampling coin drives its effective `p` to 0 and
+voids this entire derivation. The interim entropy is the epoch's committed
+post-barrier `params_hash` (unknowable at push time, ADR-0005); A5 upgrades
+it to on-chain VRF randomness, which also removes the residual influence a
+colluding worker majority has over the aggregate `params_hash`.
+
 GPU tolerance-band mode (A4b) weakens detection (cheats inside ε are
 invisible) — the ε-calibration report must include a re-derivation of this
 ratio before GPU training jobs are enabled. Until then the ratio assumes
