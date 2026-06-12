@@ -1,6 +1,7 @@
 //! State database for managing accounts and storage
 
 use crate::error::{Result, StateError};
+use crate::hot_account::{HotAccountReport, HotAccountTracker};
 use lru::LruCache;
 use parking_lot::RwLock;
 use qfc_crypto::blake3_hash;
@@ -9,6 +10,7 @@ use qfc_trie::Trie;
 use qfc_types::{Account, Address, Hash, Undelegation, U256};
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 use tracing::debug;
 
 /// Maximum number of accounts in the LRU cache
@@ -32,12 +34,24 @@ pub struct StateDB {
     code_cache: RwLock<LruCache<Hash, Vec<u8>>>,
     /// Current state root
     root: RwLock<Hash>,
+    /// Hot-account access tracker (SRE T8). Enabled iff the underlying
+    /// `Database` was opened with hot-key sampling on; `None` otherwise, so
+    /// the disabled per-op cost is a single branch.
+    hot_accounts: Option<Arc<HotAccountTracker>>,
+}
+
+/// Build the hot-account tracker iff the database has hot-key sampling
+/// enabled, mirroring its rate and sketch capacity.
+fn hot_tracker_for(db: &Database) -> Option<Arc<HotAccountTracker>> {
+    db.hot_key_sampling()
+        .map(|rate| Arc::new(HotAccountTracker::new(rate, db.hot_key_capacity())))
 }
 
 impl StateDB {
     /// Create a new state database with empty state
     pub fn new(db: Database) -> Self {
         let trie = Trie::new(db.clone());
+        let hot_accounts = hot_tracker_for(&db);
         Self {
             db,
             trie: RwLock::new(trie),
@@ -49,12 +63,14 @@ impl StateDB {
             )),
             code_cache: RwLock::new(LruCache::new(NonZeroUsize::new(CODE_CACHE_SIZE).unwrap())),
             root: RwLock::new(Hash::ZERO),
+            hot_accounts,
         }
     }
 
     /// Create a state database at a specific root
     pub fn with_root(db: Database, root: Hash) -> Self {
         let trie = Trie::with_root(db.clone(), root);
+        let hot_accounts = hot_tracker_for(&db);
         Self {
             db,
             trie: RwLock::new(trie),
@@ -66,6 +82,7 @@ impl StateDB {
             )),
             code_cache: RwLock::new(LruCache::new(NonZeroUsize::new(CODE_CACHE_SIZE).unwrap())),
             root: RwLock::new(root),
+            hot_accounts,
         }
     }
 
@@ -85,6 +102,13 @@ impl StateDB {
 
     /// Get an account (returns default if not exists)
     pub fn get_account(&self, address: &Address) -> Result<Account> {
+        // Hot-account sampling happens before the cache check on purpose:
+        // the report must reflect the logical access distribution (which is
+        // what cache sizing needs), not just cache misses.
+        if let Some(hot) = &self.hot_accounts {
+            hot.record_account_read(address);
+        }
+
         // Check cache first (LruCache::get requires &mut self)
         if let Some(account) = self.account_cache.write().get(address) {
             return Ok(account.clone());
@@ -108,6 +132,10 @@ impl StateDB {
 
     /// Set an account
     pub fn set_account(&self, address: &Address, account: &Account) -> Result<()> {
+        if let Some(hot) = &self.hot_accounts {
+            hot.record_account_write(address);
+        }
+
         // Update cache
         self.account_cache.write().put(*address, account.clone());
 
@@ -204,6 +232,11 @@ impl StateDB {
 
         match account.code_hash {
             Some(hash) => {
+                // Sampled before the code cache, same rationale as accounts.
+                if let Some(hot) = &self.hot_accounts {
+                    hot.record_code_read(&hash);
+                }
+
                 // Check cache
                 if let Some(code) = self.code_cache.write().get(&hash) {
                     return Ok(code.clone());
@@ -499,6 +532,31 @@ impl StateDB {
         Ok(new_root)
     }
 
+    /// Hot-account sampling rate (SRE T8), or `None` when disabled.
+    ///
+    /// Enabled automatically (same rate/capacity) when the underlying
+    /// database was opened with `StorageConfig::hot_key_sampling` set.
+    pub fn hot_account_sampling(&self) -> Option<u32> {
+        self.hot_accounts.as_ref().map(|h| h.rate())
+    }
+
+    /// Snapshot of hot-account / hot-code statistics for the current window,
+    /// with at most `top_n` entries per sketch. Returns `None` when sampling
+    /// is disabled. See [`crate::hot_account`] for semantics and error
+    /// bounds; pair with [`StateDB::reset_hot_account_stats`] for windowed
+    /// use.
+    pub fn hot_account_report(&self, top_n: usize) -> Option<HotAccountReport> {
+        self.hot_accounts.as_ref().map(|h| h.report(top_n))
+    }
+
+    /// Reset hot-account counters and sketches and start a new window.
+    /// No-op when sampling is disabled.
+    pub fn reset_hot_account_stats(&self) {
+        if let Some(hot) = &self.hot_accounts {
+            hot.reset();
+        }
+    }
+
     /// Clear all caches
     pub fn clear_cache(&self) {
         self.account_cache.write().clear();
@@ -582,6 +640,8 @@ impl Clone for StateDB {
             storage_cache: RwLock::new(storage_cache),
             code_cache: RwLock::new(code_cache),
             root: RwLock::new(self.root()),
+            // Clones share the tracker: they observe the same logical state.
+            hot_accounts: self.hot_accounts.clone(),
         }
     }
 }
@@ -804,6 +864,102 @@ mod tests {
             .unwrap());
         let (_, amount) = state.get_delegation(&delegator).unwrap();
         assert_eq!(amount, U256::from_u64(1000));
+    }
+
+    /// StateDB over a database with hot-key sampling at rate 1 (every access
+    /// sampled, counts exact). Keeps the TempDir alive.
+    fn create_sampled_state() -> (StateDB, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let config = qfc_storage::StorageConfig {
+            path: dir.path().to_path_buf(),
+            create_if_missing: true,
+            hot_key_sampling: Some(1),
+            ..Default::default()
+        };
+        let db = Database::open(config).unwrap();
+        (StateDB::new(db), dir)
+    }
+
+    #[test]
+    fn test_hot_accounts_disabled_by_default() {
+        let state = create_test_state();
+        assert!(state.hot_account_sampling().is_none());
+        state
+            .set_balance(&Address::new([0x11; 20]), U256::from_u64(1))
+            .unwrap();
+        assert!(state.hot_account_report(10).is_none());
+        state.reset_hot_account_stats(); // no-op, must not panic
+    }
+
+    #[test]
+    fn test_hot_accounts_attribution() {
+        let (state, _dir) = create_sampled_state();
+        assert_eq!(state.hot_account_sampling(), Some(1));
+
+        let hot = Address::new([0xAA; 20]);
+        let cold = Address::new([0xBB; 20]);
+
+        for _ in 0..20 {
+            let _ = state.get_balance(&hot).unwrap(); // 1 account read each
+        }
+        state.set_balance(&hot, U256::from_u64(1)).unwrap(); // 1 read + 1 write
+        let _ = state.get_balance(&cold).unwrap(); // 1 read
+
+        let report = state.hot_account_report(10).unwrap();
+        assert_eq!(report.sampling_rate, 1);
+        assert_eq!(report.account_reads_sampled, 22);
+        assert_eq!(report.account_writes_sampled, 1);
+
+        // Hottest account is attributed correctly, with exact counts at rate 1.
+        assert_eq!(report.top_accounts[0].address, hot.to_string());
+        assert_eq!(report.top_accounts[0].estimated_count, 22);
+        assert_eq!(report.top_accounts[1].address, cold.to_string());
+        assert_eq!(report.top_accounts[1].estimated_count, 1);
+    }
+
+    #[test]
+    fn test_hot_accounts_code_attribution() {
+        let (state, _dir) = create_sampled_state();
+        let contract = Address::new([0xCC; 20]);
+        let code = vec![0x60, 0x00, 0xf3];
+
+        let code_hash = state.set_code(&contract, code).unwrap();
+        for _ in 0..7 {
+            let _ = state.get_code(&contract).unwrap();
+        }
+        // EOA without code must not record a code read.
+        let _ = state.get_code(&Address::new([0xDD; 20])).unwrap();
+
+        let report = state.hot_account_report(10).unwrap();
+        assert_eq!(report.code_reads_sampled, 7);
+        assert_eq!(report.top_code.len(), 1);
+        assert_eq!(report.top_code[0].code_hash, code_hash.to_string());
+        assert_eq!(report.top_code[0].estimated_count, 7);
+    }
+
+    #[test]
+    fn test_hot_accounts_reset() {
+        let (state, _dir) = create_sampled_state();
+        let _ = state.get_balance(&Address::new([0x11; 20])).unwrap();
+        assert!(state.hot_account_report(10).unwrap().account_reads_sampled > 0);
+
+        state.reset_hot_account_stats();
+        let report = state.hot_account_report(10).unwrap();
+        assert_eq!(report.account_reads_sampled, 0);
+        assert!(report.top_accounts.is_empty());
+        assert!(report.top_code.is_empty());
+    }
+
+    #[test]
+    fn test_hot_accounts_shared_across_clones() {
+        let (state, _dir) = create_sampled_state();
+        let clone = state.clone();
+        let _ = clone.get_balance(&Address::new([0x11; 20])).unwrap();
+        assert_eq!(
+            state.hot_account_report(10).unwrap().account_reads_sampled,
+            1,
+            "clones share one tracker"
+        );
     }
 
     #[test]
