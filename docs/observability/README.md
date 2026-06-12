@@ -126,6 +126,26 @@ and place `grafana-dashboard.json` in that path. The dashboard has an
 | `qfc_rpc_request_duration_seconds` | histogram | `method`, `le` | RPC middleware |
 | `qfc_rpc_errors_total` | counter | `method`, `code` | RPC middleware |
 
+## Metric inventory — AI task pool quotas (T5)
+
+Quota/cost-attribution metrics from the shared AI task pool, always exported
+(`qfc_ai_quotas_enabled` says whether enforcement is on — accounting runs
+regardless). Labeled by tenant **priority tier** (`tenant_tier` ∈ `0`/`1`/`2`,
+0 = lowest/shed first), never by tenant address: tenant cardinality is
+unbounded, tiers are fixed at three. Per-tenant detail lives in the periodic
+cost report (structured log, target `qfc::ai_cost`). Full model + operational
+notes: [docs/AI-QUOTAS.md](../AI-QUOTAS.md).
+
+| Metric | Type | Labels | Source |
+|---|---|---|---|
+| `qfc_ai_quotas_enabled` | gauge (0/1) | — | `--ai-quotas` flag |
+| `qfc_ai_pending_tasks` | gauge | — | task pool pending queue |
+| `qfc_ai_tasks_submitted_total` | counter | `tenant_tier` | admitted public-task submissions |
+| `qfc_ai_tasks_rejected_total` | counter | `reason` (`pool_pressure`/`qps`/`in_flight`/`flops_budget`) | quota admission |
+| `qfc_ai_flops_metered_total` | counter | `tenant_tier` | `estimated_flops` of completed public tasks |
+| `qfc_ai_tenant_inflight` | gauge | `tenant_tier` | tasks in Pending/Assigned, summed per tier |
+| `qfc_ai_cost_report_last_timestamp_seconds` | gauge | — | cost-report task (0 = never since start; alert on age, like `qfc_snapshot_*`) |
+
 ## Metric inventory — RocksDB (T2.1)
 
 Property-based gauges, always exported (computed on demand from live engine
