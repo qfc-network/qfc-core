@@ -3459,7 +3459,26 @@ impl QfcApiServer for RpcServer {
             now + 60_000, // 60s deadline
         );
 
-        let public_task_id = pool.submit_public_task(submitter, task, max_fee);
+        // T5: per-tenant quota admission (QPS / in-flight / FLOPs budget /
+        // pool-pressure shedding). The fee was already escrowed above, so a
+        // rejection refunds it before surfacing the typed error (-32029).
+        let public_task_id = match pool.try_submit_public_task(submitter, task, max_fee, now) {
+            Ok(id) => id,
+            Err(quota_err) => {
+                drop(pool);
+                if let Err(e) = state.add_balance(&submitter, fee_u256) {
+                    warn!(
+                        "Failed to refund escrowed fee after quota rejection for {}: {}",
+                        submitter, e
+                    );
+                }
+                info!(
+                    "Public task rejected by quota for {}: {}",
+                    submitter, quota_err
+                );
+                return Err(RpcError::from(quota_err).into());
+            }
+        };
         info!(
             "Public task submitted by {}: {} (fee: {})",
             submitter,
