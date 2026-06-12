@@ -12,6 +12,7 @@ qfc-types.workspace = true
 rocksdb.workspace = true
 borsh.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 parking_lot.workspace = true
 bytes.workspace = true

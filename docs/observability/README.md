@@ -53,10 +53,15 @@ Workbook):
 | RPC availability | 99.9% | non-client-error responses / total requests |
 | RPC latency | 99% | requests completing in < 250ms |
 
-Commented placeholders at the bottom of the file are intentionally disabled
-until their metrics exist:
-
-- **Backup freshness** — enable after T4 exports `qfc_backup_last_success_timestamp_seconds`.
+The `qfc-backup-freshness` group (T4.2) is active and watches backup **age**
+(`time() - qfc_snapshot_last_success_timestamp_seconds`), not job success — a
+pipeline that silently stopped running is the failure mode that loses data.
+Threshold convention: ticket at **2× your `--snapshot-interval-secs`** (one
+missed run + slack), page at clearly-broken. The interval is deploy-specific
+and not exported, so the shipped numbers assume the recommended 1h interval
+(ticket 2h, page 12h) — scale both if you run a different interval. The
+`qfc_snapshot_*` series only exist on nodes started with
+`--snapshot-interval-secs`, so the rules are silent (no-data) elsewhere.
 
 The `qfc-rocksdb` group (T2.1) is active. Its property-based alerts
 (`QfcRocksdbWriteStopped`, `QfcRocksdbCompactionBacklog*`) work on every node;
@@ -171,3 +176,49 @@ Notes:
   `rate(..._sum[5m]) / rate(..._count[5m])` gives the windowed mean — plus an
   engine-side p99 gauge. RocksDB's C API exposes histogram percentiles, not
   bucket boundaries, so a full Prometheus histogram is not derivable.
+
+## Snapshot backups (T4.2) and the backup-freshness metrics
+
+Nodes started with `--snapshot-interval-secs <N>` (env
+`QFC_SNAPSHOT_INTERVAL_SECS`) take a **live RocksDB snapshot** (file-level
+`Checkpoint`: hard links, near-instant, consistent, no stop-the-world — not
+to be confused with consensus `ValidatorCheckpoint`s) every N seconds, pack it
+as `<prefix>-<height>-<unix_ts>.tar.gz` in `--snapshot-dir` (default
+`<datadir>/snapshots`), keep the newest `--snapshot-retain` archives locally
+(default 2), and optionally ship each archive to object storage with
+`--snapshot-upload-cmd` — an external command with `{file}` substituted by the
+archive path, so any store works without bundling an SDK:
+
+```bash
+# rclone (S3, GCS, B2, ...)
+qfc-node --snapshot-interval-secs 3600 \
+  --snapshot-upload-cmd 'rclone copy {file} remote:qfc-backups/'
+
+# aws-cli (S3)
+qfc-node --snapshot-interval-secs 3600 \
+  --snapshot-upload-cmd 'aws s3 cp {file} s3://qfc-backups/'
+
+# MinIO client
+qfc-node --snapshot-interval-secs 3600 \
+  --snapshot-upload-cmd 'mc cp {file} minio/qfc-backups/'
+```
+
+Each archive extracts to a single directory (named like the archive stem)
+that is a complete, directly-openable database plus a
+`qfc-snapshot-manifest.json` (format version, creation unix time, block
+height, db schema version, column families) consumed by the T4.3 restore
+tooling. Upload failures never crash the node: they are logged, counted, and
+surfaced through the freshness metrics below.
+
+| Metric | Type | Labels | Source |
+|---|---|---|---|
+| `qfc_snapshot_last_success_timestamp_seconds` | gauge | — | backup task (0 = never since start) |
+| `qfc_snapshot_last_attempt_timestamp_seconds` | gauge | — | backup task (0 = never since start) |
+| `qfc_snapshot_failures_total` | counter | — | backup task (snapshot, tar, or upload step failed) |
+| `qfc_snapshot_duration_seconds` | gauge | — | last successful run (checkpoint + tar + upload) |
+| `qfc_snapshot_size_bytes` | gauge | — | last successfully produced archive |
+
+These are only exported when backups are enabled. Alert on age (see the
+`qfc-backup-freshness` group above); `..._last_success... == 0` plus a recent
+`..._last_attempt...` means runs are happening but failing — node logs carry
+the upload command's stderr.
