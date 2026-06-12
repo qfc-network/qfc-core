@@ -2,6 +2,7 @@
 
 use crate::batch::{BatchOp, WriteBatch};
 use crate::error::{Result, StorageError};
+use crate::hotkeys::{HotKeyReport, HotKeySampler, DEFAULT_HOT_KEY_CAPACITY};
 use crate::schema::{cf, meta, DB_VERSION};
 use rocksdb::statistics::StatsLevel;
 use rocksdb::{
@@ -125,6 +126,17 @@ pub struct StorageConfig {
     /// enabled, read them via [`Database::statistics`] /
     /// [`Database::statistics_ticker`].
     pub enable_statistics: bool,
+
+    /// Hot-key access sampling rate (SRE T8): `Some(n)` samples roughly 1 in
+    /// `n` get/put/delete/batch ops into per-CF heavy-hitter sketches (`n` is
+    /// rounded up to a power of two). `None` or `Some(0)` disables sampling
+    /// entirely — the per-op cost is then a single branch on an `Option`.
+    /// Read results via [`Database::hot_key_report`].
+    pub hot_key_sampling: Option<u32>,
+
+    /// Heavy-hitter sketch capacity (tracked keys per column family) used
+    /// when `hot_key_sampling` is enabled.
+    pub hot_key_capacity: usize,
 }
 
 impl Default for StorageConfig {
@@ -137,6 +149,8 @@ impl Default for StorageConfig {
             enable_compression: true,
             create_if_missing: true,
             enable_statistics: false,
+            hot_key_sampling: None,
+            hot_key_capacity: DEFAULT_HOT_KEY_CAPACITY,
         }
     }
 }
@@ -148,6 +162,9 @@ pub struct Database {
     /// shared with the running DB, which is the only way to read tickers back.
     db_opts: Arc<Options>,
     config: StorageConfig,
+    /// Hot-key access sampler (SRE T8); `None` when disabled, so the per-op
+    /// cost in that case is a single branch.
+    hot_keys: Option<Arc<HotKeySampler>>,
     /// For [`Database::open_temp`]: keeps the temp directory alive while any
     /// clone of this database exists, and removes it from disk afterwards.
     /// Declared after `db` so the RocksDB instance is closed before the
@@ -238,10 +255,16 @@ impl Database {
 
         let db = RocksDB::open_cf_descriptors(&opts, &config.path, cf_descriptors)?;
 
+        let hot_keys = config
+            .hot_key_sampling
+            .filter(|rate| *rate > 0)
+            .map(|rate| Arc::new(HotKeySampler::new(rate, config.hot_key_capacity, cf::ALL)));
+
         let db = Self {
             db: Arc::new(db),
             db_opts: Arc::new(opts),
             config,
+            hot_keys,
             temp_dir: None,
         };
 
@@ -282,18 +305,27 @@ impl Database {
 
     /// Get a value from a column family
     pub fn get(&self, cf_name: &str, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        if let Some(hk) = &self.hot_keys {
+            hk.record_read(cf_name, key);
+        }
         let cf = self.get_cf(cf_name)?;
         Ok(self.db.get_cf(&cf, key)?)
     }
 
     /// Put a value in a column family
     pub fn put(&self, cf_name: &str, key: &[u8], value: &[u8]) -> Result<()> {
+        if let Some(hk) = &self.hot_keys {
+            hk.record_write(cf_name, key);
+        }
         let cf = self.get_cf(cf_name)?;
         Ok(self.db.put_cf(&cf, key, value)?)
     }
 
     /// Delete a value from a column family
     pub fn delete(&self, cf_name: &str, key: &[u8]) -> Result<()> {
+        if let Some(hk) = &self.hot_keys {
+            hk.record_write(cf_name, key);
+        }
         let cf = self.get_cf(cf_name)?;
         Ok(self.db.delete_cf(&cf, key)?)
     }
@@ -304,6 +336,9 @@ impl Database {
     /// negative is answered from the filter/memtable without touching data
     /// blocks. A "maybe" is confirmed with a pinned get (no value copy).
     pub fn contains(&self, cf_name: &str, key: &[u8]) -> Result<bool> {
+        if let Some(hk) = &self.hot_keys {
+            hk.record_read(cf_name, key);
+        }
         let cf = self.get_cf(cf_name)?;
         if !self.db.key_may_exist_cf(&cf, key) {
             return Ok(false);
@@ -326,6 +361,10 @@ impl Database {
             };
             if !handles.contains_key(cf_name) {
                 handles.insert(cf_name, self.get_cf(cf_name)?);
+            }
+            if let Some(hk) = &self.hot_keys {
+                let (BatchOp::Put { key, .. } | BatchOp::Delete { key, .. }) = op;
+                hk.record_write(cf_name, key);
             }
             let handle = &handles[cf_name];
             match op {
@@ -357,6 +396,10 @@ impl Database {
             };
             if !handles.contains_key(cf_name) {
                 handles.insert(cf_name, self.get_cf(cf_name)?);
+            }
+            if let Some(hk) = &self.hot_keys {
+                let (BatchOp::Put { key, .. } | BatchOp::Delete { key, .. }) = op;
+                hk.record_write(cf_name, key);
             }
             let handle = &handles[cf_name];
             match op {
@@ -509,6 +552,38 @@ impl Database {
         Ok(self.db.property_int_value_cf(&cf, name)?)
     }
 
+    /// Effective hot-key sampling rate (SRE T8), or `None` when disabled.
+    ///
+    /// The rate is the configured [`StorageConfig::hot_key_sampling`] rounded
+    /// up to a power of two. Higher layers (e.g. `qfc-state` account
+    /// attribution) use this to enable their own sampling at the same rate.
+    pub fn hot_key_sampling(&self) -> Option<u32> {
+        self.hot_keys.as_ref().map(|hk| hk.rate())
+    }
+
+    /// Heavy-hitter sketch capacity configured for hot-key sampling.
+    pub fn hot_key_capacity(&self) -> usize {
+        self.config.hot_key_capacity
+    }
+
+    /// Snapshot of per-CF hot-key statistics for the current window, with at
+    /// most `top_n` keys per CF. Returns `None` when sampling is disabled.
+    ///
+    /// See [`crate::hotkeys`] module docs for the error characteristics of
+    /// the estimates. Pair with [`Database::reset_hot_key_stats`] for
+    /// windowed use (e.g. a periodic exporter dump).
+    pub fn hot_key_report(&self, top_n: usize) -> Option<HotKeyReport> {
+        self.hot_keys.as_ref().map(|hk| hk.report(top_n))
+    }
+
+    /// Reset hot-key counters and sketches and start a new sampling window.
+    /// No-op when sampling is disabled.
+    pub fn reset_hot_key_stats(&self) {
+        if let Some(hk) = &self.hot_keys {
+            hk.reset();
+        }
+    }
+
     /// Flush the database
     pub fn flush(&self) -> Result<()> {
         for cf_name in cf::ALL {
@@ -545,6 +620,7 @@ impl Clone for Database {
             db: Arc::clone(&self.db),
             db_opts: Arc::clone(&self.db_opts),
             config: self.config.clone(),
+            hot_keys: self.hot_keys.clone(),
             temp_dir: self.temp_dir.clone(),
         }
     }
@@ -785,6 +861,111 @@ mod tests {
         assert!(db
             .property_int_cf("no_such_cf", props::CUR_SIZE_ALL_MEM_TABLES)
             .is_err());
+    }
+
+    #[test]
+    fn test_hot_keys_disabled_by_default() {
+        let db = Database::open_temp().unwrap();
+        assert!(db.hot_key_sampling().is_none());
+
+        db.put(cf::STATE, b"k", b"v").unwrap();
+        let _ = db.get(cf::STATE, b"k").unwrap();
+
+        assert!(db.hot_key_report(10).is_none(), "disabled => no report");
+        db.reset_hot_key_stats(); // must be a no-op, not a panic
+    }
+
+    #[test]
+    fn test_hot_keys_zero_rate_is_disabled() {
+        let (db, _dir) = open_temp_with(|c| c.hot_key_sampling = Some(0));
+        assert!(db.hot_key_sampling().is_none());
+        assert!(db.hot_key_report(10).is_none());
+    }
+
+    #[test]
+    fn test_hot_keys_rate_rounded_to_power_of_two() {
+        let (db, _dir) = open_temp_with(|c| c.hot_key_sampling = Some(48));
+        assert_eq!(db.hot_key_sampling(), Some(64));
+    }
+
+    #[test]
+    fn test_hot_keys_counts_reads_writes_per_cf() {
+        // rate 1 => every op sampled, counts are exact.
+        let (db, _dir) = open_temp_with(|c| c.hot_key_sampling = Some(1));
+        db.reset_hot_key_stats(); // discard init_metadata traffic
+
+        for _ in 0..5 {
+            let _ = db.get(cf::STATE, b"hot").unwrap();
+        }
+        db.put(cf::STATE, b"hot", b"v").unwrap();
+        db.put(cf::CODE, b"codekey", b"v").unwrap();
+        db.delete(cf::CODE, b"codekey").unwrap();
+
+        let report = db.hot_key_report(10).expect("enabled => report");
+        assert_eq!(report.sampling_rate, 1);
+
+        let state = report.cfs.iter().find(|c| c.cf == cf::STATE).unwrap();
+        assert_eq!(state.reads_sampled, 5);
+        assert_eq!(state.writes_sampled, 1);
+        assert_eq!(state.top_keys[0].key_hex, "0x686f74"); // "hot"
+        assert_eq!(state.top_keys[0].estimated_count, 6);
+
+        // Per-CF isolation: "hot" only under STATE, "codekey" only under CODE.
+        let code = report.cfs.iter().find(|c| c.cf == cf::CODE).unwrap();
+        assert_eq!(code.writes_sampled, 2, "put + delete");
+        assert!(code.top_keys.iter().all(|k| k.key_hex != "0x686f74"));
+    }
+
+    #[test]
+    fn test_hot_keys_batch_writes_recorded() {
+        let (db, _dir) = open_temp_with(|c| c.hot_key_sampling = Some(1));
+        db.reset_hot_key_stats();
+
+        let mut batch = WriteBatch::new();
+        batch.put(cf::STATE, b"a".to_vec(), b"v".to_vec());
+        batch.put(cf::TRANSACTIONS, b"t".to_vec(), b"v".to_vec());
+        batch.delete(cf::STATE, b"a".to_vec());
+        db.write_batch(batch).unwrap();
+
+        let mut batch = WriteBatch::new();
+        batch.put(cf::STATE, b"a".to_vec(), b"v".to_vec());
+        db.write_batch_sync(batch).unwrap();
+
+        let report = db.hot_key_report(10).unwrap();
+        let state = report.cfs.iter().find(|c| c.cf == cf::STATE).unwrap();
+        assert_eq!(state.writes_sampled, 3, "2 batch ops + 1 sync batch op");
+        let txs = report
+            .cfs
+            .iter()
+            .find(|c| c.cf == cf::TRANSACTIONS)
+            .unwrap();
+        assert_eq!(txs.writes_sampled, 1);
+    }
+
+    #[test]
+    fn test_hot_keys_reset_starts_new_window() {
+        let (db, _dir) = open_temp_with(|c| c.hot_key_sampling = Some(1));
+        db.put(cf::STATE, b"k", b"v").unwrap();
+        let before = db.hot_key_report(10).unwrap();
+        assert!(!before.cfs.is_empty());
+
+        db.reset_hot_key_stats();
+        let after = db.hot_key_report(10).unwrap();
+        assert!(after.cfs.is_empty());
+        assert!(after.window_start_unix_ms >= before.window_start_unix_ms);
+    }
+
+    #[test]
+    fn test_hot_keys_shared_across_clones() {
+        let (db, _dir) = open_temp_with(|c| c.hot_key_sampling = Some(1));
+        db.reset_hot_key_stats();
+
+        let clone = db.clone();
+        clone.put(cf::STATE, b"k", b"v").unwrap();
+
+        let report = db.hot_key_report(10).unwrap();
+        let state = report.cfs.iter().find(|c| c.cf == cf::STATE).unwrap();
+        assert_eq!(state.writes_sampled, 1, "clones share one sampler");
     }
 
     #[test]
