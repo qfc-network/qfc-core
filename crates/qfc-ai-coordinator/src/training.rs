@@ -449,7 +449,12 @@ pub struct TrainingAssignment {
 /// First 8 bytes (big-endian) of `blake3(job_id ‖ epoch_be ‖ worker)`.
 /// Deterministic and unique per (job, epoch, worker), so replays (ADR-0005)
 /// can reconstruct the seed from public data alone.
-fn derive_seed(job_id: &Hash, epoch: u64, worker: &Address) -> u64 {
+///
+/// `pub(crate)` so `training_verification::ReplayContext::for_claim` can
+/// RECOMPUTE the seed instead of trusting the assignment it was handed — a
+/// forged assignment with a wrong seed would otherwise replay garbage and
+/// manufacture a false penalty against an honest worker.
+pub(crate) fn derive_seed(job_id: &Hash, epoch: u64, worker: &Address) -> u64 {
     let mut bytes = Vec::with_capacity(32 + 8 + 20);
     bytes.extend_from_slice(job_id.as_bytes());
     bytes.extend_from_slice(&epoch.to_be_bytes());

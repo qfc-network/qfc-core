@@ -22,6 +22,7 @@ pub mod router;
 pub mod task_pool;
 pub mod task_types;
 pub mod training;
+pub mod training_verification;
 pub mod treasury;
 pub mod verification;
 
@@ -39,6 +40,10 @@ pub use task_pool::{PublicTaskFilter, TaskPool};
 pub use task_types::estimate_base_fee;
 pub use training::{
     TrainingAssignment, TrainingError, TrainingJobSpec, TrainingJobStatus, TrainingPool,
+};
+pub use training_verification::{
+    CompareMode, ReplayContext, TrainingExecutor, TrainingPenalty, TrainingVerdict,
+    TrainingVerificationError, TrainingVerifier, INVALID_TRAINING_JAIL_MS,
 };
 pub use treasury::{SpendProposal, SpendStatus, Treasury, TreasuryError};
 pub use verification::{
