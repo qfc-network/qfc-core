@@ -13,6 +13,7 @@ qfc-crypto.workspace = true
 qfc-inference.workspace = true
 qfc-ps.workspace = true
 borsh.workspace = true
+hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

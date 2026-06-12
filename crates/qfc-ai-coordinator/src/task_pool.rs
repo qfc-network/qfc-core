@@ -6,6 +6,8 @@ use borsh::BorshDeserialize;
 use qfc_inference::{GpuTier, InferenceTask};
 use qfc_types::{Address, Hash};
 
+use crate::cost::{CostMeter, CostReport, LoggingTreasuryHook, TreasuryHook};
+use crate::quota::{QuotaConfig, QuotaEnforcer, QuotaError, PRIORITY_TIERS, REJECT_REASONS};
 use crate::task_types::{synthetic_task_for_tier, task_requirements};
 
 /// How the result data is stored
@@ -95,6 +97,36 @@ pub struct TaskPool {
     redundancy_count: usize,
     /// Completed/expired/failed tasks retained for querying, with expiry timestamp (ms)
     completed_tasks: HashMap<Hash, (PublicTask, u64)>,
+    /// T5: per-tenant admission control (quotas off until configured)
+    quota: QuotaEnforcer,
+    /// T5: FLOPs/fee cost attribution per tenant and per miner
+    cost: CostMeter,
+    /// T5: treasury integration hook (default: structured logging no-op)
+    treasury_hook: Box<dyn TreasuryHook>,
+    /// T5: round-robin cursor for fair scheduling across tenants
+    rr_last_tenant: Option<Address>,
+    /// T5 metrics: public-task submissions per priority tier
+    submitted_by_tier: [u64; PRIORITY_TIERS],
+    /// T5 metrics: quota rejections per reason (indexed like REJECT_REASONS)
+    rejected_by_reason: [u64; REJECT_REASONS.len()],
+    /// T5 metrics: estimated_flops metered on completion, per priority tier
+    flops_metered_by_tier: [u128; PRIORITY_TIERS],
+}
+
+/// T5: bounded-cardinality snapshot of quota/cost activity for the
+/// Prometheus exporter. Labeled by priority **tier**, never by tenant
+/// address (tenant cardinality is unbounded); per-tenant detail lives in
+/// the cost report (structured log + `last_cost_report`).
+#[derive(Clone, Debug)]
+pub struct AiQuotaMetrics {
+    pub quotas_enabled: bool,
+    pub pending_tasks: usize,
+    pub submitted_by_tier: [u64; PRIORITY_TIERS],
+    pub rejected_by_reason: [(&'static str, u64); REJECT_REASONS.len()],
+    pub flops_metered_by_tier: [u128; PRIORITY_TIERS],
+    pub inflight_by_tier: [u64; PRIORITY_TIERS],
+    /// Unix ms of the last cost report (0 = never since start).
+    pub cost_report_unix_ms: u64,
 }
 
 impl TaskPool {
@@ -109,7 +141,29 @@ impl TaskPool {
             redundant_assignments: HashMap::new(),
             redundancy_count: 2,
             completed_tasks: HashMap::new(),
+            quota: QuotaEnforcer::new(),
+            cost: CostMeter::new(),
+            treasury_hook: Box::new(LoggingTreasuryHook),
+            rr_last_tenant: None,
+            submitted_by_tier: [0; PRIORITY_TIERS],
+            rejected_by_reason: [0; REJECT_REASONS.len()],
+            flops_metered_by_tier: [0; PRIORITY_TIERS],
         }
+    }
+
+    /// T5: install (or clear) the per-tenant quota configuration.
+    pub fn set_quota_config(&mut self, config: Option<QuotaConfig>) {
+        self.quota.set_config(config);
+    }
+
+    /// T5: whether quota enforcement is active.
+    pub fn quotas_enabled(&self) -> bool {
+        self.quota.enabled()
+    }
+
+    /// T5: replace the treasury hook (default is [`LoggingTreasuryHook`]).
+    pub fn set_treasury_hook(&mut self, hook: Box<dyn TreasuryHook>) {
+        self.treasury_hook = hook;
     }
 
     /// Set the current epoch
@@ -149,17 +203,26 @@ impl TaskPool {
     }
 
     /// Fetch a task, optionally recording the miner for redundant assignment.
-    /// Selects the highest-fee matching task (C3: priority by fee).
+    ///
+    /// T5 fair scheduling, in order:
+    /// 1. **Priority tier first** — only candidates from the highest
+    ///    priority tier present are considered (tier 2 before 1 before 0).
+    /// 2. **Round-robin across tenants** within that tier — tenants are
+    ///    ordered by address and served cyclically from a single cursor, so
+    ///    no tenant is served twice before every other tenant with matching
+    ///    pending work is served once (starvation-free).
+    /// 3. **Highest fee within a tenant** (pre-T5 C3 behavior, preserved).
+    ///
+    /// Synthetic tasks have no submitter and are attributed to
+    /// `Address::ZERO` at the default tier's priority.
     pub fn fetch_task_for(
         &mut self,
         tier: GpuTier,
         available_memory_mb: u64,
         miner: Option<Address>,
     ) -> Option<InferenceTask> {
-        // Find all matching candidates, pick the one with highest fee (C3)
-        let mut best_idx: Option<usize> = None;
-        let mut best_fee: u128 = 0;
-
+        // Collect matching candidates: (index, tenant, priority, fee).
+        let mut candidates: Vec<(usize, Address, u8, u128)> = Vec::new();
         for (i, task) in self.pending.iter().enumerate() {
             let reqs = task_requirements(&task.task_type);
             if !tier_can_run(tier, reqs.min_tier) || available_memory_mb < reqs.min_memory_mb {
@@ -173,19 +236,45 @@ impl TaskPool {
                     }
                 }
             }
-            // Check fee from public_tasks; synthetic tasks have fee=0
-            let fee = self
+            // Tenant + fee from public_tasks; synthetic tasks are the
+            // zero-address tenant with fee 0.
+            let (tenant, fee) = self
                 .public_tasks
                 .get(&task.task_id)
-                .map(|pt| pt.max_fee)
-                .unwrap_or(0);
-            if best_idx.is_none() || fee > best_fee {
-                best_idx = Some(i);
-                best_fee = fee;
-            }
+                .map(|pt| (pt.submitter, pt.max_fee))
+                .unwrap_or((Address::ZERO, 0));
+            let priority = self.quota.priority_for(&tenant);
+            candidates.push((i, tenant, priority, fee));
+        }
+        if candidates.is_empty() {
+            return None;
         }
 
-        let idx = best_idx?;
+        // 1. Highest priority tier only.
+        let max_priority = candidates.iter().map(|c| c.2).max().unwrap_or(0);
+        candidates.retain(|c| c.2 == max_priority);
+
+        // 2. Round-robin across tenants: pick the smallest tenant address
+        //    strictly greater than the cursor, wrapping to the smallest.
+        let mut tenants: Vec<Address> = candidates.iter().map(|c| c.1).collect();
+        tenants.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        tenants.dedup();
+        let chosen_tenant = match self.rr_last_tenant {
+            Some(last) => tenants
+                .iter()
+                .find(|t| t.as_bytes() > last.as_bytes())
+                .copied()
+                .unwrap_or(tenants[0]),
+            None => tenants[0],
+        };
+        self.rr_last_tenant = Some(chosen_tenant);
+
+        // 3. Highest fee within the chosen tenant.
+        let idx = candidates
+            .iter()
+            .filter(|c| c.1 == chosen_tenant)
+            .max_by_key(|c| c.3)
+            .map(|c| c.0)?;
         let task = self.pending[idx].clone();
         let task_id = task.task_id;
 
@@ -239,7 +328,35 @@ impl TaskPool {
         self.pending.retain(|t| t.deadline > now);
     }
 
-    /// Submit a public inference task
+    /// T5: submit a public inference task with per-tenant quota admission.
+    ///
+    /// Checks (in order): pool-pressure shedding (lowest priority first),
+    /// QPS token bucket, in-flight limit, FLOPs budget (charged with the
+    /// task's `estimated_flops`). With no quota config installed every
+    /// submission is admitted. On rejection the pool is unchanged and the
+    /// typed [`QuotaError`] carries the violated limit + retry-after hint.
+    pub fn try_submit_public_task(
+        &mut self,
+        submitter: Address,
+        task: InferenceTask,
+        max_fee: u128,
+        now_ms: u64,
+    ) -> Result<Hash, QuotaError> {
+        let estimated_flops = task_requirements(&task.task_type).estimated_flops;
+        if let Err(err) = self
+            .quota
+            .admit(&submitter, estimated_flops, self.pending.len(), now_ms)
+        {
+            if let Some(i) = REJECT_REASONS.iter().position(|r| *r == err.reason()) {
+                self.rejected_by_reason[i] += 1;
+            }
+            return Err(err);
+        }
+        Ok(self.submit_public_task(submitter, task, max_fee))
+    }
+
+    /// Submit a public inference task (no quota admission — prefer
+    /// [`TaskPool::try_submit_public_task`] on externally driven paths).
     pub fn submit_public_task(
         &mut self,
         submitter: Address,
@@ -249,6 +366,10 @@ impl TaskPool {
         let task_id = task.task_id;
         let input_hash = task.task_type.input_hash();
         let now = now_ms();
+        // T5: in-flight + submission accounting.
+        self.quota.task_started(&submitter, now);
+        let tier = self.quota.priority_for(&submitter) as usize;
+        self.submitted_by_tier[tier] += 1;
         let public = PublicTask {
             task_id,
             submitter,
@@ -321,6 +442,19 @@ impl TaskPool {
     ) -> bool {
         self.assigned.remove(task_id);
         if let Some(mut task) = self.public_tasks.remove(task_id) {
+            // T5: meter the completed task — estimated_flops attributed to
+            // both the tenant (submitter) and the executing miner — and
+            // notify the treasury hook.
+            let flops = task_requirements(&task.inner_task.task_type).estimated_flops;
+            let tier = self.quota.priority_for(&task.submitter) as usize;
+            self.quota.task_finished(&task.submitter);
+            self.cost
+                .record(&task.submitter, &miner, flops, task.max_fee);
+            self.flops_metered_by_tier[tier] =
+                self.flops_metered_by_tier[tier].saturating_add(flops as u128);
+            self.treasury_hook
+                .on_task_charged(&task.submitter, &miner, flops, task.max_fee);
+
             task.status = PublicTaskStatus::Completed {
                 result,
                 miner,
@@ -400,6 +534,9 @@ impl TaskPool {
                 let input_hash = task.inner_task.task_type.input_hash();
                 self.input_hash_index.remove(&input_hash);
                 self.assigned.remove(&id);
+                // T5: expired tasks leave the tenant's in-flight count
+                // (no cost metering — the task was never executed).
+                self.quota.task_finished(&task.submitter);
                 task.status = PublicTaskStatus::Expired;
                 // Retain for querying before returning for refund
                 let retain_until = now + COMPLETED_RETENTION_MS;
@@ -429,6 +566,43 @@ impl TaskPool {
             }
         }
         pruned
+    }
+
+    /// T5: generate a periodic cost report (per-tenant + per-miner FLOPs and
+    /// fees over the interval since the previous report), notify the
+    /// treasury hook, and retain it for querying.
+    pub fn generate_cost_report(&mut self, now_ms: u64) -> CostReport {
+        let report = self.cost.generate_report(now_ms);
+        self.treasury_hook.on_cost_report(&report);
+        report
+    }
+
+    /// T5: the most recent cost report (queryable accessor for RPC/exporter).
+    pub fn last_cost_report(&self) -> Option<&CostReport> {
+        self.cost.last_report()
+    }
+
+    /// T5: read access to the cost meter (cumulative per-tenant/per-miner
+    /// totals).
+    pub fn cost_meter(&self) -> &CostMeter {
+        &self.cost
+    }
+
+    /// T5: bounded-cardinality metrics snapshot for the Prometheus exporter.
+    pub fn quota_metrics(&self) -> AiQuotaMetrics {
+        let mut rejected = [("", 0u64); REJECT_REASONS.len()];
+        for (i, reason) in REJECT_REASONS.iter().enumerate() {
+            rejected[i] = (*reason, self.rejected_by_reason[i]);
+        }
+        AiQuotaMetrics {
+            quotas_enabled: self.quota.enabled(),
+            pending_tasks: self.pending.len(),
+            submitted_by_tier: self.submitted_by_tier,
+            rejected_by_reason: rejected,
+            flops_metered_by_tier: self.flops_metered_by_tier,
+            inflight_by_tier: self.quota.inflight_by_priority(),
+            cost_report_unix_ms: self.cost.last_report_unix_ms(),
+        }
     }
 
     /// Serialize a PublicTask to bytes for storage
@@ -844,5 +1018,313 @@ mod tests {
 
         // Task should no longer be in memory
         assert!(pool.get_public_task(&task_id).is_none());
+    }
+
+    // ---------- T5: quotas, fairness, metering, treasury hook ----------
+
+    fn make_public_task(pool: &mut TaskPool, submitter: Address, seed: &[u8], fee: u128) -> Hash {
+        let input_hash = qfc_crypto::blake3_hash(seed);
+        let task_type = qfc_inference::task::ComputeTaskType::Embedding {
+            model_id: qfc_inference::task::ModelId::new("test", "v1"),
+            input_hash,
+        };
+        let task_id = qfc_crypto::blake3_hash(&[seed, b"id"].concat());
+        let task = InferenceTask::new(task_id, 1, task_type, vec![], now_ms(), u64::MAX);
+        pool.submit_public_task(submitter, task, fee);
+        task_id
+    }
+
+    fn try_submit(
+        pool: &mut TaskPool,
+        submitter: Address,
+        seed: &[u8],
+        now: u64,
+    ) -> Result<Hash, crate::quota::QuotaError> {
+        let input_hash = qfc_crypto::blake3_hash(seed);
+        let task_type = qfc_inference::task::ComputeTaskType::Embedding {
+            model_id: qfc_inference::task::ModelId::new("test", "v1"),
+            input_hash,
+        };
+        let task_id = qfc_crypto::blake3_hash(&[seed, b"id"].concat());
+        let task = InferenceTask::new(task_id, 1, task_type, vec![], now, u64::MAX);
+        pool.try_submit_public_task(submitter, task, 1_000, now)
+    }
+
+    fn quota_cfg(json: &str) -> crate::quota::QuotaConfig {
+        crate::quota::QuotaConfig::from_json_str(json).unwrap()
+    }
+
+    #[test]
+    fn test_try_submit_quota_rejection_and_counters() {
+        let mut pool = TaskPool::new();
+        pool.set_quota_config(Some(quota_cfg(
+            r#"{ "default_tier": { "max_qps": 1.0, "burst": 1 } }"#,
+        )));
+
+        assert!(try_submit(&mut pool, Address::new([1; 20]), b"a", 0).is_ok());
+        let err = try_submit(&mut pool, Address::new([1; 20]), b"b", 0).unwrap_err();
+        assert_eq!(err.reason(), "qps");
+        assert!(err.retry_after_ms() > 0);
+
+        let m = pool.quota_metrics();
+        assert!(m.quotas_enabled);
+        assert_eq!(m.pending_tasks, 1);
+        assert_eq!(m.submitted_by_tier[1], 1); // default tier priority = 1
+        assert_eq!(
+            m.rejected_by_reason
+                .iter()
+                .find(|(r, _)| *r == "qps")
+                .unwrap()
+                .1,
+            1
+        );
+    }
+
+    #[test]
+    fn test_quotas_off_admits_everything() {
+        let mut pool = TaskPool::new();
+        for i in 0..50u64 {
+            assert!(try_submit(&mut pool, Address::new([1; 20]), &i.to_le_bytes(), 0).is_ok());
+        }
+        assert!(!pool.quotas_enabled());
+        assert_eq!(pool.quota_metrics().submitted_by_tier[1], 50);
+    }
+
+    #[test]
+    fn test_fair_scheduling_two_tenants_starvation_free() {
+        let mut pool = TaskPool::new();
+        let (a, b) = (Address::new([0xAA; 20]), Address::new([0xBB; 20]));
+
+        // Tenant A floods the pool with high-fee tasks; B submits cheap ones.
+        for i in 0..4u8 {
+            make_public_task(&mut pool, a, &[b'a', i], 1_000_000);
+        }
+        for i in 0..4u8 {
+            make_public_task(&mut pool, b, &[b'b', i], 1);
+        }
+
+        // Round-robin must alternate tenants despite the fee gap.
+        let mut order = Vec::new();
+        for _ in 0..8 {
+            let task = pool.fetch_task(GpuTier::Hot, 100_000).unwrap();
+            let tenant = pool.get_public_task(&task.task_id).unwrap().submitter;
+            order.push(tenant);
+        }
+        let a_count_first_half = order[..4].iter().filter(|t| **t == a).count();
+        let b_count_first_half = order[..4].iter().filter(|t| **t == b).count();
+        assert_eq!(
+            a_count_first_half, 2,
+            "tenant A must not starve B: {order:?}"
+        );
+        assert_eq!(
+            b_count_first_half, 2,
+            "tenant B must be served fairly: {order:?}"
+        );
+        // No two consecutive fetches serve the same tenant while both have work.
+        for w in order[..7].windows(2) {
+            assert_ne!(w[0], w[1], "round-robin must alternate: {order:?}");
+        }
+    }
+
+    #[test]
+    fn test_priority_tier_served_before_lower() {
+        let mut pool = TaskPool::new();
+        let (lo, hi) = (Address::new([0x01; 20]), Address::new([0x02; 20]));
+        pool.set_quota_config(Some(quota_cfg(&format!(
+            r#"{{
+                "default_tier": {{ "max_qps": 0.0 }},
+                "tenants": {{
+                    "0x{}": {{ "max_qps": 0.0, "priority": 0 }},
+                    "0x{}": {{ "max_qps": 0.0, "priority": 2 }}
+                }}
+            }}"#,
+            hex::encode(lo.as_bytes()),
+            hex::encode(hi.as_bytes()),
+        ))));
+
+        // Low-priority task submitted first and with a far higher fee.
+        make_public_task(&mut pool, lo, b"low-prio", 1_000_000);
+        make_public_task(&mut pool, hi, b"high-prio", 1);
+
+        let first = pool.fetch_task(GpuTier::Hot, 100_000).unwrap();
+        assert_eq!(
+            pool.get_public_task(&first.task_id).unwrap().submitter,
+            hi,
+            "highest priority tier must be served first"
+        );
+        let second = pool.fetch_task(GpuTier::Hot, 100_000).unwrap();
+        assert_eq!(pool.get_public_task(&second.task_id).unwrap().submitter, lo);
+    }
+
+    #[test]
+    fn test_degradation_order_under_pool_pressure() {
+        let mut pool = TaskPool::new();
+        let (t0, t1, t2) = (
+            Address::new([0x10; 20]),
+            Address::new([0x11; 20]),
+            Address::new([0x12; 20]),
+        );
+        pool.set_quota_config(Some(quota_cfg(&format!(
+            r#"{{
+                "max_pending": 8,
+                "default_tier": {{ "max_qps": 0.0 }},
+                "tenants": {{
+                    "0x{}": {{ "max_qps": 0.0, "priority": 0 }},
+                    "0x{}": {{ "max_qps": 0.0, "priority": 1 }},
+                    "0x{}": {{ "max_qps": 0.0, "priority": 2 }}
+                }}
+            }}"#,
+            hex::encode(t0.as_bytes()),
+            hex::encode(t1.as_bytes()),
+            hex::encode(t2.as_bytes()),
+        ))));
+
+        // Fill the pool to 4 pending (50% of 8): tier 0 sheds first.
+        for i in 0..4u8 {
+            assert!(try_submit(&mut pool, t2, &[b'f', i], 0).is_ok());
+        }
+        assert_eq!(pool.pending_count(), 4);
+        assert_eq!(
+            try_submit(&mut pool, t0, b"shed0", 0).unwrap_err().reason(),
+            "pool_pressure"
+        );
+        assert!(try_submit(&mut pool, t1, b"ok1", 0).is_ok());
+        assert!(try_submit(&mut pool, t2, b"ok2", 0).is_ok());
+
+        // At 6 pending (75%): tier 1 sheds too; tier 2 still admitted.
+        assert_eq!(pool.pending_count(), 6);
+        assert_eq!(
+            try_submit(&mut pool, t1, b"shed1", 0).unwrap_err().reason(),
+            "pool_pressure"
+        );
+        assert!(try_submit(&mut pool, t2, b"ok3", 0).is_ok());
+        assert!(try_submit(&mut pool, t2, b"ok4", 0).is_ok());
+
+        // At the hard cap (8): even tier 2 sheds.
+        assert_eq!(pool.pending_count(), 8);
+        assert_eq!(
+            try_submit(&mut pool, t2, b"shed2", 0).unwrap_err().reason(),
+            "pool_pressure"
+        );
+    }
+
+    #[test]
+    fn test_metering_per_tenant_and_miner_and_inflight() {
+        let mut pool = TaskPool::new();
+        let (tenant_a, tenant_b) = (Address::new([0xA1; 20]), Address::new([0xB1; 20]));
+        let (miner_x, miner_y) = (Address::new([0x71; 20]), Address::new([0x72; 20]));
+
+        let id1 = make_public_task(&mut pool, tenant_a, b"m1", 500);
+        let id2 = make_public_task(&mut pool, tenant_a, b"m2", 700);
+        let id3 = make_public_task(&mut pool, tenant_b, b"m3", 900);
+
+        // In-flight is tracked per tenant (default tier = priority 1).
+        assert_eq!(pool.quota_metrics().inflight_by_tier, [0, 3, 0]);
+
+        // Embedding tasks meter 1 GFLOP each (task_requirements).
+        pool.complete_public_task(&id1, ResultStorage::Inline(vec![]), miner_x, 10);
+        pool.complete_public_task(&id2, ResultStorage::Inline(vec![]), miner_y, 10);
+        pool.complete_public_task(&id3, ResultStorage::Inline(vec![]), miner_x, 10);
+
+        let meter = pool.cost_meter();
+        let a = meter.tenant_total(&tenant_a);
+        assert_eq!(a.tasks, 2);
+        assert_eq!(a.flops, 2_000_000_000);
+        assert_eq!(a.fees_wei, 1_200);
+        let b = meter.tenant_total(&tenant_b);
+        assert_eq!(b.tasks, 1);
+        assert_eq!(b.flops, 1_000_000_000);
+        let x = meter.miner_total(&miner_x);
+        assert_eq!(x.tasks, 2);
+        assert_eq!(x.flops, 2_000_000_000);
+        assert_eq!(x.fees_wei, 1_400);
+        let y = meter.miner_total(&miner_y);
+        assert_eq!(y.tasks, 1);
+
+        let m = pool.quota_metrics();
+        assert_eq!(m.inflight_by_tier, [0, 0, 0]);
+        assert_eq!(m.flops_metered_by_tier[1], 3_000_000_000);
+
+        // Cost report: queryable, sorted, freshness timestamp set.
+        let report = pool.generate_cost_report(123_456);
+        assert_eq!(report.tenants.len(), 2);
+        assert_eq!(report.miners.len(), 2);
+        assert_eq!(report.interval_total.tasks, 3);
+        assert_eq!(pool.last_cost_report().unwrap().generated_at_ms, 123_456);
+        assert_eq!(pool.quota_metrics().cost_report_unix_ms, 123_456);
+    }
+
+    #[test]
+    fn test_expired_task_frees_inflight_without_metering() {
+        let mut pool = TaskPool::new();
+        let tenant = Address::new([0xC1; 20]);
+        let input_hash = qfc_crypto::blake3_hash(b"exp");
+        let task_type = qfc_inference::task::ComputeTaskType::Embedding {
+            model_id: qfc_inference::task::ModelId::new("test", "v1"),
+            input_hash,
+        };
+        let task_id = qfc_crypto::blake3_hash(b"exp-id");
+        let now = now_ms();
+        let task = InferenceTask::new(task_id, 1, task_type, vec![], now, now + 10);
+        pool.submit_public_task(tenant, task, 100);
+        assert_eq!(pool.quota_metrics().inflight_by_tier[1], 1);
+
+        let expired = pool.prune_expired_public(now + 1_000);
+        assert_eq!(expired.len(), 1);
+        assert_eq!(pool.quota_metrics().inflight_by_tier[1], 0);
+        // Never executed → nothing metered.
+        assert_eq!(pool.cost_meter().cumulative_flops(), 0);
+    }
+
+    #[test]
+    fn test_treasury_hook_invoked() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+
+        #[derive(Default)]
+        struct RecordingHook {
+            charges: AtomicU64,
+            charged_flops: AtomicU64,
+            reports: AtomicU64,
+        }
+        impl crate::cost::TreasuryHook for RecordingHook {
+            fn on_task_charged(
+                &self,
+                _tenant: &Address,
+                _miner: &Address,
+                flops: u64,
+                _fee_wei: u128,
+            ) {
+                self.charges.fetch_add(1, Ordering::Relaxed);
+                self.charged_flops.fetch_add(flops, Ordering::Relaxed);
+            }
+            fn on_cost_report(&self, _report: &crate::cost::CostReport) {
+                self.reports.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        struct SharedHook(Arc<RecordingHook>);
+        impl crate::cost::TreasuryHook for SharedHook {
+            fn on_task_charged(&self, t: &Address, m: &Address, f: u64, w: u128) {
+                self.0.on_task_charged(t, m, f, w)
+            }
+            fn on_cost_report(&self, r: &crate::cost::CostReport) {
+                self.0.on_cost_report(r)
+            }
+        }
+
+        let hook = Arc::new(RecordingHook::default());
+        let mut pool = TaskPool::new();
+        pool.set_treasury_hook(Box::new(SharedHook(hook.clone())));
+
+        let tenant = Address::new([0xD1; 20]);
+        let miner = Address::new([0xD2; 20]);
+        let id = make_public_task(&mut pool, tenant, b"hook", 500);
+        pool.complete_public_task(&id, ResultStorage::Inline(vec![]), miner, 5);
+        pool.generate_cost_report(1);
+
+        assert_eq!(hook.charges.load(Ordering::Relaxed), 1);
+        assert_eq!(hook.charged_flops.load(Ordering::Relaxed), 1_000_000_000);
+        assert_eq!(hook.reports.load(Ordering::Relaxed), 1);
     }
 }
