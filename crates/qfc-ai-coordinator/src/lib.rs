@@ -12,10 +12,12 @@
 
 pub mod assignment;
 pub mod challenge;
+pub mod cost;
 pub mod governance;
 pub mod ipfs;
 pub mod param_governance;
 pub mod proof_pool;
+pub mod quota;
 pub mod redundant;
 pub mod registry;
 pub mod router;
@@ -31,12 +33,14 @@ pub use challenge::{
     ArbitrationManager, ArbitrationOutcome, ArbitrationPanel, ArbitrationVote, ChallengeGenerator,
     ChallengePenalty, ChallengeVerdict,
 };
+pub use cost::{CostEntry, CostMeter, CostReport, LoggingTreasuryHook, TreasuryHook};
 pub use governance::{GovernanceError, ModelGovernance, ModelProposal, ProposalStatus};
 pub use param_governance::{
     ParamGovernanceError, ParamProposalStatus, ParameterGovernance, ParameterKey, ParameterProposal,
 };
 pub use proof_pool::ProofPool;
-pub use task_pool::{PublicTaskFilter, TaskPool};
+pub use quota::{QuotaConfig, QuotaConfigError, QuotaError, TierQuota};
+pub use task_pool::{AiQuotaMetrics, PublicTaskFilter, TaskPool};
 pub use task_types::estimate_base_fee;
 pub use training::{
     TrainingAssignment, TrainingError, TrainingJobSpec, TrainingJobStatus, TrainingPool,
