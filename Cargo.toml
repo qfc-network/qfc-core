@@ -23,6 +23,8 @@ members = [
     "crates/qfc-miner",
     # v2.0: Cross-chain bridge
     "crates/qfc-bridge",
+    # v3: decentralized training (off-chain parameter server)
+    "crates/qfc-ps",
 ]
 
 
@@ -137,6 +139,7 @@ qfc-inference = { path = "crates/qfc-inference" }
 qfc-ai-coordinator = { path = "crates/qfc-ai-coordinator" }
 qfc-miner = { path = "crates/qfc-miner" }
 qfc-bridge = { path = "crates/qfc-bridge" }
+qfc-ps = { path = "crates/qfc-ps" }
 
 [profile.release]
 lto = true

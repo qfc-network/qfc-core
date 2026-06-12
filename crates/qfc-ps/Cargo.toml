@@ -1,0 +1,21 @@
+[package]
+name = "qfc-ps"
+description = "Off-chain parameter server for decentralized training (ROADMAP-AI-V3 Feature A)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+qfc-types.workspace = true
+qfc-crypto.workspace = true
+qfc-storage.workspace = true
+borsh.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+rand.workspace = true
+tempfile.workspace = true
