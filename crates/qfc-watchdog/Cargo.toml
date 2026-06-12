@@ -1,0 +1,23 @@
+[package]
+name = "qfc-watchdog"
+description = "Out-of-process, detection-first self-healing watchdog for a single qfc-node (SRE T6)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "qfc-watchdog"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+parking_lot.workspace = true
+tiny_http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
