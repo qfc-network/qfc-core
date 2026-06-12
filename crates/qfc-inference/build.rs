@@ -29,17 +29,14 @@ mod cuda {
 
             // Emit lib search paths — both lib/x64 (Windows) and lib64 (Linux)
             let lib_candidates = [
-                root.join("lib").join("x64"),   // Windows standard
-                root.join("lib64"),              // Linux standard
-                root.join("lib"),                // Fallback
+                root.join("lib").join("x64"), // Windows standard
+                root.join("lib64"),           // Linux standard
+                root.join("lib"),             // Fallback
             ];
 
             for lib_dir in &lib_candidates {
                 if lib_dir.is_dir() {
-                    println!(
-                        "cargo:rustc-link-search=native={}",
-                        lib_dir.display()
-                    );
+                    println!("cargo:rustc-link-search=native={}", lib_dir.display());
                 }
             }
 
@@ -48,10 +45,7 @@ mod cuda {
             {
                 let bin_dir = root.join("bin");
                 if bin_dir.is_dir() {
-                    println!(
-                        "cargo:rustc-link-search=native={}",
-                        bin_dir.display()
-                    );
+                    println!("cargo:rustc-link-search=native={}", bin_dir.display());
                 }
             }
         } else {
@@ -86,9 +80,11 @@ mod cuda {
         #[cfg(target_os = "windows")]
         {
             // Try versioned paths from newest to oldest
-            let program_files = std::env::var("ProgramFiles")
-                .unwrap_or_else(|_| r"C:\Program Files".to_string());
-            let cuda_base = Path::new(&program_files).join("NVIDIA GPU Computing Toolkit").join("CUDA");
+            let program_files =
+                std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".to_string());
+            let cuda_base = Path::new(&program_files)
+                .join("NVIDIA GPU Computing Toolkit")
+                .join("CUDA");
 
             if cuda_base.is_dir() {
                 // Find the highest versioned directory
