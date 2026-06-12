@@ -46,6 +46,8 @@ pub struct MetricsServer {
     /// T4.2: backup-freshness metrics, shared with the snapshot backup task.
     /// Only present when backups are enabled (--snapshot-interval-secs).
     snapshot_backup: Option<Arc<SnapshotBackupMetrics>>,
+    /// T5: AI task pool, for quota/cost-attribution metrics.
+    task_pool: Option<Arc<RwLock<qfc_ai_coordinator::TaskPool>>>,
 }
 
 impl MetricsServer {
@@ -74,6 +76,7 @@ impl MetricsServer {
             reorgs_detected: AtomicU64::new(0),
             storage: None,
             snapshot_backup: None,
+            task_pool: None,
         }
     }
 
@@ -102,6 +105,13 @@ impl MetricsServer {
     /// instead of firing on age 0).
     pub fn with_snapshot_backup(mut self, metrics: Arc<SnapshotBackupMetrics>) -> Self {
         self.snapshot_backup = Some(metrics);
+        self
+    }
+
+    /// Attach the shared AI task pool for quota/cost-attribution metrics
+    /// (T5). Cheap `Arc` clone of the pool shared with RPC and the producer.
+    pub fn with_task_pool(mut self, task_pool: Arc<RwLock<qfc_ai_coordinator::TaskPool>>) -> Self {
+        self.task_pool = Some(task_pool);
         self
     }
 
@@ -410,7 +420,93 @@ impl MetricsServer {
             Self::render_snapshot_backup_metrics(snap, &mut out);
         }
 
+        // --- AI task pool quotas + cost attribution (T5) ---
+        if let Some(pool) = &self.task_pool {
+            let snapshot = pool.read().quota_metrics();
+            Self::render_ai_quota_metrics(&snapshot, &mut out);
+        }
+
         out
+    }
+
+    /// T5: quota/cost-attribution metrics. Labeled by priority **tier**
+    /// (`tenant_tier` ∈ 0/1/2) rather than tenant address — tenant
+    /// cardinality is unbounded, tiers are fixed at three. Per-tenant
+    /// detail is in the periodic cost report (structured log, target
+    /// `qfc::ai_cost`) and the `TaskPool::last_cost_report` accessor.
+    /// `qfc_ai_cost_report_last_timestamp_seconds` follows the T4.2
+    /// freshness convention: 0 = never since start, alert on age in PromQL.
+    fn render_ai_quota_metrics(snapshot: &qfc_ai_coordinator::AiQuotaMetrics, out: &mut String) {
+        let enabled: u8 = if snapshot.quotas_enabled { 1 } else { 0 };
+        let _ = writeln!(
+            out,
+            "# HELP qfc_ai_quotas_enabled Whether per-tenant AI task quotas are enforced (--ai-quotas). Accounting metrics below are exported regardless."
+        );
+        let _ = writeln!(out, "# TYPE qfc_ai_quotas_enabled gauge");
+        let _ = writeln!(out, "qfc_ai_quotas_enabled {enabled}");
+
+        let _ = writeln!(
+            out,
+            "# HELP qfc_ai_pending_tasks Tasks waiting in the AI task pool (pool-pressure shedding input)."
+        );
+        let _ = writeln!(out, "# TYPE qfc_ai_pending_tasks gauge");
+        let _ = writeln!(out, "qfc_ai_pending_tasks {}", snapshot.pending_tasks);
+
+        let _ = writeln!(
+            out,
+            "# HELP qfc_ai_tasks_submitted_total Public AI tasks admitted to the pool, by tenant priority tier (0=lowest/shed first, 2=highest)."
+        );
+        let _ = writeln!(out, "# TYPE qfc_ai_tasks_submitted_total counter");
+        for (tier, v) in snapshot.submitted_by_tier.iter().enumerate() {
+            let _ = writeln!(
+                out,
+                "qfc_ai_tasks_submitted_total{{tenant_tier=\"{tier}\"}} {v}"
+            );
+        }
+
+        let _ = writeln!(
+            out,
+            "# HELP qfc_ai_tasks_rejected_total AI task submissions rejected by quota admission, by violated limit."
+        );
+        let _ = writeln!(out, "# TYPE qfc_ai_tasks_rejected_total counter");
+        for (reason, v) in snapshot.rejected_by_reason.iter() {
+            let _ = writeln!(
+                out,
+                "qfc_ai_tasks_rejected_total{{reason=\"{reason}\"}} {v}"
+            );
+        }
+
+        let _ = writeln!(
+            out,
+            "# HELP qfc_ai_flops_metered_total estimated_flops metered on completed public tasks, by tenant priority tier."
+        );
+        let _ = writeln!(out, "# TYPE qfc_ai_flops_metered_total counter");
+        for (tier, v) in snapshot.flops_metered_by_tier.iter().enumerate() {
+            let _ = writeln!(
+                out,
+                "qfc_ai_flops_metered_total{{tenant_tier=\"{tier}\"}} {v}"
+            );
+        }
+
+        let _ = writeln!(
+            out,
+            "# HELP qfc_ai_tenant_inflight Public tasks currently Pending/Assigned, summed per tenant priority tier."
+        );
+        let _ = writeln!(out, "# TYPE qfc_ai_tenant_inflight gauge");
+        for (tier, v) in snapshot.inflight_by_tier.iter().enumerate() {
+            let _ = writeln!(out, "qfc_ai_tenant_inflight{{tenant_tier=\"{tier}\"}} {v}");
+        }
+
+        let ts_secs = snapshot.cost_report_unix_ms / 1000;
+        let _ = writeln!(
+            out,
+            "# HELP qfc_ai_cost_report_last_timestamp_seconds Unix time of the last AI cost report. 0 = never since start; alert on age."
+        );
+        let _ = writeln!(
+            out,
+            "# TYPE qfc_ai_cost_report_last_timestamp_seconds gauge"
+        );
+        let _ = writeln!(out, "qfc_ai_cost_report_last_timestamp_seconds {ts_secs}");
     }
 
     /// T4.2: backup-freshness metrics. Only rendered when the snapshot
@@ -783,6 +879,47 @@ mod tests {
         rpc_metrics.request_started();
         rpc_metrics.request_finished("eth_blockNumber", std::time::Duration::from_millis(5), None);
 
+        // T5: task pool with quota/cost activity (one submission admitted,
+        // one rejected by QPS, one completion metered, one cost report).
+        let task_pool = {
+            let mut pool = qfc_ai_coordinator::TaskPool::new();
+            let cfg = qfc_ai_coordinator::QuotaConfig::from_json_str(
+                r#"{ "default_tier": { "max_qps": 1.0, "burst": 1 } }"#,
+            )
+            .unwrap();
+            pool.set_quota_config(Some(cfg));
+            let make_task = |seed: &[u8]| {
+                let input_hash = qfc_crypto::blake3_hash(seed);
+                qfc_inference::InferenceTask::new(
+                    qfc_crypto::blake3_hash(&[seed, b"id"].concat()),
+                    1,
+                    qfc_inference::task::ComputeTaskType::Embedding {
+                        model_id: qfc_inference::task::ModelId::new("test", "v1"),
+                        input_hash,
+                    },
+                    vec![],
+                    0,
+                    u64::MAX,
+                )
+            };
+            let tenant = qfc_types::Address::new([0xAB; 20]);
+            let task = make_task(b"metrics-t5");
+            let task_id = task.task_id;
+            pool.try_submit_public_task(tenant, task, 1_000, 0).unwrap();
+            // Second submission at the same instant exceeds the 1-token burst.
+            assert!(pool
+                .try_submit_public_task(tenant, make_task(b"metrics-t5-b"), 1_000, 0)
+                .is_err());
+            pool.complete_public_task(
+                &task_id,
+                qfc_ai_coordinator::task_pool::ResultStorage::Inline(vec![]),
+                qfc_types::Address::new([0xCD; 20]),
+                7,
+            );
+            pool.generate_cost_report(1_765_000_000_000);
+            Arc::new(RwLock::new(pool))
+        };
+
         // T4.2: backup-freshness metrics as the backup task would update them.
         let snapshot_metrics = Arc::new(SnapshotBackupMetrics::default());
         snapshot_metrics
@@ -807,7 +944,8 @@ mod tests {
         .with_sync_status(Arc::new(FakeSync))
         .with_rpc_metrics(rpc_metrics)
         .with_storage(db)
-        .with_snapshot_backup(snapshot_metrics);
+        .with_snapshot_backup(snapshot_metrics)
+        .with_task_pool(task_pool);
         (server, tmp)
     }
 
@@ -869,6 +1007,14 @@ mod tests {
             "qfc_snapshot_failures_total",
             "qfc_snapshot_duration_seconds",
             "qfc_snapshot_size_bytes",
+            // AI task pool quotas + cost attribution (T5)
+            "qfc_ai_quotas_enabled",
+            "qfc_ai_pending_tasks",
+            "qfc_ai_tasks_submitted_total",
+            "qfc_ai_tasks_rejected_total",
+            "qfc_ai_flops_metered_total",
+            "qfc_ai_tenant_inflight",
+            "qfc_ai_cost_report_last_timestamp_seconds",
         ] {
             assert!(
                 out.contains(name),
@@ -881,6 +1027,19 @@ mod tests {
         assert!(out.contains("qfc_snapshot_last_success_timestamp_seconds 1765000000"));
         assert!(out.contains("qfc_snapshot_failures_total 0"));
         assert!(out.contains("qfc_snapshot_size_bytes 4096"));
+        // T5: tier/reason labels carry the quota activity seeded above
+        // (default tier = priority 1; one QPS rejection; one completed
+        // Embedding task = 1 GFLOP metered; report at 1_765_000_000_000 ms).
+        assert!(out.contains("qfc_ai_quotas_enabled 1"));
+        assert!(out.contains("qfc_ai_tasks_submitted_total{tenant_tier=\"1\"} 1"));
+        assert!(out.contains("qfc_ai_tasks_submitted_total{tenant_tier=\"0\"} 0"));
+        assert!(out.contains("qfc_ai_tasks_rejected_total{reason=\"qps\"} 1"));
+        assert!(out.contains("qfc_ai_tasks_rejected_total{reason=\"pool_pressure\"} 0"));
+        assert!(out.contains("qfc_ai_tasks_rejected_total{reason=\"in_flight\"} 0"));
+        assert!(out.contains("qfc_ai_tasks_rejected_total{reason=\"flops_budget\"} 0"));
+        assert!(out.contains("qfc_ai_flops_metered_total{tenant_tier=\"1\"} 1000000000"));
+        assert!(out.contains("qfc_ai_tenant_inflight{tenant_tier=\"1\"} 0"));
+        assert!(out.contains("qfc_ai_cost_report_last_timestamp_seconds 1765000000"));
         // Per-CF metrics carry a {cf="..."} label for every CF in cf::ALL.
         for cf_name in cf::ALL {
             assert!(

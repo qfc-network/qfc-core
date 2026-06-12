@@ -147,6 +147,19 @@ struct Args {
     /// Snapshot archive name prefix.
     #[arg(long, default_value = "qfc-snapshot", env = "QFC_SNAPSHOT_PREFIX")]
     snapshot_prefix: String,
+
+    /// T5: per-tenant AI task-pool quota config (JSON; see docs/AI-QUOTAS.md).
+    /// Unset = quotas off (admission always succeeds). The file is
+    /// hot-reloaded: changes are picked up within ~30s (mtime check); a
+    /// parse error keeps the previous config and logs the failure.
+    #[arg(long, env = "QFC_AI_QUOTAS")]
+    ai_quotas: Option<PathBuf>,
+
+    /// T5: interval in seconds between AI cost reports (per-tenant/per-miner
+    /// FLOPs + fees, emitted as a structured log and handed to the treasury
+    /// hook). 0 = disabled.
+    #[arg(long, default_value_t = 600, env = "QFC_AI_COST_REPORT_INTERVAL_SECS")]
+    ai_cost_report_interval_secs: u64,
 }
 
 #[tokio::main]
@@ -258,6 +271,27 @@ async fn main() -> Result<()> {
     // v2.0: Shared proof pool and task pool for RPC, sync, and block producer
     let proof_pool = Arc::new(RwLock::new(ProofPool::new()));
     let task_pool = Arc::new(RwLock::new(TaskPool::new()));
+
+    // T5: per-tenant quotas (--ai-quotas) + periodic cost reports.
+    if let Some(ref quota_path) = args.ai_quotas {
+        let cfg = qfc_ai_coordinator::QuotaConfig::from_file(quota_path)
+            .map_err(|e| anyhow::anyhow!("Invalid --ai-quotas file {:?}: {}", quota_path, e))?;
+        info!(
+            "AI quotas enabled from {:?} ({} tenant overrides, default tier: {} qps / {} in-flight, window {}s, max pending {})",
+            quota_path,
+            cfg.tenants.len(),
+            cfg.default_tier.max_qps,
+            cfg.default_tier.max_inflight,
+            cfg.window_secs,
+            cfg.max_pending
+        );
+        task_pool.write().set_quota_config(Some(cfg));
+    }
+    spawn_ai_quota_task(
+        task_pool.clone(),
+        args.ai_quotas.clone(),
+        args.ai_cost_report_interval_secs,
+    );
 
     // v2.0 P2: Shared challenge generator, redundant verifier, task router
     let challenge_generator = Arc::new(RwLock::new(
@@ -532,7 +566,8 @@ async fn main() -> Result<()> {
         args.chain_id,
     )
     .with_rpc_metrics(rpc_metrics.clone())
-    .with_storage(db.clone());
+    .with_storage(db.clone())
+    .with_task_pool(task_pool.clone());
     if let Some(ref sync) = _sync_manager {
         metrics_server =
             metrics_server.with_sync_status(sync.clone() as Arc<dyn qfc_rpc::SyncStatusProvider>);
@@ -568,4 +603,70 @@ async fn main() -> Result<()> {
     info!("Shutting down...");
 
     Ok(())
+}
+
+/// T5: background task driving (a) periodic AI cost reports
+/// (`--ai-cost-report-interval-secs`, 0 = disabled) and (b) hot reload of
+/// the `--ai-quotas` config file (mtime check every tick; a file that fails
+/// to parse keeps the previous config). No-op when both are disabled.
+fn spawn_ai_quota_task(
+    task_pool: Arc<RwLock<TaskPool>>,
+    quota_path: Option<PathBuf>,
+    report_interval_secs: u64,
+) {
+    if quota_path.is_none() && report_interval_secs == 0 {
+        return;
+    }
+
+    const TICK_SECS: u64 = 30;
+    tokio::spawn(async move {
+        let mut last_mtime: Option<std::time::SystemTime> = quota_path
+            .as_ref()
+            .and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
+        let mut secs_since_report = 0u64;
+
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(TICK_SECS)).await;
+
+            // Hot reload on mtime change.
+            if let Some(ref path) = quota_path {
+                let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+                if mtime.is_some() && mtime != last_mtime {
+                    last_mtime = mtime;
+                    match qfc_ai_coordinator::QuotaConfig::from_file(path) {
+                        Ok(cfg) => {
+                            info!(
+                                "AI quota config reloaded from {:?} ({} tenant overrides)",
+                                path,
+                                cfg.tenants.len()
+                            );
+                            task_pool.write().set_quota_config(Some(cfg));
+                        }
+                        Err(e) => {
+                            warn!(
+                                "AI quota config reload failed, keeping previous config: {}",
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Periodic cost report.
+            if report_interval_secs > 0 {
+                secs_since_report += TICK_SECS;
+                if secs_since_report >= report_interval_secs {
+                    secs_since_report = 0;
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    // generate_cost_report logs via the treasury hook
+                    // (target qfc::ai_cost) and retains the report for
+                    // the exporter/RPC.
+                    let _ = task_pool.write().generate_cost_report(now_ms);
+                }
+            }
+        }
+    });
 }
