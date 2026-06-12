@@ -6,8 +6,13 @@
 
 Reward **per accepted update**, where accepted means: (a) submitted within
 the epoch's staleness bound (ADR-0006), (b) well-formed for the assigned
-(range, data-shard, step) tuple, and (c) **not failed** by sampled
-re-execution (ADR-0005). Claimed-but-unverified work earns the same as
+(range, data-shard, step) tuple, (c) **not failed** by sampled
+re-execution (ADR-0005), and (d) the update's range is a registered
+assignment range (workers cannot earn records on self-chosen ranges).
+Updates on a range that fails min-participation at the barrier (too few
+updates for the aggregation rule, ADR-0003) still keep their acceptance
+records: the work was done and assigned; thin participation is an
+assignment-layer shortfall, not worker misbehavior. Claimed-but-unverified work earns the same as
 verified work — verification is a random audit, not a payment gate; this is
 exactly the v2.x inference model (`flops_estimated` + 5% spot-check)
 generalized to training steps.

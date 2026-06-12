@@ -16,8 +16,10 @@ pub mod service;
 pub mod types;
 
 pub use aggregate::{AggregationRule, TrimmedMean, UpdateBuffer};
+pub use clock::SspClock;
+pub use kv::ShardStore;
+pub use service::{EpochOutcome, ShardService};
 pub use types::{AcceptanceRecord, Epoch, ParamRange, ParamUpdate, StepClock};
-// A1 adds: pub use clock::SspClock; pub use kv::ShardStore; pub use service::ShardService;
 
 use thiserror::Error;
 
@@ -43,7 +45,14 @@ pub enum PsError {
     #[error("epoch mismatch: expected {expected}, got {got}")]
     EpochMismatch { expected: u64, got: u64 },
 
-    #[error("worker cap exceeded for range: {cap} workers already buffered (ADR-0003 memory bound)")]
+    /// Per-range worker cap hit. Because pushes are admitted only for the
+    /// fixed set of registered assignment ranges (disjoint, inside the owned
+    /// range), this cap yields a hard buffer bound:
+    /// `cap × Σ registered range lengths ≤ cap × owned_range.len()` buffered
+    /// f32s (ADR-0003 memory bound).
+    #[error(
+        "worker cap exceeded for range: {cap} workers already buffered (ADR-0003 memory bound)"
+    )]
     WorkerCapExceeded { cap: usize },
 
     #[error("aggregation failed: {0}")]
@@ -67,8 +76,13 @@ pub struct PsConfig {
     pub slash_multiple: u64,
     /// Epoch snapshots retained for the audit window (ADR-0007)
     pub snapshot_retention: u64,
-    /// Max buffered updates per range — the O(workers × shard) aggregation
-    /// memory bound (ADR-0003); enforced at push, mirrored at assignment (A3)
+    /// Max buffered updates per registered assignment range. Pushes are
+    /// admitted only for the fixed, disjoint registered range set, so total
+    /// buffer memory is bounded by
+    /// `max_workers_per_range × Σ registered range lengths ≤
+    /// max_workers_per_range × owned_range.len()` f32s — the
+    /// O(workers × shard) aggregation memory bound (ADR-0003); enforced at
+    /// push, mirrored at assignment (A3)
     pub max_workers_per_range: usize,
 }
 

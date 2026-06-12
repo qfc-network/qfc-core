@@ -16,8 +16,11 @@ re-evaluate after A6 pilot data.
 
 ## Robustness bound and its preconditions
 
-Trimmed mean tolerates `f < β·n` malicious updates per shard. Two
-preconditions, without which the bound is meaningless:
+Trimmed mean tolerates `f < β·n` malicious updates per shard — and with
+ceil-trimming (`⌈β·n⌉` dropped per side, as implemented) the guarantee is in
+fact `f ≤ ⌈β·n⌉`: exactly-at-threshold attackers are always fully trimmed,
+and the empirical cliff sits at `f = ⌈β·n⌉ + 1` (demonstrated by the A2
+property tests). Two preconditions, without which the bound is meaningless:
 
 1. **Sybil resistance comes from stake, not the rule.** Updates count toward
    `n` only from miners holding the minimum training stake for the epoch's
@@ -25,9 +28,12 @@ preconditions, without which the bound is meaningless:
    must not be free.
 2. **Per-coordinate trimming needs all updates materialized.** Unlike a
    BytePS-style summation service (streaming, O(1) per update), trimmed mean
-   costs **O(n × shard_size) memory at the aggregation point**. This caps
-   workers-per-shard: `max_workers = mem_budget / shard_size_bytes`. The cap
-   is enforced at assignment (A3), and the constant lives in `qfc-ps` config.
+   costs **O(n × shard_size) memory at the aggregation point**. Pushes are
+   admitted only for registered assignment ranges (disjoint, fixed per
+   epoch), so workers cannot mint buffer keys and buffer memory is bounded
+   by `cap × owned-range size`, with `cap = max_workers_per_range =
+   mem_budget / shard_size_bytes`. The cap is enforced at push (and mirrored
+   at assignment, A3), and the constant lives in `qfc-ps` config.
 
 ## Consequences
 

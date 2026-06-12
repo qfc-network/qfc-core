@@ -132,9 +132,7 @@ impl ParamUpdate {
 
 /// Per-epoch acceptance record (ADR-0004) — the unit reward distribution
 /// reads. A5 anchors the epoch's record-set hash on-chain.
-#[derive(
-    Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize, Serialize, Deserialize,
-)]
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
 pub struct AcceptanceRecord {
     pub worker: Address,
     pub epoch: Epoch,
@@ -195,7 +193,9 @@ mod tests {
         let r = ParamRange::new(0, 4).unwrap();
         assert!(update(1, r, vec![1.0; 4]).validate().is_ok());
         assert!(update(1, r, vec![1.0; 3]).validate().is_err());
-        assert!(update(1, r, vec![1.0, 2.0, f32::NAN, 4.0]).validate().is_err());
+        assert!(update(1, r, vec![1.0, 2.0, f32::NAN, 4.0])
+            .validate()
+            .is_err());
         assert!(update(1, r, vec![1.0, 2.0, f32::INFINITY, 4.0])
             .validate()
             .is_err());
