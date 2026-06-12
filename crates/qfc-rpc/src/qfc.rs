@@ -226,7 +226,12 @@ pub trait QfcApi {
 
     // ---- v2.0: Public Inference API endpoints ----
 
-    /// Submit a public inference task (paid)
+    /// Submit a public inference task (paid).
+    ///
+    /// T5: may fail with JSON-RPC error `-32029` when the submitter's quota
+    /// is exceeded (QPS / in-flight / FLOPs budget) or the pool is shedding
+    /// low-priority tenants under pressure; the error `data` carries
+    /// `{reason, retryAfterMs}`. See docs/AI-QUOTAS.md.
     #[method(name = "submitPublicTask")]
     async fn submit_public_task(&self, request: RpcSubmitPublicTask) -> RpcResult<String>;
 
