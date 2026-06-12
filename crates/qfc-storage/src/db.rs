@@ -298,6 +298,39 @@ impl Database {
         Ok(self.db.write(rocks_batch)?)
     }
 
+    /// Write a batch of operations atomically with `WriteOptions::set_sync(true)`.
+    ///
+    /// The RocksDB WAL is fsynced before this returns, making the batch — and,
+    /// because the WAL is sequential, every previously written batch — durable
+    /// against power loss and kernel panic, not just process crash.
+    ///
+    /// Intended for canonical block commits; see
+    /// `docs/adr/0001-block-commit-durability.md` for the durability policy.
+    pub fn write_batch_sync(&self, batch: WriteBatch) -> Result<()> {
+        let mut rocks_batch = RocksWriteBatch::default();
+
+        // Same per-batch CF handle caching as `write_batch`.
+        let mut handles: HashMap<&str, Arc<BoundColumnFamily<'_>>> = HashMap::new();
+
+        for op in batch.ops() {
+            let cf_name = match op {
+                BatchOp::Put { cf, .. } | BatchOp::Delete { cf, .. } => cf.as_str(),
+            };
+            if !handles.contains_key(cf_name) {
+                handles.insert(cf_name, self.get_cf(cf_name)?);
+            }
+            let handle = &handles[cf_name];
+            match op {
+                BatchOp::Put { key, value, .. } => rocks_batch.put_cf(handle, key, value),
+                BatchOp::Delete { key, .. } => rocks_batch.delete_cf(handle, key),
+            }
+        }
+
+        let mut write_opts = rocksdb::WriteOptions::default();
+        write_opts.set_sync(true);
+        Ok(self.db.write_opt(rocks_batch, &write_opts)?)
+    }
+
     /// Get an iterator over a column family.
     ///
     /// NOTE: panics if RocksDB reports an error mid-iteration (e.g. a corrupt

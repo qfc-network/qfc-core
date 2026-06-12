@@ -147,20 +147,23 @@ impl Chain {
         // Compute genesis hash
         let hash = genesis_hash(&genesis);
 
-        // Store genesis
-        self.store_block(&genesis)?;
-
-        // Update metadata
-        self.db.put(
+        // Store genesis block, chain metadata, and head metadata in a single
+        // atomic batch so a crash during init can never leave a partially
+        // initialized chain (e.g. a stored genesis block without GENESIS_HASH).
+        let mut batch = WriteBatch::new();
+        Self::append_block_to_batch(&mut batch, &genesis);
+        Self::append_receipts_and_head_to_batch(&mut batch, &genesis, &[], &state_root);
+        batch.put(
             cf::METADATA,
-            qfc_storage::meta::GENESIS_HASH,
-            hash.as_bytes(),
-        )?;
-        self.db.put(
+            qfc_storage::meta::GENESIS_HASH.to_vec(),
+            hash.as_bytes().to_vec(),
+        );
+        batch.put(
             cf::METADATA,
-            qfc_storage::meta::CHAIN_ID,
-            &self.config.chain_id.to_le_bytes(),
-        )?;
+            qfc_storage::meta::CHAIN_ID.to_vec(),
+            self.config.chain_id.to_le_bytes().to_vec(),
+        );
+        self.db.write_batch_sync(batch)?;
 
         *self.genesis_hash.write() = Some(hash);
         *self.head.write() = Some(SealedBlock::new(hash, genesis));
@@ -347,6 +350,13 @@ impl Chain {
 
     /// Store Ethereum transaction hash mapping (keccak256 -> blake3)
     /// This allows looking up transactions/receipts by the hash returned to Ethereum wallets
+    ///
+    /// Note: this is intentionally *not* part of the atomic block-commit batch
+    /// ([`Self::commit_block`]). Its only caller is the RPC server's
+    /// `eth_sendRawTransaction` path, which records the mapping at submission
+    /// time — before the transaction is in any block — so there is no block
+    /// commit to be atomic with. Losing this mapping in a crash only degrades
+    /// hash translation for a not-yet-mined tx; it cannot orphan block data.
     pub fn store_eth_tx_hash_mapping(&self, eth_hash: &Hash, internal_hash: &Hash) -> Result<()> {
         self.db.put(
             cf::ETH_TX_INDEX,
@@ -471,32 +481,11 @@ impl Chain {
                 .update_inference_score(&proof.validator, proof.flops_estimated, 1);
         }
 
-        // Store block
-        self.store_block(&block)?;
+        // Commit block, receipts, and head metadata in a single atomic batch
+        self.commit_block(&block, &receipts, &state_root)?;
 
-        // Store receipts
-        for receipt in &receipts {
-            self.db.put(
-                cf::RECEIPTS,
-                receipt.tx_hash.as_bytes(),
-                &borsh::to_vec(&receipt).unwrap(),
-            )?;
-        }
-
-        // Update head
+        // Update in-memory head (only after the durable commit succeeded)
         *self.head.write() = Some(SealedBlock::new(block_hash, block.clone()));
-
-        // Update metadata
-        self.db.put(
-            cf::METADATA,
-            qfc_storage::meta::LATEST_BLOCK_NUMBER,
-            &block.number().to_le_bytes(),
-        )?;
-        self.db.put(
-            cf::METADATA,
-            qfc_storage::meta::LATEST_STATE_ROOT,
-            state_root.as_bytes(),
-        )?;
 
         // Record block production in consensus engine for PoC scoring
         self.consensus.record_block_produced(&producer);
@@ -526,12 +515,11 @@ impl Chain {
         Vec::new()
     }
 
-    /// Store a block in the database
-    fn store_block(&self, block: &Block) -> Result<()> {
+    /// Append all storage writes for a block (header, body, hash index,
+    /// transactions, tx locations) to a batch. Returns the block hash.
+    fn append_block_to_batch(batch: &mut WriteBatch, block: &Block) -> Hash {
         let key = encode_block_number(block.number());
         let block_hash = blake3_hash(&block.header_bytes());
-
-        let mut batch = WriteBatch::new();
 
         // Store header
         batch.put(
@@ -571,9 +559,52 @@ impl Chain {
             );
         }
 
-        self.db.write_batch(batch)?;
+        block_hash
+    }
 
-        Ok(())
+    /// Append the block's receipts and the canonical-head metadata
+    /// (`latest_block_number` / `latest_state_root`) to a batch.
+    fn append_receipts_and_head_to_batch(
+        batch: &mut WriteBatch,
+        block: &Block,
+        receipts: &[Receipt],
+        state_root: &Hash,
+    ) {
+        for receipt in receipts {
+            batch.put(
+                cf::RECEIPTS,
+                receipt.tx_hash.as_bytes().to_vec(),
+                borsh::to_vec(receipt).unwrap(),
+            );
+        }
+
+        batch.put(
+            cf::METADATA,
+            qfc_storage::meta::LATEST_BLOCK_NUMBER.to_vec(),
+            block.number().to_le_bytes().to_vec(),
+        );
+        batch.put(
+            cf::METADATA,
+            qfc_storage::meta::LATEST_STATE_ROOT.to_vec(),
+            state_root.as_bytes().to_vec(),
+        );
+    }
+
+    /// Atomically commit a canonical block.
+    ///
+    /// Header, body, hash index, transactions, tx locations, receipts, and
+    /// head metadata (`latest_block_number` / `latest_state_root`) all land in
+    /// a single WriteBatch, so a crash can never leave a stored block without
+    /// its receipts or a head pointer ahead of the stored data.
+    ///
+    /// The batch is written with `WriteOptions::set_sync(true)`; see
+    /// `docs/adr/0001-block-commit-durability.md` for the durability policy.
+    fn commit_block(&self, block: &Block, receipts: &[Receipt], state_root: &Hash) -> Result<Hash> {
+        let mut batch = WriteBatch::new();
+        let block_hash = Self::append_block_to_batch(&mut batch, block);
+        Self::append_receipts_and_head_to_batch(&mut batch, block, receipts, state_root);
+        self.db.write_batch_sync(batch)?;
+        Ok(block_hash)
     }
 
     /// Get state at a specific block
@@ -642,34 +673,11 @@ impl Chain {
 
     /// Store a block that we produced (skip validation since we created it)
     pub fn store_produced_block(&self, block: &Block, receipts: &[Receipt]) -> Result<()> {
-        let block_hash = blake3_hash(&block.header_bytes());
+        // Commit block, receipts, and head metadata in a single atomic batch
+        let block_hash = self.commit_block(block, receipts, &block.state_root())?;
 
-        // Store block
-        self.store_block(block)?;
-
-        // Store receipts
-        for receipt in receipts {
-            self.db.put(
-                cf::RECEIPTS,
-                receipt.tx_hash.as_bytes(),
-                &borsh::to_vec(receipt).unwrap(),
-            )?;
-        }
-
-        // Update head
+        // Update in-memory head (only after the durable commit succeeded)
         *self.head.write() = Some(SealedBlock::new(block_hash, block.clone()));
-
-        // Update metadata
-        self.db.put(
-            cf::METADATA,
-            qfc_storage::meta::LATEST_BLOCK_NUMBER,
-            &block.number().to_le_bytes(),
-        )?;
-        self.db.put(
-            cf::METADATA,
-            qfc_storage::meta::LATEST_STATE_ROOT,
-            block.state_root().as_bytes(),
-        )?;
 
         debug!(
             "Stored produced block {} at height {}",
@@ -785,5 +793,116 @@ mod tests {
         let balance = chain.get_balance(&addr).unwrap();
 
         assert!(balance > U256::ZERO);
+    }
+
+    /// The whole block commit (header, body, hash index, tx, tx location,
+    /// receipts, head metadata) must be assembled into a single WriteBatch —
+    /// that batch is what RocksDB applies atomically.
+    #[test]
+    fn test_block_commit_assembles_single_atomic_batch() {
+        let mut block = Block::default();
+        block.header.number = 1;
+        block.transactions = vec![Transaction::default()];
+
+        let tx_hash = blake3_hash(&block.transactions[0].to_bytes_without_signature());
+        let receipts = vec![Receipt {
+            tx_hash,
+            ..Default::default()
+        }];
+
+        let mut batch = WriteBatch::new();
+        Chain::append_block_to_batch(&mut batch, &block);
+        Chain::append_receipts_and_head_to_batch(&mut batch, &block, &receipts, &Hash::ZERO);
+
+        // header + body + hash index + 1 tx + 1 tx location + 1 receipt
+        // + latest_block_number + latest_state_root = 8 ops, one batch
+        assert_eq!(batch.len(), 8);
+
+        let cfs: std::collections::HashSet<&str> = batch
+            .ops()
+            .iter()
+            .map(|op| match op {
+                qfc_storage::BatchOp::Put { cf, .. } => cf.as_str(),
+                qfc_storage::BatchOp::Delete { cf, .. } => cf.as_str(),
+            })
+            .collect();
+        for expected in [
+            cf::BLOCK_HEADERS,
+            cf::BLOCK_BODIES,
+            cf::BLOCK_HASH_INDEX,
+            cf::TRANSACTIONS,
+            cf::TX_INDEX,
+            cf::RECEIPTS,
+            cf::METADATA,
+        ] {
+            assert!(cfs.contains(expected), "batch missing CF {expected}");
+        }
+    }
+
+    /// After a block commit, receipts and head metadata must be present for
+    /// the stored block — a stored block can never be observed without them.
+    #[test]
+    fn test_commit_leaves_no_partial_block() {
+        let chain = create_test_chain();
+        let genesis = chain.get_block_by_number(0).unwrap().unwrap();
+
+        let mut block = Block::default();
+        block.header.number = 1;
+        block.header.parent_hash = blake3_hash(&genesis.header_bytes());
+        block.header.state_root = chain.state_root();
+        block.transactions = vec![Transaction::default()];
+
+        let tx_hash = blake3_hash(&block.transactions[0].to_bytes_without_signature());
+        let receipts = vec![Receipt {
+            tx_hash,
+            ..Default::default()
+        }];
+
+        chain.store_produced_block(&block, &receipts).unwrap();
+
+        // Block, transaction, location, and receipt are all readable
+        assert!(chain.get_block_by_number(1).unwrap().is_some());
+        assert!(chain.get_transaction(&tx_hash).unwrap().is_some());
+        assert_eq!(
+            chain.get_transaction_location(&tx_hash).unwrap(),
+            Some((1, 0))
+        );
+        assert!(chain.get_receipt(&tx_hash).unwrap().is_some());
+
+        // Head metadata committed in the same batch
+        let latest = chain
+            .db()
+            .get(cf::METADATA, qfc_storage::meta::LATEST_BLOCK_NUMBER)
+            .unwrap()
+            .expect("latest_block_number must be set");
+        assert_eq!(u64::from_le_bytes(latest.try_into().unwrap()), 1);
+
+        let root = chain
+            .db()
+            .get(cf::METADATA, qfc_storage::meta::LATEST_STATE_ROOT)
+            .unwrap()
+            .expect("latest_state_root must be set");
+        assert_eq!(root, block.state_root().as_bytes().to_vec());
+
+        assert_eq!(chain.block_number(), 1);
+    }
+
+    /// Genesis init must also commit head metadata atomically with the block.
+    #[test]
+    fn test_genesis_commits_head_metadata() {
+        let chain = create_test_chain();
+
+        let latest = chain
+            .db()
+            .get(cf::METADATA, qfc_storage::meta::LATEST_BLOCK_NUMBER)
+            .unwrap()
+            .expect("genesis must set latest_block_number");
+        assert_eq!(u64::from_le_bytes(latest.try_into().unwrap()), 0);
+
+        assert!(chain
+            .db()
+            .get(cf::METADATA, qfc_storage::meta::LATEST_STATE_ROOT)
+            .unwrap()
+            .is_some());
     }
 }
