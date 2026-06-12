@@ -14,7 +14,14 @@ use qfc_types::{
 };
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
+
+/// How many recent validator checkpoints to retain in the `checkpoints`
+/// column family. Older checkpoints are pruned when a new one is written,
+/// keeping the CF bounded (one checkpoint per epoch would otherwise grow
+/// without limit). Restart only ever needs the newest usable checkpoint;
+/// earlier ones exist purely as fallback against corruption.
+pub const CHECKPOINT_RETENTION: usize = 64;
 
 /// Consensus engine configuration
 #[derive(Clone, Debug)]
@@ -678,6 +685,11 @@ impl ConsensusEngine {
     }
 
     /// Create a validator checkpoint at epoch boundary
+    ///
+    /// The checkpoint blob, the per-validator records, and retention pruning
+    /// of old checkpoints are all written in a single atomic `WriteBatch`
+    /// (non-sync, per ADR 0001 §3 — checkpoints are derived data and are
+    /// rebuilt at the next epoch boundary if lost).
     pub fn create_checkpoint(
         &self,
         db: &qfc_storage::Database,
@@ -701,18 +713,57 @@ impl ConsensusEngine {
             finalized,
         );
 
-        // Store checkpoint
-        let key = epoch.number.to_be_bytes();
-        db.put(qfc_storage::cf::CHECKPOINTS, &key, &checkpoint.to_bytes())
+        // Big-endian epoch key: lexicographic order == numeric order, so the
+        // latest checkpoint is found by a single reverse-iterator step.
+        let key = epoch.number.to_be_bytes().to_vec();
+
+        let mut batch = qfc_storage::WriteBatch::new();
+        batch.put(
+            qfc_storage::cf::CHECKPOINTS,
+            key.clone(),
+            checkpoint.to_bytes(),
+        );
+
+        // Save individual validators in the same atomic batch
+        for validator in validators.iter() {
+            batch.put(
+                qfc_storage::cf::VALIDATORS,
+                validator.address.as_bytes().to_vec(),
+                validator.to_bytes(),
+            );
+        }
+
+        // Retention: keep only the newest CHECKPOINT_RETENTION checkpoints
+        // (including the one being written). The CF stays bounded, so this
+        // scan touches at most CHECKPOINT_RETENTION + 1 small entries.
+        match db.try_iter(qfc_storage::cf::CHECKPOINTS) {
+            Ok(iter) => {
+                let existing: Vec<Vec<u8>> = iter
+                    .filter_map(|r| r.ok())
+                    .map(|(k, _)| k.to_vec())
+                    .filter(|k| *k != key)
+                    .collect();
+                let total = existing.len() + 1;
+                if total > CHECKPOINT_RETENTION {
+                    // `existing` is in ascending key order (BE epoch), so the
+                    // front entries are the oldest.
+                    for old_key in existing.into_iter().take(total - CHECKPOINT_RETENTION) {
+                        batch.delete(qfc_storage::cf::CHECKPOINTS, old_key);
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Failed to scan checkpoints for retention pruning: {}", e);
+            }
+        }
+
+        db.write_batch(batch)
             .map_err(|e: qfc_storage::StorageError| ConsensusError::StorageError(e.to_string()))?;
 
         info!(
             "Created checkpoint for epoch {} at height {}",
             epoch.number, block_height
         );
-
-        // Also save individual validators
-        self.save_validators(db)?;
 
         Ok(checkpoint)
     }
@@ -736,13 +787,64 @@ impl ConsensusEngine {
         }
     }
 
-    /// Load latest checkpoint from database
+    /// Load the latest checkpoint from the database.
+    ///
+    /// Iterates the `checkpoints` column family in reverse (keys are
+    /// big-endian epoch numbers, so the first entry is the newest epoch) and
+    /// returns the first checkpoint that deserializes and passes sanity
+    /// checks. Corrupt or inconsistent entries are skipped with a warning so
+    /// restart falls back to an earlier checkpoint — or to genesis if none
+    /// is usable — instead of failing.
     pub fn load_latest_checkpoint(
         &self,
-        _db: &qfc_storage::Database,
+        db: &qfc_storage::Database,
     ) -> Result<Option<ValidatorCheckpoint>> {
-        // In a full implementation, we would scan for the latest epoch
-        // For now, we return None and rely on genesis initialization
+        let iter = db
+            .try_iter_reverse(qfc_storage::cf::CHECKPOINTS)
+            .map_err(|e: qfc_storage::StorageError| ConsensusError::StorageError(e.to_string()))?;
+
+        for entry in iter {
+            let (key, value) = match entry {
+                Ok(kv) => kv,
+                Err(e) => {
+                    // Iterator-level error (e.g. corrupt SST): the iterator
+                    // is invalid past this point; fall back to genesis.
+                    warn!(
+                        "Checkpoint scan failed, falling back to genesis initialization: {}",
+                        e
+                    );
+                    break;
+                }
+            };
+
+            match ValidatorCheckpoint::from_bytes(&value) {
+                Ok(checkpoint) => {
+                    if key.as_ref() != checkpoint.epoch.to_be_bytes() {
+                        warn!(
+                            "Checkpoint key/epoch mismatch (key {:02x?}, epoch {}); trying earlier checkpoint",
+                            key, checkpoint.epoch
+                        );
+                        continue;
+                    }
+                    if checkpoint.validators.is_empty() {
+                        warn!(
+                            "Checkpoint for epoch {} has an empty validator set; trying earlier checkpoint",
+                            checkpoint.epoch
+                        );
+                        continue;
+                    }
+                    return Ok(Some(checkpoint));
+                }
+                Err(e) => {
+                    warn!(
+                        "Corrupt checkpoint entry (key {:02x?}): {}; trying earlier checkpoint",
+                        key, e
+                    );
+                    continue;
+                }
+            }
+        }
+
         Ok(None)
     }
 
@@ -1261,5 +1363,151 @@ mod tests {
         for v in updated {
             assert!(v.contribution_score > 0);
         }
+    }
+
+    // ============ Checkpoint persistence ============
+
+    #[test]
+    fn test_checkpoint_write_load_roundtrip() {
+        let db = qfc_storage::Database::open_temp().unwrap();
+        let engine = ConsensusEngine::new(ConsensusConfig::default());
+        engine.update_validators(create_test_validators(3));
+
+        engine.start_epoch(1, [0x01; 32]);
+        engine.set_finalized_height(2);
+        let cp1 = engine.create_checkpoint(&db, 3).unwrap();
+
+        engine.start_epoch(2, [0x02; 32]);
+        engine.set_finalized_height(5);
+        let cp2 = engine.create_checkpoint(&db, 6).unwrap();
+
+        // Epoch 256 exercises big-endian key ordering: with little-endian
+        // keys, epoch 256 (00 01 00 ..) would sort *before* epoch 2.
+        engine.start_epoch(256, [0x03; 32]);
+        engine.set_finalized_height(767);
+        let cp256 = engine.create_checkpoint(&db, 768).unwrap();
+
+        // Latest checkpoint is the highest epoch
+        let latest = engine.load_latest_checkpoint(&db).unwrap().unwrap();
+        assert_eq!(latest, cp256);
+        assert_eq!(latest.epoch, 256);
+        assert_eq!(latest.validators.len(), 3);
+        assert_eq!(latest.finalized_height, 767);
+        assert_eq!(latest.epoch_seed, [0x03; 32]);
+
+        // Point lookups still work
+        assert_eq!(engine.load_checkpoint(&db, 1).unwrap().unwrap(), cp1);
+        assert_eq!(engine.load_checkpoint(&db, 2).unwrap().unwrap(), cp2);
+        assert_eq!(engine.load_checkpoint(&db, 99).unwrap(), None);
+    }
+
+    #[test]
+    fn test_load_latest_checkpoint_empty_db() {
+        let db = qfc_storage::Database::open_temp().unwrap();
+        let engine = ConsensusEngine::new(ConsensusConfig::default());
+        assert_eq!(engine.load_latest_checkpoint(&db).unwrap(), None);
+    }
+
+    #[test]
+    fn test_load_latest_checkpoint_skips_corrupt_entry() {
+        let db = qfc_storage::Database::open_temp().unwrap();
+        let engine = ConsensusEngine::new(ConsensusConfig::default());
+        engine.update_validators(create_test_validators(2));
+
+        engine.start_epoch(1, [0x01; 32]);
+        let cp1 = engine.create_checkpoint(&db, 3).unwrap();
+
+        // A corrupt entry at a *newer* epoch must be skipped, falling back
+        // to the older good checkpoint.
+        db.put(
+            qfc_storage::cf::CHECKPOINTS,
+            &2u64.to_be_bytes(),
+            b"not a valid borsh checkpoint",
+        )
+        .unwrap();
+
+        let latest = engine.load_latest_checkpoint(&db).unwrap().unwrap();
+        assert_eq!(latest, cp1);
+        assert_eq!(latest.epoch, 1);
+    }
+
+    #[test]
+    fn test_load_latest_checkpoint_all_corrupt_returns_none() {
+        let db = qfc_storage::Database::open_temp().unwrap();
+        let engine = ConsensusEngine::new(ConsensusConfig::default());
+
+        db.put(qfc_storage::cf::CHECKPOINTS, &1u64.to_be_bytes(), b"junk1")
+            .unwrap();
+        db.put(qfc_storage::cf::CHECKPOINTS, &2u64.to_be_bytes(), b"junk2")
+            .unwrap();
+
+        assert_eq!(engine.load_latest_checkpoint(&db).unwrap(), None);
+    }
+
+    #[test]
+    fn test_load_latest_checkpoint_skips_empty_validator_set() {
+        let db = qfc_storage::Database::open_temp().unwrap();
+        let engine = ConsensusEngine::new(ConsensusConfig::default());
+
+        // Checkpoint with validators (epoch 1)
+        engine.update_validators(create_test_validators(2));
+        engine.start_epoch(1, [0x01; 32]);
+        let cp1 = engine.create_checkpoint(&db, 3).unwrap();
+
+        // Newer checkpoint with an empty validator set (epoch 2) — restoring
+        // it would brick producer selection, so it must be skipped.
+        engine.update_validators(Vec::new());
+        engine.start_epoch(2, [0x02; 32]);
+        engine.create_checkpoint(&db, 6).unwrap();
+
+        let latest = engine.load_latest_checkpoint(&db).unwrap().unwrap();
+        assert_eq!(latest, cp1);
+    }
+
+    #[test]
+    fn test_checkpoint_retention_prunes_old_epochs() {
+        let db = qfc_storage::Database::open_temp().unwrap();
+        let engine = ConsensusEngine::new(ConsensusConfig::default());
+        engine.update_validators(create_test_validators(1));
+
+        let extra = 5u64;
+        let total = CHECKPOINT_RETENTION as u64 + extra;
+        for epoch in 1..=total {
+            engine.start_epoch(epoch, [epoch as u8; 32]);
+            engine
+                .create_checkpoint(&db, epoch * qfc_types::BLOCKS_PER_EPOCH)
+                .unwrap();
+        }
+
+        // Only the newest CHECKPOINT_RETENTION checkpoints remain
+        let count = db.iter(qfc_storage::cf::CHECKPOINTS).unwrap().count();
+        assert_eq!(count, CHECKPOINT_RETENTION);
+
+        // Oldest epochs were pruned, newest are intact
+        assert_eq!(engine.load_checkpoint(&db, 1).unwrap(), None);
+        assert_eq!(engine.load_checkpoint(&db, extra).unwrap(), None);
+        assert!(engine.load_checkpoint(&db, extra + 1).unwrap().is_some());
+        let latest = engine.load_latest_checkpoint(&db).unwrap().unwrap();
+        assert_eq!(latest.epoch, total);
+    }
+
+    #[test]
+    fn test_restore_from_checkpoint_state() {
+        let db = qfc_storage::Database::open_temp().unwrap();
+        let engine = ConsensusEngine::new(ConsensusConfig::default());
+        engine.update_validators(create_test_validators(3));
+        engine.start_epoch(42, [0xcd; 32]);
+        engine.set_finalized_height(125);
+        engine.create_checkpoint(&db, 126).unwrap();
+
+        // Fresh engine, as after process restart
+        let restarted = ConsensusEngine::new(ConsensusConfig::default());
+        let checkpoint = restarted.load_latest_checkpoint(&db).unwrap().unwrap();
+        restarted.restore_from_checkpoint(&checkpoint);
+
+        assert_eq!(restarted.get_epoch().number, 42);
+        assert_eq!(restarted.get_epoch().seed, [0xcd; 32]);
+        assert_eq!(restarted.finalized_height(), 125);
+        assert_eq!(restarted.get_validators().len(), 3);
     }
 }
