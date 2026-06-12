@@ -2434,6 +2434,30 @@ impl QfcApiServer for RpcServer {
             _ => qfc_inference::GpuTier::Cold,
         };
 
+        let weights_hash = request
+            .weights_hash
+            .as_deref()
+            .map(Self::parse_hash)
+            .transpose()?;
+
+        // ADR-0001: validate the manifest before it can enter governance, and
+        // reject entries where weights_hash and assembled_hash disagree (a
+        // registry entry with both set must have them equal).
+        if let Some(manifest) = &request.shard_manifest {
+            manifest
+                .validate()
+                .map_err(|e| RpcError::InvalidParams(format!("invalid shard manifest: {}", e)))?;
+            if let Some(wh) = weights_hash {
+                if wh != manifest.assembled_hash {
+                    return Err(RpcError::InvalidParams(format!(
+                        "weightsHash {} does not match shard manifest assembledHash {}",
+                        wh, manifest.assembled_hash
+                    ))
+                    .into());
+                }
+            }
+        }
+
         let model_info = qfc_inference::model::ModelInfo {
             id: qfc_inference::task::ModelId::new(&request.model_name, &request.model_version),
             description: request.description,
@@ -2442,7 +2466,8 @@ impl QfcApiServer for RpcServer {
             size_mb: request.size_mb,
             approved: false,
             canonical_format: qfc_inference::CanonicalFormat::SafetensorsFp32,
-            weights_hash: None,
+            weights_hash,
+            shard_manifest: request.shard_manifest,
         };
 
         let now = std::time::SystemTime::now()
@@ -5026,5 +5051,85 @@ mod tests_agent_write_rpcs {
         assert!(
             qfc_crypto::verify_hash_signature(&keypair.public_key(), &hash_without, &sig).is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod tests_model_governance_rpcs {
+    use crate::qfc::RpcProposeModelRequest;
+
+    /// Old-style requests without the new optional fields must still parse
+    /// (serde defaults — backward compatible).
+    #[test]
+    fn test_propose_model_request_without_optional_fields() {
+        let json = r#"{
+            "proposer": "0x1234567890abcdef1234567890abcdef12345678",
+            "modelName": "qfc-llm-test",
+            "modelVersion": "v1.0",
+            "description": "test model",
+            "minMemoryMb": 1024,
+            "minTier": "Cold",
+            "sizeMb": 100
+        }"#;
+        let parsed: RpcProposeModelRequest = serde_json::from_str(json).unwrap();
+        assert!(parsed.weights_hash.is_none());
+        assert!(parsed.shard_manifest.is_none());
+    }
+
+    /// Manifest round-trips through the RPC request with 0x-hex hashes.
+    #[test]
+    fn test_propose_model_request_with_manifest_round_trip() {
+        let data = vec![0x42u8; 64];
+        let manifest = qfc_inference::ShardManifest {
+            shards: vec![qfc_inference::ShardEntry {
+                cid: "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG".to_string(),
+                hash: qfc_crypto::blake3_hash(&data),
+                size_bytes: data.len() as u64,
+                layer_range: None,
+            }],
+            total_size_bytes: data.len() as u64,
+            assembled_hash: qfc_crypto::blake3_hash(&data),
+        };
+        manifest.validate().unwrap();
+
+        let req = RpcProposeModelRequest {
+            proposer: "0x1234567890abcdef1234567890abcdef12345678".into(),
+            model_name: "qfc-llm-test".into(),
+            model_version: "v1.0".into(),
+            description: "sharded test model".into(),
+            min_memory_mb: 1024,
+            min_tier: "Cold".into(),
+            size_mb: 100,
+            weights_hash: Some(format!("{}", manifest.assembled_hash)),
+            shard_manifest: Some(manifest.clone()),
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        // Hashes serialize as 0x-hex strings (qfc_types::Hash serde).
+        assert!(json.contains(&format!("{}", manifest.assembled_hash)));
+        let parsed: RpcProposeModelRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.shard_manifest.as_ref().unwrap(), &manifest);
+        assert_eq!(
+            parsed.weights_hash.as_deref().unwrap(),
+            format!("{}", manifest.assembled_hash)
+        );
+    }
+
+    /// An invalid manifest (bad cid) is rejected by the same validate() the
+    /// propose_model handler runs before building ModelInfo.
+    #[test]
+    fn test_propose_model_manifest_with_invalid_cid_rejected() {
+        let data = vec![0x42u8; 64];
+        let manifest = qfc_inference::ShardManifest {
+            shards: vec![qfc_inference::ShardEntry {
+                cid: "../evil".to_string(),
+                hash: qfc_crypto::blake3_hash(&data),
+                size_bytes: data.len() as u64,
+                layer_range: None,
+            }],
+            total_size_bytes: data.len() as u64,
+            assembled_hash: qfc_crypto::blake3_hash(&data),
+        };
+        assert!(manifest.validate().is_err());
     }
 }

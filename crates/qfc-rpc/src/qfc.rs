@@ -670,6 +670,13 @@ pub struct RpcProposeModelRequest {
     pub min_memory_mb: u64,
     pub min_tier: String,
     pub size_mb: u64,
+    /// Blake3 hash of the model weight file (0x-hex, optional)
+    #[serde(default)]
+    pub weights_hash: Option<String>,
+    /// Sharded distribution manifest (ADR-0001, optional). Reuses the
+    /// canonical `ShardManifest` serde shape: hashes are 0x-hex strings.
+    #[serde(default)]
+    pub shard_manifest: Option<qfc_inference::ShardManifest>,
 }
 
 /// Request to vote on a model proposal
