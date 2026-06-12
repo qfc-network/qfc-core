@@ -78,6 +78,10 @@ impl std::fmt::Display for ParamRange {
 }
 
 /// A gradient/delta update pushed by a training worker for one range.
+///
+/// Unsigned in A1: the `worker` field is taken at face value. Worker
+/// signatures + assignment-membership checks (only workers assigned to the
+/// job may push) land with A5 chain integration.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ParamUpdate {
     pub worker: Address,

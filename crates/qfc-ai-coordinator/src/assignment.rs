@@ -19,10 +19,25 @@ pub struct MinerCapability {
     pub loaded_models: Vec<ModelId>,
     /// Last heartbeat timestamp
     pub last_seen: u64,
+    /// Training stake in wei (ADR-0008). Gates training-job eligibility:
+    /// assignment requires `stake >= TrainingJobSpec::stake_floor()` so a
+    /// detected fabrication is always fully slashable. Ignored by the
+    /// inference path; defaults to 0 for registrations that predate it.
+    ///
+    /// HONESTY NOTE: self-reported at registration until A5 wires
+    /// chain-state stake reads; assignment floors are advisory until then.
+    #[serde(default)]
+    pub stake: u128,
 }
 
 impl MinerCapability {
-    pub fn new(address: Address, backend: BackendType, tier: GpuTier, memory_mb: u64) -> Self {
+    pub fn new(
+        address: Address,
+        backend: BackendType,
+        tier: GpuTier,
+        memory_mb: u64,
+        stake: u128,
+    ) -> Self {
         Self {
             address,
             backend,
@@ -30,6 +45,7 @@ impl MinerCapability {
             memory_mb,
             loaded_models: Vec::new(),
             last_seen: 0,
+            stake,
         }
     }
 
@@ -84,6 +100,12 @@ impl MinerRegistry {
     pub fn get(&self, address: &Address) -> Option<&MinerCapability> {
         self.miners.iter().find(|m| m.address == *address)
     }
+
+    /// Iterate all registered miners (training assignment filters these,
+    /// `training.rs`)
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &MinerCapability> {
+        self.miners.iter()
+    }
 }
 
 impl Default for MinerRegistry {
@@ -93,7 +115,7 @@ impl Default for MinerRegistry {
 }
 
 /// Check if miner_tier can handle tasks of required_tier
-fn tier_matches(miner_tier: GpuTier, required_tier: GpuTier) -> bool {
+pub(crate) fn tier_matches(miner_tier: GpuTier, required_tier: GpuTier) -> bool {
     match (miner_tier, required_tier) {
         (GpuTier::Hot, _) => true,
         (GpuTier::Warm, GpuTier::Hot) => false,
@@ -119,6 +141,7 @@ mod tests {
             memory_mb: 80_000,
             loaded_models: vec![],
             last_seen: 1000,
+            stake: 0,
         };
 
         registry.register(miner);
@@ -139,6 +162,7 @@ mod tests {
             memory_mb: 8000,
             loaded_models: vec![],
             last_seen: 1000,
+            stake: 0,
         };
 
         assert!(miner.is_active(1000));
@@ -157,6 +181,7 @@ mod tests {
             memory_mb: 8000,
             loaded_models: vec![],
             last_seen: 1000,
+            stake: 0,
         });
 
         registry.register(MinerCapability {
@@ -166,6 +191,7 @@ mod tests {
             memory_mb: 16000,
             loaded_models: vec![],
             last_seen: 50_000,
+            stake: 0,
         });
 
         // At time 62_000, miner 1 (last_seen=1000) should be pruned

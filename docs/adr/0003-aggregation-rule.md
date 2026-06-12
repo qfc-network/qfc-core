@@ -37,9 +37,15 @@ property tests). Two preconditions, without which the bound is meaningless:
 
 ## Consequences
 
-- `qfc-ps` aggregation buffers updates per epoch window and aggregates at the
-  SSP barrier (ADR-0006); update values are f32, aggregation accumulates in
-  f64 for determinism-friendly summation order (sorted by worker address).
+- `qfc-ps` buffers ONE contribution per (range, worker) during the epoch
+  window: a worker's intra-epoch step deltas are element-wise summed
+  (gradient accumulation) into a single per-worker entry, so `n` in the
+  robustness bound counts **distinct workers** — never pushes — and a worker
+  pushing many steps cannot dilute the trim budget or burn the per-range
+  worker cap. Per-worker steps are bounded by the job's `steps_per_epoch`
+  (enforced at push). Aggregation runs at the SSP barrier (ADR-0006); update
+  values are f32, aggregation accumulates in f64 for determinism-friendly
+  summation order (sorted by worker address).
 - Property tests (A2) must demonstrate: bound holds at `f < β·n` with extreme
   adversarial values; bound *breaks* at `f ≥ β·n` (test documents the cliff,
   so the assignment cap is load-bearing and visible).

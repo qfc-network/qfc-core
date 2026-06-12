@@ -15,7 +15,9 @@ epoch boundary.**
   behind the fastest worker a step may be and still enter aggregation.
 - Clocks advance exactly one step per accepted push — there is no
   out-of-band clock report — which bounds clock-ratchet DoS: ratcheting the
-  admission floor costs accepted, metered, audit-eligible work.
+  admission floor costs accepted, metered, audit-eligible work. Clocks are
+  additionally bounded above by the job's `steps_per_epoch` (a push-enforced
+  per-epoch step ceiling), so the admission floor can never exceed it.
 - A push older than the bound is rejected as stale. Stale pushes earn NO
   acceptance record and are NOT slashable; they are simply refused
   (consistent with ADR-0004(a)) and do not enter aggregation.
