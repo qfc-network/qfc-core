@@ -18,8 +18,11 @@
 //! one per *accepted push* — there is no out-of-band clock report. This
 //! bounds `fastest_clock` growth (and hence the admission floor that can
 //! starve other workers) to accepted, metered, audit-eligible work — a
-//! cost-free clock-ratchet DoS is impossible. `SspClock` itself only checks
-//! monotonicity; the step-increment policy is enforced by `ShardService`.
+//! cost-free clock-ratchet DoS is impossible. In addition, `ShardService`
+//! enforces a per-epoch step ceiling (`max_steps_per_epoch`, the job's
+//! `steps_per_epoch`): clocks are bounded above by the ceiling, so the
+//! admission floor can never exceed it (ADR-0006). `SspClock` itself only
+//! checks monotonicity; both policies are enforced by `ShardService`.
 
 use std::collections::HashMap;
 

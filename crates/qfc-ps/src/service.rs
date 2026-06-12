@@ -3,26 +3,36 @@
 //!
 //! Implemented in milestone A1, hardened after adversarial review. API:
 //!
-//! - `ShardService::new(store, config, epoch, ranges) -> Result<Self, PsError>`
-//!   — `ranges` is the fixed set of registered assignment ranges for this
-//!   shard (the assignment layer, A3, feeds them): non-empty, pairwise
-//!   disjoint, each inside the owned range. Workers do NOT choose ranges;
-//!   pushes are admitted only for exactly-registered ranges, which bounds
-//!   buffer memory and makes overlap double-apply impossible (ADR-0003).
+//! - `ShardService::new(store, config, epoch, ranges, max_steps_per_epoch)
+//!   -> Result<Self, PsError>`
+//!   — validates `config` (`PsConfig::validate`). `ranges` is the fixed set
+//!   of registered assignment ranges for this shard (the assignment layer,
+//!   A3, feeds them): non-empty, pairwise disjoint, each inside the owned
+//!   range. Workers do NOT choose ranges; pushes are admitted only for
+//!   exactly-registered ranges, which bounds buffer memory and makes overlap
+//!   double-apply impossible (ADR-0003). `max_steps_per_epoch` is the job's
+//!   `steps_per_epoch` (A3/A5 wiring): the per-epoch step ceiling. `0` means
+//!   unlimited — tests only; production always passes the job's value.
 //! - `push(&mut self, update: ParamUpdate) -> Result<AcceptanceRecord, PsError>`
-//!   — validates epoch match + structure, range registration, step-clock
-//!   sequence (a worker's clock advances by exactly one per accepted push;
-//!   first push must carry clock 0 — ADR-0006), SSP admission via `SspClock`,
-//!   buffers via `UpdateBuffer` (worker cap), records acceptance (ADR-0004).
-//!   Rejected-as-stale is an error, not a slash (ADR-0006).
+//!   — validates epoch match + structure, range registration, the per-epoch
+//!   step ceiling (`update.clock < max_steps_per_epoch` when non-zero; this
+//!   bounds a worker's per-epoch contribution AND caps `fastest_clock`, so
+//!   the SSP admission floor can never exceed the ceiling — ADR-0006),
+//!   step-clock sequence (a worker's clock advances by exactly one per
+//!   accepted push; first push must carry clock 0 — ADR-0006), SSP admission
+//!   via `SspClock`, buffers via `UpdateBuffer` (per-worker gradient
+//!   accumulation; the per-range cap counts distinct workers — ADR-0003),
+//!   records acceptance (ADR-0004). Rejected-as-stale is an error, not a
+//!   slash (ADR-0006).
 //! - `pull(&self, range: ParamRange) -> Result<Vec<f32>, PsError>` — current
 //!   shard parameters for any sub-range of the owned range.
 //! - `end_epoch(&mut self) -> Result<EpochOutcome, PsError>` — the barrier
 //!   (ADR-0006) with the production rule, `TrimmedMean` at the configured
 //!   `trim_beta` (ADR-0003): for each buffered range with at least
-//!   `rule.min_updates()` updates, aggregate (updates sorted by worker for
-//!   determinism) and `apply_delta`; thinner ranges are skipped with a
-//!   warning (deterministic no-op, acceptance records kept — ADR-0004).
+//!   `rule.min_updates()` per-worker entries (= distinct workers), aggregate
+//!   (entries sorted by worker for determinism) and `apply_delta`; thinner
+//!   ranges are skipped with a warning (deterministic no-op, acceptance
+//!   records kept — ADR-0004).
 //!   Then clear buffer, bump epoch, and return
 //!   `EpochOutcome { epoch, params_hash, accepted: Vec<AcceptanceRecord> }`
 //!   — the inputs of the on-chain version commit (A5).
@@ -67,6 +77,12 @@ pub struct ShardService {
     /// disjoint, each inside the owned range). Pushes must target exactly
     /// one of these — workers never choose ranges (ADR-0003, A3).
     ranges: Vec<ParamRange>,
+    /// Per-epoch step ceiling: pushes with `clock >= max_steps_per_epoch`
+    /// are rejected (when non-zero). The job's `steps_per_epoch` (A3/A5
+    /// wiring). Bounds both per-worker row minting and the clock-ratchet
+    /// admission floor: `fastest_clock <= ceiling` (ADR-0006). `0` =
+    /// unlimited, tests only.
+    max_steps_per_epoch: u64,
     /// Acceptance records issued this epoch. Survives `buffer.clear()` at the
     /// barrier — records are accounting, the buffer is working memory.
     accepted: Vec<AcceptanceRecord>,
@@ -76,13 +92,20 @@ impl ShardService {
     /// `ranges` are the assignment-layer ranges for this shard (A3 supplies
     /// them; tests and the pilot use a partition of the owned range). They
     /// must be non-empty, pairwise disjoint, and each inside the owned
-    /// range — otherwise `InvalidRange`.
+    /// range — otherwise `InvalidRange`. `config` must pass
+    /// `PsConfig::validate` — otherwise `Config`.
+    ///
+    /// `max_steps_per_epoch` is the per-epoch step ceiling, i.e. the job's
+    /// `steps_per_epoch` (`TrainingJobSpec`, A3; wired on-chain in A5).
+    /// `0` = unlimited — tests only; production always caps.
     pub fn new(
         store: ShardStore,
         config: PsConfig,
         epoch: Epoch,
         ranges: Vec<ParamRange>,
+        max_steps_per_epoch: u64,
     ) -> Result<Self, PsError> {
+        config.validate()?;
         if ranges.is_empty() {
             return Err(PsError::InvalidRange(
                 "registered assignment range set must be non-empty".to_string(),
@@ -118,6 +141,7 @@ impl ShardService {
             clock,
             buffer,
             ranges,
+            max_steps_per_epoch,
             accepted: Vec::new(),
         })
     }
@@ -164,6 +188,19 @@ impl ShardService {
                 update.range
             )));
         }
+        // Per-epoch step ceiling: a worker may contribute at most
+        // max_steps_per_epoch steps (the job's steps_per_epoch). This bounds
+        // both row-minting (a worker's accumulated contribution is at most
+        // the ceiling's worth of steps) and the clock-ratchet floor:
+        // fastest_clock <= ceiling, so the SSP admission floor can never
+        // exceed it (ADR-0006).
+        if self.max_steps_per_epoch > 0 && update.clock >= self.max_steps_per_epoch {
+            return Err(PsError::InvalidUpdate(format!(
+                "clock {} at or above the per-epoch step ceiling {} \
+                 (steps_per_epoch — ADR-0006)",
+                update.clock, self.max_steps_per_epoch
+            )));
+        }
         // Step-clock sequence (ADR-0006): exactly one step per accepted push.
         // First push from an unseen worker carries clock 0; each subsequent
         // accepted push carries prev + 1. This bounds fastest_clock growth to
@@ -204,14 +241,16 @@ impl ShardService {
     /// trusted-cluster experiments; production uses [`Self::end_epoch`].
     ///
     /// For each buffered range: ranges with fewer than `rule.min_updates()`
-    /// updates are skipped with a warning — a deterministic no-op for that
-    /// range this epoch. Thin participation is an assignment-layer shortfall,
-    /// not worker misbehavior, so the workers' acceptance records are KEPT
-    /// (the work was done and assigned — ADR-0004); only the buffered deltas
-    /// drop at clear. Ranges at or above the minimum aggregate (updates
-    /// pre-sorted by worker for determinism) and any aggregation error still
-    /// propagates — that is a real bug, not thin participation. Then: clear
-    /// buffer, barrier the clock, open the next epoch.
+    /// per-worker entries (= distinct workers; the buffer accumulates each
+    /// worker's steps into one entry) are skipped with a warning — a
+    /// deterministic no-op for that range this epoch. Thin participation is
+    /// an assignment-layer shortfall, not worker misbehavior, so the workers'
+    /// acceptance records are KEPT (the work was done and assigned —
+    /// ADR-0004); only the buffered deltas drop at clear. Ranges at or above
+    /// the minimum aggregate (entries pre-sorted by worker for determinism)
+    /// and any aggregation error still propagates — that is a real bug, not
+    /// thin participation. Then: clear buffer, barrier the clock, open the
+    /// next epoch.
     pub fn end_epoch_with_rule(
         &mut self,
         rule: &dyn AggregationRule,
@@ -302,10 +341,11 @@ mod tests {
         }
     }
 
-    /// Service over `owned` with an explicit registered-range set.
+    /// Service over `owned` with an explicit registered-range set and no
+    /// step ceiling (0 = unlimited, tests only).
     fn service_with(owned: ParamRange, epoch: Epoch, ranges: Vec<ParamRange>) -> ShardService {
         let store = ShardStore::open_temp(owned).unwrap();
-        ShardService::new(store, PsConfig::default(), epoch, ranges).unwrap()
+        ShardService::new(store, PsConfig::default(), epoch, ranges, 0).unwrap()
     }
 
     /// Service over [0, 100) with the registered partition used by most
@@ -324,7 +364,7 @@ mod tests {
         // Empty set.
         let store = ShardStore::open_temp(owned).unwrap();
         assert!(matches!(
-            ShardService::new(store, PsConfig::default(), 0, vec![]),
+            ShardService::new(store, PsConfig::default(), 0, vec![], 0),
             Err(PsError::InvalidRange(_))
         ));
         // Overlapping ranges.
@@ -334,7 +374,8 @@ mod tests {
                 store,
                 PsConfig::default(),
                 0,
-                vec![range(0, 10), range(5, 15)]
+                vec![range(0, 10), range(5, 15)],
+                0
             ),
             Err(PsError::InvalidRange(_))
         ));
@@ -345,7 +386,8 @@ mod tests {
                 store,
                 PsConfig::default(),
                 0,
-                vec![range(0, 10), range(90, 110)]
+                vec![range(0, 10), range(90, 110)],
+                0
             ),
             Err(PsError::InvalidRange(_))
         ));
@@ -356,9 +398,25 @@ mod tests {
             PsConfig::default(),
             0,
             vec![range(50, 100), range(0, 50)],
+            0,
         )
         .unwrap();
         assert_eq!(svc.registered_ranges(), &[range(0, 50), range(50, 100)]);
+    }
+
+    /// `ShardService::new` validates the config (NIT: PsConfig::validate).
+    #[test]
+    fn test_new_rejects_invalid_config() {
+        let owned = range(0, 100);
+        let store = ShardStore::open_temp(owned).unwrap();
+        let bad = PsConfig {
+            trim_beta: 0.7,
+            ..PsConfig::default()
+        };
+        assert!(matches!(
+            ShardService::new(store, bad, 0, vec![owned], 0),
+            Err(PsError::Config(_))
+        ));
     }
 
     #[test]
@@ -504,7 +562,7 @@ mod tests {
         store
             .set_range(owned, &(0..100).map(|i| i as f32).collect::<Vec<_>>())
             .unwrap();
-        let svc = ShardService::new(store, PsConfig::default(), 0, vec![owned]).unwrap();
+        let svc = ShardService::new(store, PsConfig::default(), 0, vec![owned], 0).unwrap();
 
         assert_eq!(
             svc.pull(range(40, 44)).unwrap(),
@@ -620,6 +678,57 @@ mod tests {
             Err(PsError::InvalidUpdate(_))
         ));
         assert_eq!(svc.end_epoch().unwrap().accepted.len(), 3);
+    }
+
+    /// FINDING 1b: pushes with clock >= max_steps_per_epoch are rejected —
+    /// the per-epoch step ceiling bounds both per-worker accumulation and
+    /// the SSP clock-ratchet floor (fastest_clock <= ceiling).
+    #[test]
+    fn test_step_ceiling_rejected_at_push() {
+        let store = ShardStore::open_temp(range(0, 100)).unwrap();
+        let mut svc =
+            ShardService::new(store, PsConfig::default(), 0, vec![range(0, 10)], 3).unwrap();
+        let r = range(0, 10);
+        // Clocks 0, 1, 2 accepted (ceiling 3).
+        for c in 0..3 {
+            svc.push(update(1, 0, c, r, 1.0)).unwrap();
+        }
+        // Clock 3 = ceiling: rejected with a message naming clock + ceiling.
+        match svc.push(update(1, 0, 3, r, 1.0)) {
+            Err(PsError::InvalidUpdate(msg)) => {
+                assert!(msg.contains("clock 3"), "{}", msg);
+                assert!(msg.contains("ceiling 3"), "{}", msg);
+            }
+            other => panic!("expected InvalidUpdate, got {:?}", other),
+        }
+        // The ceiling also bounds the admission floor: fastest_clock <= 2,
+        // so a fresh worker's clock-0 push is never stale.
+        svc.push(update(2, 0, 0, r, 1.0)).unwrap();
+        assert_eq!(svc.end_epoch().unwrap().accepted.len(), 4);
+    }
+
+    /// FINDING 1a end-to-end: 3 workers × 4 steps each. The barrier sees 3
+    /// per-worker accumulated contributions (n = 3 workers, not 12 rows);
+    /// the applied delta is the trimmed mean of the accumulated sums, and
+    /// acceptance records remain one per accepted push (12).
+    #[test]
+    fn test_end_epoch_aggregates_per_worker_accumulated_deltas() {
+        let mut svc = service(0);
+        let r = range(10, 20);
+        // Per-step deltas: worker 1 → 0.5, worker 2 → 1.0, worker 3 → 100.0.
+        // Accumulated over 4 steps: 2.0, 4.0, 400.0.
+        for (worker, val) in [(1u8, 0.5f32), (2, 1.0), (3, 100.0)] {
+            for c in 0..4 {
+                svc.push(update(worker, 0, c, r, val)).unwrap();
+            }
+        }
+        let outcome = svc.end_epoch().unwrap();
+        // One acceptance record per accepted push (ADR-0004), not per entry.
+        assert_eq!(outcome.accepted.len(), 12);
+        // TrimmedMean(0.2) over n = 3 accumulated sums {2, 4, 400} trims one
+        // per side and keeps the median: 4.0. A row-denominated buffer would
+        // instead have n = 12 and let worker 3's repeated 100s survive.
+        assert_eq!(svc.pull(r).unwrap(), vec![4.0; 10]);
     }
 
     #[test]

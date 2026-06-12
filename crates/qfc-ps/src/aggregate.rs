@@ -1,9 +1,12 @@
 //! Byzantine-robust aggregation (ADR-0003).
 //!
-//! Updates buffer per range during the epoch; at the SSP barrier
-//! (ADR-0006) the configured [`AggregationRule`] reduces each range's
-//! buffered updates to one delta vector. Plain averaging is forbidden as a
-//! production rule — workers are untrusted.
+//! Updates buffer per range during the epoch — ONE accumulated entry per
+//! (range, worker): a worker's intra-epoch step deltas are element-wise
+//! summed (gradient accumulation), so the `n` an [`AggregationRule`] sees is
+//! the number of **distinct workers**, the denomination of ADR-0003's
+//! `f < β·n` robustness bound. At the SSP barrier (ADR-0006) the configured
+//! rule reduces each range's per-worker entries to one delta vector. Plain
+//! averaging is forbidden as a production rule — workers are untrusted.
 //!
 //! Buffer keys are the *registered assignment ranges* admitted by
 //! `ShardService` (fixed per epoch, pairwise disjoint, each inside the owned
@@ -16,24 +19,28 @@ use std::collections::HashMap;
 use crate::types::{ParamRange, ParamUpdate};
 use crate::PsError;
 
-/// Reduces one range's buffered updates to a single delta vector.
+/// Reduces one range's buffered per-worker entries to a single delta vector.
 pub trait AggregationRule {
     /// `updates` are structurally valid (see `ParamUpdate::validate`) and all
-    /// have ranges equal to `range`. Must be deterministic: callers sort
-    /// updates by worker address before invoking (ADR-0003).
+    /// have ranges equal to `range`. In production each element is one
+    /// worker's accumulated epoch contribution (see [`UpdateBuffer`]), so
+    /// `updates.len()` = distinct workers. Must be deterministic: callers
+    /// sort updates by worker address before invoking (ADR-0003).
     fn aggregate(&self, updates: &[&ParamUpdate], range: &ParamRange) -> Result<Vec<f32>, PsError>;
 
-    /// Minimum number of buffered updates this rule needs to produce a
-    /// meaningful delta. The epoch barrier skips (deterministic no-op, with a
-    /// warning) any range with fewer updates instead of aborting — thin
-    /// participation on one range must not block the whole epoch.
+    /// Minimum number of buffered per-worker entries (= distinct workers)
+    /// this rule needs to produce a meaningful delta. The epoch barrier skips
+    /// (deterministic no-op, with a warning) any range with fewer entries
+    /// instead of aborting — thin participation on one range must not block
+    /// the whole epoch.
     fn min_updates(&self) -> usize {
         1
     }
 }
 
 /// Coordinate-wise trimmed mean with trim fraction `beta` per side
-/// (ADR-0003). Tolerates `f < beta * n` malicious updates per range.
+/// (ADR-0003). Tolerates `f < beta * n` malicious workers per range, where
+/// `n` counts distinct workers (one accumulated entry each, [`UpdateBuffer`]).
 #[derive(Clone, Copy, Debug)]
 pub struct TrimmedMean {
     pub beta: f64,
@@ -146,63 +153,95 @@ impl AggregationRule for Mean {
     }
 }
 
-/// Per-epoch buffer of pushed updates, keyed by exact range.
+/// Per-epoch buffer of accumulated worker contributions, keyed by exact
+/// range — ONE entry per (range, worker).
+///
+/// A worker's intra-epoch step deltas are element-wise summed (gradient
+/// accumulation) into its single entry, so the `n` an aggregation rule sees
+/// counts **distinct workers**, never pushes — exactly the denomination of
+/// ADR-0003's robustness bound `f < β·n`. A worker pushing many steps cannot
+/// mint rows, dilute the trim budget, or burn the worker cap: the cap counts
+/// distinct workers (entries) per range.
 ///
 /// `ShardService` only feeds this buffer updates whose range is exactly one
 /// of the registered assignment ranges (fixed per epoch, pairwise disjoint,
 /// each inside the owned range), so the key set is bounded and
 /// attacker-independent. Together with the per-range worker cap this gives a
-/// hard memory bound: `max_per_range × Σ registered range lengths
+/// hard memory bound: `max_workers_per_range × Σ registered range lengths
 /// ≤ cap × owned_range.len()` buffered f32s — the O(workers × shard_size)
-/// aggregation memory bound from ADR-0003. Also enforces
-/// one-update-per-(worker, clock) dedup. Cleared at the epoch barrier.
+/// aggregation memory bound from ADR-0003. Also rejects duplicate or
+/// regressed (worker, clock) pushes. Cleared at the epoch barrier.
 #[derive(Debug, Default)]
 pub struct UpdateBuffer {
-    max_per_range: usize,
+    max_workers_per_range: usize,
+    /// One accumulated entry per worker, per range.
     buffered: HashMap<ParamRange, Vec<ParamUpdate>>,
 }
 
 impl UpdateBuffer {
-    /// `max_per_range = 0` means uncapped (tests only; production always caps).
-    pub fn new(max_per_range: usize) -> Self {
+    /// `max_workers_per_range = 0` means uncapped (tests only; production
+    /// always caps).
+    pub fn new(max_workers_per_range: usize) -> Self {
         Self {
-            max_per_range,
+            max_workers_per_range,
             buffered: HashMap::new(),
         }
     }
 
-    /// Buffer a validated update. Rejects duplicates (same worker + clock on
-    /// the same range) and pushes beyond the worker cap.
+    /// Buffer a validated update.
+    ///
+    /// First push from a worker on a range creates its entry (rejected if
+    /// the range already holds `max_workers_per_range` distinct workers).
+    /// Subsequent pushes from the same worker accumulate: values are
+    /// element-wise added into the stored entry, the entry's clock advances
+    /// to the new clock, and `flops_estimated` sums (saturating). A clock
+    /// equal to or lower than the entry's last accumulated clock is a
+    /// duplicate/replay and is rejected BEFORE accumulation (`ShardService`
+    /// enforces +1 step sequencing, so equal-or-lower always means replay).
     pub fn add(&mut self, update: ParamUpdate) -> Result<(), PsError> {
         update.validate()?;
         let entry = self.buffered.entry(update.range).or_default();
-        if entry
-            .iter()
-            .any(|u| u.worker == update.worker && u.clock == update.clock)
-        {
-            return Err(PsError::InvalidUpdate(format!(
-                "duplicate update from {} at clock {} for {}",
-                update.worker, update.clock, update.range
-            )));
+        if let Some(existing) = entry.iter_mut().find(|u| u.worker == update.worker) {
+            if update.clock <= existing.clock {
+                return Err(PsError::InvalidUpdate(format!(
+                    "duplicate or regressed clock {} from {} for {} (last accumulated clock {})",
+                    update.clock, update.worker, update.range, existing.clock
+                )));
+            }
+            // Element-wise gradient accumulation. Plain f32 += f32 is fine
+            // here: these are one worker's own same-epoch step deltas, not
+            // the cross-worker aggregate (which accumulates in f64 inside
+            // the aggregation rule, ADR-0003).
+            for (slot, v) in existing.values.iter_mut().zip(&update.values) {
+                *slot += v;
+            }
+            existing.clock = update.clock;
+            existing.flops_estimated = existing
+                .flops_estimated
+                .saturating_add(update.flops_estimated);
+            return Ok(());
         }
-        if self.max_per_range > 0 && entry.len() >= self.max_per_range {
+        // New worker on this range: the cap naturally counts WORKERS
+        // (distinct entries), matching ADR-0003 verbatim.
+        if self.max_workers_per_range > 0 && entry.len() >= self.max_workers_per_range {
             return Err(PsError::WorkerCapExceeded {
-                cap: self.max_per_range,
+                cap: self.max_workers_per_range,
             });
         }
         entry.push(update);
         Ok(())
     }
 
-    /// Updates for a range, sorted by (worker, clock) for deterministic
-    /// aggregation order (ADR-0003).
+    /// The accumulated per-worker entries for a range, sorted by worker for
+    /// deterministic aggregation order (ADR-0003). One entry per worker, so
+    /// worker address alone is a total sort key.
     pub fn updates_for(&self, range: &ParamRange) -> Vec<&ParamUpdate> {
         let mut v: Vec<&ParamUpdate> = self
             .buffered
             .get(range)
             .map(|u| u.iter().collect())
             .unwrap_or_default();
-        v.sort_by_key(|u| (*u.worker.as_bytes(), u.clock));
+        v.sort_by_key(|u| *u.worker.as_bytes());
         v
     }
 
@@ -213,6 +252,8 @@ impl UpdateBuffer {
         r
     }
 
+    /// Number of buffered per-worker entries (distinct (range, worker)
+    /// pairs), NOT pushes — accumulation folds pushes into entries.
     pub fn len(&self) -> usize {
         self.buffered.values().map(|v| v.len()).sum()
     }
@@ -586,36 +627,82 @@ mod buffer_tests {
     use qfc_types::Address;
 
     fn update(worker: u8, clock: u64, range: ParamRange) -> ParamUpdate {
+        update_val(worker, clock, range, 1.0)
+    }
+
+    fn update_val(worker: u8, clock: u64, range: ParamRange, val: f32) -> ParamUpdate {
         ParamUpdate {
             worker: Address::new([worker; 20]),
             epoch: 1,
             clock,
             range,
-            values: vec![1.0; range.len() as usize],
+            values: vec![val; range.len() as usize],
             flops_estimated: 1,
         }
     }
 
+    /// FINDING 1a: a worker's steps accumulate into ONE entry — summed
+    /// values, last clock, summed flops.
     #[test]
-    fn test_buffer_dedup_and_cap() {
+    fn test_accumulation_one_entry_per_worker() {
+        let r = ParamRange::new(0, 4).unwrap();
+        let mut buf = UpdateBuffer::new(0);
+        buf.add(update_val(1, 0, r, 1.0)).unwrap();
+        buf.add(update_val(1, 1, r, 2.5)).unwrap();
+        buf.add(update_val(1, 2, r, -0.5)).unwrap();
+        assert_eq!(buf.len(), 1);
+        let entries = buf.updates_for(&r);
+        assert_eq!(entries.len(), 1);
+        let e = entries[0];
+        assert_eq!(e.worker, Address::new([1; 20]));
+        assert_eq!(e.values, vec![3.0; 4]); // 1.0 + 2.5 - 0.5, element-wise
+        assert_eq!(e.clock, 2); // last accumulated clock
+        assert_eq!(e.flops_estimated, 3); // 1 + 1 + 1, saturating
+    }
+
+    /// FINDING 1a: the cap counts WORKERS (distinct entries), not pushes —
+    /// 2 workers pushing many steps each fit a cap of 2; a 3rd worker is
+    /// rejected.
+    #[test]
+    fn test_cap_counts_workers_not_rows() {
         let r = ParamRange::new(0, 4).unwrap();
         let mut buf = UpdateBuffer::new(2);
-        buf.add(update(1, 0, r)).unwrap();
-        // Same worker, new clock: allowed
-        buf.add(update(1, 1, r)).unwrap();
-        // Duplicate (worker, clock): rejected
+        for clock in 0..10 {
+            buf.add(update(1, clock, r)).unwrap();
+            buf.add(update(2, clock, r)).unwrap();
+        }
+        assert_eq!(buf.len(), 2);
+        // Third distinct worker: cap exceeded.
         assert!(matches!(
-            buf.add(update(1, 0, r)),
-            Err(PsError::InvalidUpdate(_))
-        ));
-        // Cap reached
-        assert!(matches!(
-            buf.add(update(2, 0, r)),
+            buf.add(update(3, 0, r)),
             Err(PsError::WorkerCapExceeded { cap: 2 })
         ));
-        assert_eq!(buf.len(), 2);
         buf.clear();
         assert!(buf.is_empty());
+    }
+
+    /// Duplicate or regressed clocks are rejected BEFORE accumulation: the
+    /// entry's values/clock/flops are untouched by the rejected push.
+    #[test]
+    fn test_duplicate_and_regressed_clock_rejected() {
+        let r = ParamRange::new(0, 2).unwrap();
+        let mut buf = UpdateBuffer::new(0);
+        buf.add(update_val(1, 0, r, 1.0)).unwrap();
+        buf.add(update_val(1, 3, r, 1.0)).unwrap();
+        // Duplicate clock.
+        assert!(matches!(
+            buf.add(update_val(1, 3, r, 9.0)),
+            Err(PsError::InvalidUpdate(_))
+        ));
+        // Regressed clock.
+        assert!(matches!(
+            buf.add(update_val(1, 2, r, 9.0)),
+            Err(PsError::InvalidUpdate(_))
+        ));
+        let entries = buf.updates_for(&r);
+        assert_eq!(entries[0].values, vec![2.0; 2]);
+        assert_eq!(entries[0].clock, 3);
+        assert_eq!(entries[0].flops_estimated, 2);
     }
 
     #[test]
@@ -623,13 +710,15 @@ mod buffer_tests {
         let r = ParamRange::new(0, 2).unwrap();
         let mut buf = UpdateBuffer::new(0);
         buf.add(update(3, 0, r)).unwrap();
-        buf.add(update(1, 1, r)).unwrap();
         buf.add(update(1, 0, r)).unwrap();
+        buf.add(update(2, 0, r)).unwrap();
+        buf.add(update(1, 1, r)).unwrap(); // accumulates into worker 1's entry
         let order: Vec<(u8, u64)> = buf
             .updates_for(&r)
             .iter()
             .map(|u| (u.worker.as_bytes()[0], u.clock))
             .collect();
-        assert_eq!(order, vec![(1, 0), (1, 1), (3, 0)]);
+        // One entry per worker, sorted by worker address.
+        assert_eq!(order, vec![(1, 1), (2, 0), (3, 0)]);
     }
 }
