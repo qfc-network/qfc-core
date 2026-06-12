@@ -14,8 +14,47 @@ use std::sync::Arc;
 use tracing::{debug, info};
 
 // Re-exported so consumers (e.g. an observability exporter) can query tickers
-// without taking a direct `rocksdb` dependency.
-pub use rocksdb::statistics::Ticker;
+// and histograms without taking a direct `rocksdb` dependency.
+pub use rocksdb::statistics::{Histogram, Ticker};
+
+/// Integer-valued RocksDB property names accepted by
+/// [`Database::property_int`] / [`Database::property_int_cf`].
+///
+/// Unlike statistics tickers, properties are computed on demand from live
+/// engine state and are available even when
+/// [`StorageConfig::enable_statistics`] is off.
+pub mod props {
+    /// Approximate size of active + unflushed immutable memtables (bytes).
+    pub const CUR_SIZE_ALL_MEM_TABLES: &str = "rocksdb.cur-size-all-mem-tables";
+    /// Estimated bytes compaction needs to rewrite to bring the LSM tree back
+    /// in shape (the compaction-debt / backlog signal).
+    pub const ESTIMATE_PENDING_COMPACTION_BYTES: &str = "rocksdb.estimate-pending-compaction-bytes";
+    /// Number of immutable memtables not yet flushed.
+    pub const NUM_IMMUTABLE_MEM_TABLE: &str = "rocksdb.num-immutable-mem-table";
+    /// Number of SST files at level 0 (write-stall trigger when high).
+    pub const NUM_FILES_AT_LEVEL0: &str = "rocksdb.num-files-at-level0";
+    /// Memory used by the (shared) block cache, in bytes.
+    pub const BLOCK_CACHE_USAGE: &str = "rocksdb.block-cache-usage";
+    /// 1 if writes are completely stopped (hard write stall), else 0.
+    pub const IS_WRITE_STOPPED: &str = "rocksdb.is-write-stopped";
+    /// Current delayed-write rate in bytes/s; 0 means writes are not delayed.
+    pub const ACTUAL_DELAYED_WRITE_RATE: &str = "rocksdb.actual-delayed-write-rate";
+}
+
+/// Plain-value snapshot of a RocksDB statistics histogram, returned by
+/// [`Database::statistics_histogram`]. Values are in the histogram's native
+/// unit (microseconds for `*Micros` histograms); `sum`/`count` are cumulative
+/// since DB open, so an exporter can publish them as monotonic counters.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct HistogramStats {
+    pub median: f64,
+    pub average: f64,
+    pub p95: f64,
+    pub p99: f64,
+    pub max: f64,
+    pub sum: u64,
+    pub count: u64,
+}
 
 type RocksDB = DBWithThreadMode<MultiThreaded>;
 
@@ -431,6 +470,45 @@ impl Database {
         Some(self.db_opts.get_ticker_count(ticker))
     }
 
+    /// Snapshot of a statistics histogram (e.g.
+    /// [`Histogram::WalFileSyncMicros`]) as plain values.
+    ///
+    /// Returns `None` unless statistics collection is enabled.
+    pub fn statistics_histogram(&self, histogram: Histogram) -> Option<HistogramStats> {
+        if !self.config.enable_statistics {
+            return None;
+        }
+        let data = self.db_opts.get_histogram_data(histogram);
+        Some(HistogramStats {
+            median: data.median(),
+            average: data.average(),
+            p95: data.p95(),
+            p99: data.p99(),
+            max: data.max(),
+            sum: data.sum(),
+            count: data.count(),
+        })
+    }
+
+    /// Integer-valued DB-level property (e.g. [`props::BLOCK_CACHE_USAGE`]).
+    ///
+    /// Computed on demand from live engine state; works regardless of
+    /// [`StorageConfig::enable_statistics`]. Returns `Ok(None)` if the
+    /// property does not exist or is not integer-valued.
+    pub fn property_int(&self, name: &str) -> Result<Option<u64>> {
+        Ok(self.db.property_int_value(name)?)
+    }
+
+    /// Integer-valued per-column-family property (e.g.
+    /// [`props::CUR_SIZE_ALL_MEM_TABLES`]).
+    ///
+    /// Computed on demand; works regardless of
+    /// [`StorageConfig::enable_statistics`].
+    pub fn property_int_cf(&self, cf_name: &str, name: &str) -> Result<Option<u64>> {
+        let cf = self.get_cf(cf_name)?;
+        Ok(self.db.property_int_value_cf(&cf, name)?)
+    }
+
     /// Flush the database
     pub fn flush(&self) -> Result<()> {
         for cf_name in cf::ALL {
@@ -631,6 +709,76 @@ mod tests {
             .statistics_ticker(Ticker::BytesWritten)
             .expect("ticker when enabled");
         assert!(written > 0, "BytesWritten should count the put");
+    }
+
+    #[test]
+    fn test_statistics_histogram() {
+        // Disabled by default…
+        let db = Database::open_temp().unwrap();
+        assert!(db
+            .statistics_histogram(Histogram::WalFileSyncMicros)
+            .is_none());
+        drop(db);
+
+        // …and populated by a sync (WAL-fsync) write when enabled.
+        let (db, _dir) = open_temp_with(|c| c.enable_statistics = true);
+        let mut batch = WriteBatch::new();
+        batch.put(cf::METADATA, b"k".to_vec(), b"v".to_vec());
+        db.write_batch_sync(batch).unwrap();
+
+        let h = db
+            .statistics_histogram(Histogram::WalFileSyncMicros)
+            .expect("histogram when enabled");
+        assert!(h.count >= 1, "sync write should record a WAL fsync");
+        assert!(h.sum > 0);
+    }
+
+    #[test]
+    fn test_property_int_works_without_statistics() {
+        // Properties are live engine state, independent of enable_statistics.
+        let db = Database::open_temp().unwrap();
+        assert!(!db.statistics_enabled());
+
+        db.put(cf::STATE, b"key", b"value").unwrap();
+
+        let memtable = db
+            .property_int_cf(cf::STATE, props::CUR_SIZE_ALL_MEM_TABLES)
+            .unwrap()
+            .expect("memtable size property");
+        assert!(memtable > 0, "memtable should be non-empty after a put");
+
+        for name in [
+            props::ESTIMATE_PENDING_COMPACTION_BYTES,
+            props::NUM_IMMUTABLE_MEM_TABLE,
+            props::NUM_FILES_AT_LEVEL0,
+        ] {
+            assert!(
+                db.property_int_cf(cf::STATE, name).unwrap().is_some(),
+                "per-CF property `{name}` should be integer-valued"
+            );
+        }
+
+        for name in [
+            props::BLOCK_CACHE_USAGE,
+            props::IS_WRITE_STOPPED,
+            props::ACTUAL_DELAYED_WRITE_RATE,
+        ] {
+            assert!(
+                db.property_int(name).unwrap().is_some(),
+                "DB property `{name}` should be integer-valued"
+            );
+        }
+
+        // Unknown property: Ok(None), not an error.
+        assert!(db.property_int("rocksdb.does-not-exist").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_property_int_cf_unknown_cf() {
+        let db = Database::open_temp().unwrap();
+        assert!(db
+            .property_int_cf("no_such_cf", props::CUR_SIZE_ALL_MEM_TABLES)
+            .is_err());
     }
 
     #[test]

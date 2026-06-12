@@ -8,8 +8,16 @@ Dashboard and alert rules for the qfc-node Prometheus exporter
 
 Every node serves Prometheus text-format metrics on
 `http://<node>:6060/metrics` (configurable via `--metrics-addr` /
-`QFC_METRICS_ADDR`). No extra flags needed — chain, sync, mempool, and RPC
-metrics are always on.
+`QFC_METRICS_ADDR`). No extra flags needed — chain, sync, mempool, RPC, and
+RocksDB *property* metrics (memtable size, pending-compaction bytes, L0 files,
+write-stall state) are always on.
+
+RocksDB statistics *counters* (`qfc_rocksdb_*_total`, WAL sync latency)
+additionally require starting the node with `--db-statistics` /
+`QFC_DB_STATISTICS=1`, which enables RocksDB ticker/histogram collection at the
+cost of a few percent of storage throughput. The
+`qfc_storage_statistics_enabled` gauge (0/1) tells you which mode a node is in;
+with statistics off the counter metrics are simply absent.
 
 Scrape config:
 
@@ -49,8 +57,11 @@ Commented placeholders at the bottom of the file are intentionally disabled
 until their metrics exist:
 
 - **Backup freshness** — enable after T4 exports `qfc_backup_last_success_timestamp_seconds`.
-- **RocksDB write stall / compaction backlog** — enable after T2.1 lands the
-  qfc-storage statistics hook.
+
+The `qfc-rocksdb` group (T2.1) is active. Its property-based alerts
+(`QfcRocksdbWriteStopped`, `QfcRocksdbCompactionBacklog*`) work on every node;
+the stall-rate alert (`QfcRocksdbWriteStall`) only produces data on nodes
+running with `--db-statistics` and never fires elsewhere.
 
 ## Loading the Grafana dashboard
 
@@ -104,6 +115,50 @@ and place `grafana-dashboard.json` in that path. The dashboard has an
 | `qfc_rpc_request_duration_seconds` | histogram | `method`, `le` | RPC middleware |
 | `qfc_rpc_errors_total` | counter | `method`, `code` | RPC middleware |
 
+## Metric inventory — RocksDB (T2.1)
+
+Property-based gauges, always exported (computed on demand from live engine
+state; `cf` ranges over all 18 column families):
+
+| Metric | Type | Labels | Source (RocksDB property) |
+|---|---|---|---|
+| `qfc_rocksdb_memtable_bytes` | gauge | `cf` | `rocksdb.cur-size-all-mem-tables` |
+| `qfc_rocksdb_pending_compaction_bytes` | gauge | `cf` | `rocksdb.estimate-pending-compaction-bytes` |
+| `qfc_rocksdb_immutable_memtables` | gauge | `cf` | `rocksdb.num-immutable-mem-table` |
+| `qfc_rocksdb_l0_files` | gauge | `cf` | `rocksdb.num-files-at-level0` |
+| `qfc_rocksdb_block_cache_usage_bytes` | gauge | — | `rocksdb.block-cache-usage` (cache is shared) |
+| `qfc_rocksdb_write_stopped` | gauge (0/1) | — | `rocksdb.is-write-stopped` |
+| `qfc_rocksdb_actual_delayed_write_rate` | gauge | — | `rocksdb.actual-delayed-write-rate` |
+| `qfc_storage_statistics_enabled` | gauge (0/1) | — | `StorageConfig::enable_statistics` |
+
+Statistics counters, only exported when the node runs with `--db-statistics`
+(all DB-wide; RocksDB tickers are not per-CF):
+
+| Metric | Type | Labels | Source (RocksDB ticker/histogram) |
+|---|---|---|---|
+| `qfc_rocksdb_stall_micros_total` | counter | — | `rocksdb.stall.micros` |
+| `qfc_rocksdb_block_cache_hits_total` | counter | — | `rocksdb.block.cache.hit` |
+| `qfc_rocksdb_block_cache_misses_total` | counter | — | `rocksdb.block.cache.miss` |
+| `qfc_rocksdb_bloom_filter_useful_total` | counter | — | `rocksdb.bloom.filter.useful` |
+| `qfc_rocksdb_bytes_written_total` | counter | — | `rocksdb.bytes.written` |
+| `qfc_rocksdb_bytes_read_total` | counter | — | `rocksdb.bytes.read` |
+| `qfc_rocksdb_compaction_read_bytes_total` | counter | — | `rocksdb.compact.read.bytes` |
+| `qfc_rocksdb_compaction_write_bytes_total` | counter | — | `rocksdb.compact.write.bytes` |
+| `qfc_rocksdb_flush_write_bytes_total` | counter | — | `rocksdb.flush.write.bytes` |
+| `qfc_rocksdb_wal_syncs_total` | counter | — | `rocksdb.wal.synced` |
+| `qfc_rocksdb_wal_bytes_total` | counter | — | `rocksdb.wal.bytes` |
+| `qfc_rocksdb_wal_sync_duration_seconds_sum` | counter | — | `rocksdb.wal.file.sync.micros` (sum) |
+| `qfc_rocksdb_wal_sync_duration_seconds_count` | counter | — | `rocksdb.wal.file.sync.micros` (count) |
+| `qfc_rocksdb_wal_sync_duration_seconds_p99` | gauge | — | `rocksdb.wal.file.sync.micros` (engine p99 since open) |
+
+Selection rationale: the ticker set is deliberately small — stall time (the
+top-level "engine is unhealthy" signal), cache/bloom effectiveness (validates
+the T3.1 cache/bloom work), user vs compaction vs flush byte volume (write
+amplification = (compaction+flush)/user bytes), and WAL sync behaviour
+(durability cost of the T3.2 sync-commit policy). Everything else in the
+~200-ticker catalogue is diagnostic rather than alertable and can be read
+ad-hoc via `Database::statistics()`.
+
 Notes:
 
 - `qfc_reorgs_detected_total` counts canonical-chain rewrites observed between
@@ -112,5 +167,7 @@ Notes:
   ships with the T2.1/T3 follow-up (needs a hook in `qfc-chain`).
 - RPC histogram buckets span 500µs–10s (14 buckets), tuned so
   `histogram_quantile()` gives usable p50/p99/p999.
-- RocksDB metrics (`qfc_rocksdb_*`) are **not exported yet** — T2.1 is
-  deferred to a follow-up PR; the exporter has a marked seam for it.
+- WAL sync latency is exported as a cumulative sum/count pair —
+  `rate(..._sum[5m]) / rate(..._count[5m])` gives the windowed mean — plus an
+  engine-side p99 gauge. RocksDB's C API exposes histogram percentiles, not
+  bucket boundaries, so a full Prometheus histogram is not derivable.

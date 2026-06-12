@@ -97,6 +97,12 @@ struct Args {
     #[arg(long, default_value = "0.0.0.0:6060", env = "QFC_METRICS_ADDR")]
     metrics_addr: SocketAddr,
 
+    /// Enable RocksDB statistics collection (tickers + histograms; costs a few
+    /// percent of storage throughput). Exposes qfc_rocksdb_* counter metrics
+    /// on /metrics; property-based gauges are exported regardless.
+    #[arg(long, env = "QFC_DB_STATISTICS")]
+    db_statistics: bool,
+
     /// IPFS Kubo API URL for large inference result storage (optional)
     #[arg(long, env = "QFC_IPFS_API_URL")]
     ipfs_api_url: Option<String>,
@@ -157,10 +163,14 @@ async fn main() -> Result<()> {
     let storage_config = StorageConfig {
         path: args.datadir.join("db"),
         create_if_missing: true,
+        enable_statistics: args.db_statistics,
         ..Default::default()
     };
     let db = Database::open(storage_config)?;
-    info!("Database opened");
+    info!(
+        "Database opened (statistics: {})",
+        if args.db_statistics { "on" } else { "off" }
+    );
 
     // Create genesis config
     let genesis = if args.dev {
@@ -471,7 +481,8 @@ async fn main() -> Result<()> {
         proof_pool.clone(),
         args.chain_id,
     )
-    .with_rpc_metrics(rpc_metrics.clone());
+    .with_rpc_metrics(rpc_metrics.clone())
+    .with_storage(db.clone());
     if let Some(ref sync) = _sync_manager {
         metrics_server =
             metrics_server.with_sync_status(sync.clone() as Arc<dyn qfc_rpc::SyncStatusProvider>);

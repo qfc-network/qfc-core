@@ -260,6 +260,76 @@ groups:
             The exporter observed a canonical-chain rewrite (scrape-granularity
             detection). Investigate consensus health and peer divergence.
 
+  # ----------------------------------------------------------- rocksdb (T2.1)
+  # Metric sources: crates/qfc-node/src/metrics.rs `render_storage_metrics`.
+  # Property gauges (qfc_rocksdb_write_stopped, qfc_rocksdb_pending_compaction_bytes,
+  # qfc_rocksdb_l0_files, ...) are always exported; ticker counters
+  # (qfc_rocksdb_stall_micros_total, ...) require the node to run with
+  # --db-statistics (check qfc_storage_statistics_enabled). Alerts on ticker
+  # metrics simply never fire on nodes with statistics off — the hard-stop
+  # property alert below covers those nodes too.
+  - name: qfc-rocksdb
+    rules:
+      # Hard stall: RocksDB has stopped accepting writes entirely. The node
+      # cannot import blocks while this is 1. Property-based: fires even
+      # without --db-statistics.
+      - alert: QfcRocksdbWriteStopped
+        expr: qfc_rocksdb_write_stopped == 1
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "RocksDB writes are STOPPED on {{ $labels.instance }}"
+          description: >-
+            rocksdb.is-write-stopped = 1: L0/memtable/pending-compaction limits
+            were hit and writes are blocked. Block import is stalled. Check
+            qfc_rocksdb_l0_files and qfc_rocksdb_pending_compaction_bytes.
+
+      # Sustained soft stall: stall.micros is cumulative microseconds writer
+      # threads spent stalled, so rate() is stalled-µs per second. 50000 = 5%
+      # of wall-clock time spent stalled, sustained for 10m. Needs
+      # --db-statistics.
+      - alert: QfcRocksdbWriteStall
+        expr: rate(qfc_rocksdb_stall_micros_total[5m]) > 50000
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "RocksDB write stalls >5% of wall time on {{ $labels.instance }}"
+          description: >-
+            Compaction/flush cannot keep up with the write rate
+            ({{ $value | printf "%.0f" }}µs stalled per second). Check
+            pending-compaction bytes and L0 file counts per CF.
+
+      # Absolute compaction backlog. Property-based; pending bytes are per-CF,
+      # so sum to a node-level debt figure.
+      - alert: QfcRocksdbCompactionBacklog
+        expr: sum by (instance, job) (qfc_rocksdb_pending_compaction_bytes) > 64 * 1024 * 1024 * 1024
+        for: 30m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "RocksDB pending compaction backlog >64GiB ({{ $labels.instance }})"
+          description: >-
+            Total estimate-pending-compaction-bytes has exceeded 64GiB for 30m;
+            the LSM tree is falling behind and write stalls will follow.
+
+      # Growing backlog: debt rising for a sustained period while already
+      # non-trivial (>8GiB) — catches the trend before the absolute alert.
+      - alert: QfcRocksdbCompactionBacklogGrowing
+        expr: |
+          sum by (instance, job) (deriv(qfc_rocksdb_pending_compaction_bytes[30m])) > 0
+          and
+          sum by (instance, job) (qfc_rocksdb_pending_compaction_bytes) > 8 * 1024 * 1024 * 1024
+        for: 30m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "RocksDB compaction backlog growing on {{ $labels.instance }}"
+          description: >-
+            Pending compaction bytes have been trending upward for 30m from an
+            already-elevated level. Compaction is not keeping pace with writes.
+
   # ------------------------------------------------------------- placeholders
   #
   # T4 (DR automation) — backup freshness. Enable once the backup task exports
@@ -281,24 +351,3 @@ groups:
   #         severity: page
   #       annotations:
   #         summary: "No successful backup for >12h ({{ $labels.instance }})"
-  #
-  # T2.1 (RocksDB statistics export) — write-stall and compaction pressure.
-  # Enable once qfc-storage exports rocksdb statistics (parallel branch).
-  #
-  # - name: qfc-rocksdb
-  #   rules:
-  #     - alert: QfcRocksdbWriteStall
-  #       expr: rate(qfc_rocksdb_stall_micros_total[5m]) > 0
-  #       for: 5m
-  #       labels:
-  #         severity: ticket
-  #       annotations:
-  #         summary: "RocksDB write stalls on {{ $labels.instance }}"
-  #         description: "Compaction/flush cannot keep up with the write rate."
-  #     - alert: QfcRocksdbCompactionBacklog
-  #       expr: qfc_rocksdb_pending_compaction_bytes > 64 * 1024 * 1024 * 1024
-  #       for: 30m
-  #       labels:
-  #         severity: ticket
-  #       annotations:
-  #         summary: "RocksDB pending compaction backlog >64GiB ({{ $labels.instance }})"
