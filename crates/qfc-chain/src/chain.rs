@@ -13,7 +13,7 @@ use qfc_types::{
     ValidatorNode, U256,
 };
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Chain configuration
 #[derive(Clone, Debug)]
@@ -113,11 +113,14 @@ impl Chain {
                 info!("Restored state root from head block: {}", state_root);
             }
 
-            // Try to load validators from checkpoint
-            self.load_validator_checkpoint();
-
-            // Register genesis validators with consensus engine (as fallback)
-            self.register_genesis_validators();
+            // Restore consensus state (validators, epoch, finalized height)
+            // from the latest checkpoint. Only fall back to re-deriving from
+            // genesis when no usable checkpoint exists — registering genesis
+            // validators after a successful restore would clobber the
+            // checkpointed state (stake, scores, jail status, epoch).
+            if !self.load_validator_checkpoint() {
+                self.register_genesis_validators();
+            }
 
             info!("Loaded chain with genesis: {}", hash);
             return Ok(());
@@ -203,21 +206,30 @@ impl Chain {
         }
     }
 
-    /// Load validator checkpoint from storage
-    fn load_validator_checkpoint(&self) {
+    /// Load the latest validator checkpoint from storage and restore
+    /// consensus state from it. Returns `true` if a checkpoint was restored.
+    fn load_validator_checkpoint(&self) -> bool {
         match self.consensus.load_latest_checkpoint(&self.db) {
             Ok(Some(checkpoint)) => {
                 self.consensus.restore_from_checkpoint(&checkpoint);
                 info!(
-                    "Loaded validator checkpoint: epoch={}, height={}",
-                    checkpoint.epoch, checkpoint.block_height
+                    "Loaded validator checkpoint: epoch={}, height={}, validators={}",
+                    checkpoint.epoch,
+                    checkpoint.block_height,
+                    checkpoint.validators.len()
                 );
+                true
             }
             Ok(None) => {
                 debug!("No validator checkpoint found, using genesis validators");
+                false
             }
             Err(e) => {
-                debug!("Failed to load validator checkpoint: {}", e);
+                warn!(
+                    "Failed to load validator checkpoint, using genesis validators: {}",
+                    e
+                );
+                false
             }
         }
     }
@@ -238,7 +250,7 @@ impl Chain {
                 );
             }
             Err(e) => {
-                debug!("Failed to create checkpoint: {}", e);
+                warn!("Failed to create checkpoint: {}", e);
             }
         }
 
@@ -679,6 +691,11 @@ impl Chain {
         // Update in-memory head (only after the durable commit succeeded)
         *self.head.write() = Some(SealedBlock::new(block_hash, block.clone()));
 
+        // Maybe create checkpoint at epoch boundary — the producer path must
+        // checkpoint too, otherwise a block-producing node never persists
+        // consensus state and every restart re-derives from genesis.
+        let _ = self.maybe_create_checkpoint(block.number());
+
         debug!(
             "Stored produced block {} at height {}",
             block_hash,
@@ -904,5 +921,140 @@ mod tests {
             .get(cf::METADATA, qfc_storage::meta::LATEST_STATE_ROOT)
             .unwrap()
             .is_some());
+    }
+
+    // ============ Checkpoint fast restart ============
+
+    fn storage_config(path: &std::path::Path) -> qfc_storage::StorageConfig {
+        qfc_storage::StorageConfig {
+            path: path.to_path_buf(),
+            create_if_missing: true,
+            ..Default::default()
+        }
+    }
+
+    /// Produce dummy blocks up to `height` so an epoch-boundary checkpoint
+    /// (every BLOCKS_PER_EPOCH blocks) is written by the producer path.
+    fn produce_blocks(chain: &Chain, from: u64, to: u64) {
+        let mut parent_hash = chain.head().unwrap().hash;
+        for number in from..=to {
+            let mut block = Block::default();
+            block.header.number = number;
+            block.header.parent_hash = parent_hash;
+            block.header.state_root = chain.state_root();
+            chain.store_produced_block(&block, &[]).unwrap();
+            parent_hash = blake3_hash(&block.header_bytes());
+        }
+    }
+
+    fn test_validator_set() -> Vec<ValidatorNode> {
+        (1..=3u8)
+            .map(|i| {
+                let mut v = ValidatorNode::default();
+                v.address = Address::new([i; 20]);
+                v.stake = U256::from_u64(10_000 * i as u64);
+                v.contribution_score = 4242;
+                v
+            })
+            .collect()
+    }
+
+    /// Full restart path: build consensus state, write the epoch-boundary
+    /// checkpoint via block production, drop everything, reopen the same DB,
+    /// and assert epoch / validators / finalized height are restored from
+    /// the checkpoint instead of being re-derived from genesis.
+    #[test]
+    fn test_restart_restores_consensus_state_from_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+
+        {
+            let db = Database::open(storage_config(dir.path())).unwrap();
+            let consensus = Arc::new(ConsensusEngine::new(ConsensusConfig::default()));
+            let chain = Chain::new(db, ChainConfig::default(), consensus.clone()).unwrap();
+
+            // Consensus state that genesis init could never produce.
+            // (start_epoch first: it recalculates contribution scores, which
+            // would overwrite the sentinel score set below.)
+            consensus.start_epoch(7, [0xab; 32]);
+            consensus.update_validators(test_validator_set());
+            consensus.set_finalized_height(2);
+
+            // Height 3 = BLOCKS_PER_EPOCH boundary -> checkpoint written
+            produce_blocks(&chain, 1, qfc_types::BLOCKS_PER_EPOCH);
+        } // chain + db dropped, releasing the RocksDB lock
+
+        let db = Database::open(storage_config(dir.path())).unwrap();
+        let consensus = Arc::new(ConsensusEngine::new(ConsensusConfig::default()));
+        let chain = Chain::new(db, ChainConfig::default(), consensus.clone()).unwrap();
+
+        // Restored from checkpoint, not re-derived from genesis
+        assert_eq!(consensus.get_epoch().number, 7);
+        assert_eq!(consensus.get_epoch().seed, [0xab; 32]);
+        assert_eq!(consensus.finalized_height(), 2);
+
+        let validators = consensus.get_validators();
+        assert_eq!(validators.len(), 3);
+        assert_eq!(validators[0].address, Address::new([1; 20]));
+        assert_eq!(validators[0].contribution_score, 4242);
+        assert_eq!(validators[2].stake, U256::from_u64(30_000));
+
+        // Chain head itself was restored as before
+        assert_eq!(chain.block_number(), qfc_types::BLOCKS_PER_EPOCH);
+    }
+
+    /// If the newest checkpoint entry is corrupt, restart must fall back to
+    /// the previous good checkpoint instead of panicking or losing state.
+    #[test]
+    fn test_restart_falls_back_on_corrupt_latest_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+
+        {
+            let db = Database::open(storage_config(dir.path())).unwrap();
+            let consensus = Arc::new(ConsensusEngine::new(ConsensusConfig::default()));
+            let chain = Chain::new(db.clone(), ChainConfig::default(), consensus.clone()).unwrap();
+
+            consensus.start_epoch(7, [0xab; 32]);
+            consensus.update_validators(test_validator_set());
+            produce_blocks(&chain, 1, qfc_types::BLOCKS_PER_EPOCH);
+
+            // Corrupt entry at a newer epoch than the good checkpoint
+            db.put(cf::CHECKPOINTS, &8u64.to_be_bytes(), b"corrupt checkpoint")
+                .unwrap();
+        }
+
+        let db = Database::open(storage_config(dir.path())).unwrap();
+        let consensus = Arc::new(ConsensusEngine::new(ConsensusConfig::default()));
+        let _chain = Chain::new(db, ChainConfig::default(), consensus.clone()).unwrap();
+
+        // Fell back to the good epoch-7 checkpoint
+        assert_eq!(consensus.get_epoch().number, 7);
+        assert_eq!(consensus.get_validators().len(), 3);
+    }
+
+    /// Without any checkpoint, restart keeps the previous behavior: genesis
+    /// validators are registered as fallback.
+    #[test]
+    fn test_restart_without_checkpoint_uses_genesis_validators() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let genesis_validators;
+        {
+            let db = Database::open(storage_config(dir.path())).unwrap();
+            let consensus = Arc::new(ConsensusEngine::new(ConsensusConfig::default()));
+            let _chain = Chain::new(db, ChainConfig::default(), consensus.clone()).unwrap();
+            genesis_validators = consensus.get_validators();
+            // No blocks produced -> no checkpoint written
+        }
+
+        let db = Database::open(storage_config(dir.path())).unwrap();
+        let consensus = Arc::new(ConsensusEngine::new(ConsensusConfig::default()));
+        let _chain = Chain::new(db, ChainConfig::default(), consensus.clone()).unwrap();
+
+        assert_eq!(consensus.get_epoch().number, 0);
+        let restored = consensus.get_validators();
+        assert_eq!(restored.len(), genesis_validators.len());
+        for (a, b) in restored.iter().zip(genesis_validators.iter()) {
+            assert_eq!(a.address, b.address);
+        }
     }
 }
