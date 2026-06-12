@@ -349,6 +349,72 @@ groups:
   # qfc_snapshot_last_success_timestamp_seconds is 0 until the first success
   # after process start, so a node whose backups never succeed fires these
   # alerts too (age evaluates to ~now). The `for:` window absorbs restarts.
+  # ----------------------------------------------------------- watchdog (T6)
+  # Metric source: crates/qfc-watchdog/src/exporter.rs — the OUT-OF-PROCESS
+  # watchdog's own /metrics endpoint (default :6061), one watchdog per node.
+  # Scrape it as its own job:
+  #
+  #   - job_name: qfc-watchdog
+  #     scrape_interval: 15s
+  #     static_configs:
+  #       - targets: ["node-a:6061", "node-b:6061"]
+  #
+  # Design (docs/WATCHDOG.md): detection-first. The health score aggregates
+  # the watchdog's detectors (block-production stall, stuck sync, compaction
+  # stall, metrics-down, rpc-down); each firing detector subtracts its weight
+  # from 100. Action mode is opt-in (--action-cmd) and hard-gated; the alerts
+  # below are the human side of those gates.
+  - name: qfc-watchdog
+    rules:
+      # Sustained sub-100 health = some detector has been firing for 15m.
+      # Ticket, not page: the per-cause pages (QfcBlockProductionStalled,
+      # QfcRocksdbWriteStopped, QfcNodeDown) already cover the acute cases —
+      # this is the watchdog's own aggregated view for triage.
+      - alert: QfcWatchdogHealthScoreLow
+        expr: qfc_watchdog_health_score < 100
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Watchdog health score {{ $value }} on {{ $labels.instance }} for 15m"
+          description: >-
+            One or more watchdog detectors have been firing for 15 minutes.
+            Check qfc_watchdog_detector_firing == 1 for which, and the
+            watchdog logs for the evidence lines (detector FIRED entries).
+
+      # An automated restart happened. Always worth a look even when it
+      # worked: a node that needed restarting has an underlying problem, and
+      # automation that acts silently does not earn trust.
+      - alert: QfcWatchdogActionTaken
+        expr: increase(qfc_watchdog_actions_total[1h]) > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Watchdog executed a remediation action on {{ $labels.instance }}"
+          description: >-
+            The watchdog ran its --action-cmd (e.g. a node restart). Verify
+            the node recovered (qfc_watchdog_health_score back at 100) and
+            read the evidence dump in the watchdog logs. Repeated actions on
+            the same node mean the restart is treating a symptom.
+
+      # Automation is out of budget AND the node is still unhealthy: the
+      # watchdog is standing down by design — a human must take over now.
+      - alert: QfcWatchdogActionBudgetExhausted
+        expr: |
+          qfc_watchdog_action_budget_exhausted == 1
+          and
+          qfc_watchdog_health_score < 100
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Watchdog action budget exhausted, node still unhealthy ({{ $labels.instance }})"
+          description: >-
+            The watchdog wants to act but --max-actions-per-hour is spent
+            (restarts are not fixing it). Automation will keep alerting only.
+            Investigate the node directly; the watchdog logs carry the full
+            evidence for every action taken this hour.
+
   - name: qfc-backup-freshness
     rules:
       - alert: QfcSnapshotBackupStale

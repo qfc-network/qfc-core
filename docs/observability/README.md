@@ -63,6 +63,12 @@ and not exported, so the shipped numbers assume the recommended 1h interval
 `qfc_snapshot_*` series only exist on nodes started with
 `--snapshot-interval-secs`, so the rules are silent (no-data) elsewhere.
 
+The `qfc-watchdog` group (T6) watches the **watchdog's** own exporter (see
+the watchdog section at the bottom of this file) — scrape it as a separate
+`job_name: qfc-watchdog`. Its rules only produce data where a `qfc-watchdog`
+sidecar runs, and the action-related alerts only matter on nodes where action
+mode is enabled (`qfc_watchdog_action_mode_enabled 1`).
+
 The `qfc-rocksdb` group (T2.1) is active. Its property-based alerts
 (`QfcRocksdbWriteStopped`, `QfcRocksdbCompactionBacklog*`) work on every node;
 the stall-rate alert (`QfcRocksdbWriteStall`) only produces data on nodes
@@ -222,3 +228,35 @@ These are only exported when backups are enabled. Alert on age (see the
 `qfc-backup-freshness` group above); `..._last_success... == 0` plus a recent
 `..._last_attempt...` means runs are happening but failing — node logs carry
 the upload command's stderr.
+
+## Self-healing watchdog (T6) and its metrics
+
+`qfc-watchdog` (crates/qfc-watchdog) is an **out-of-process** sidecar that
+observes one node through this exporter plus an `eth_blockNumber` RPC probe,
+and serves its own hand-rendered Prometheus endpoint on
+`--watchdog-metrics-addr` (default `:6061`). Full design, detector catalog,
+gate semantics, and deployment examples: [docs/WATCHDOG.md](../WATCHDOG.md).
+
+Scrape config (one target per watchdog, one watchdog per node):
+
+```yaml
+scrape_configs:
+  - job_name: qfc-watchdog     # alert rules group `qfc-watchdog`
+    scrape_interval: 15s
+    static_configs:
+      - targets: ["node-a:6061", "node-b:6061"]
+```
+
+| Metric | Type | Labels | Source |
+|---|---|---|---|
+| `qfc_watchdog_health_score` | gauge | — | 100 minus the weights of firing detectors (clamped at 0) |
+| `qfc_watchdog_detector_firing` | gauge (0/1) | `detector` | one series per detector (`block_production_stall`, `stuck_sync`, `compaction_stall`, `metrics_down`, `rpc_down`) |
+| `qfc_watchdog_polls_total` | counter | — | poll cycles executed |
+| `qfc_watchdog_scrape_failures_total` | counter | — | failed scrapes of the node's `/metrics` |
+| `qfc_watchdog_rpc_probe_failures_total` | counter | — | failed `eth_blockNumber` probes |
+| `qfc_watchdog_actions_total` | counter | — | remediation actions executed (action mode only) |
+| `qfc_watchdog_action_failures_total` | counter | — | actions whose command exited non-zero / failed to spawn |
+| `qfc_watchdog_action_budget_exhausted` | gauge (0/1) | — | 1 while an action is wanted but `--max-actions-per-hour` is spent |
+| `qfc_watchdog_action_last_timestamp_seconds` | gauge | — | unix time of the last action (0 = none since start) |
+| `qfc_watchdog_action_mode_enabled` | gauge (0/1) | — | whether `--action-cmd` is configured |
+| `qfc_watchdog_info` | gauge | `version` | build info |
