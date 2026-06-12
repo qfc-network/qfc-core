@@ -12,6 +12,7 @@ use qfc_mempool::Mempool;
 use qfc_network::NetworkService;
 use qfc_rpc::metrics::RpcMetrics;
 use qfc_rpc::SyncStatusProvider;
+use qfc_storage::{cf, props, Database, Histogram, Ticker};
 use qfc_types::Hash;
 use std::fmt::Write as _;
 use std::net::SocketAddr;
@@ -39,6 +40,8 @@ pub struct MetricsServer {
     last_head: Mutex<Option<(u64, Hash)>>,
     /// T2.2: reorgs detected at scrape granularity (see `update_reorg_detection`)
     reorgs_detected: AtomicU64,
+    /// T2.1: handle to the live RocksDB for statistics/property export
+    storage: Option<Database>,
 }
 
 impl MetricsServer {
@@ -65,6 +68,7 @@ impl MetricsServer {
             rpc_metrics: None,
             last_head: Mutex::new(None),
             reorgs_detected: AtomicU64::new(0),
+            storage: None,
         }
     }
 
@@ -77,6 +81,13 @@ impl MetricsServer {
     /// Attach the RPC metrics registry shared with the RPC middleware (T2.2).
     pub fn with_rpc_metrics(mut self, rpc_metrics: Arc<RpcMetrics>) -> Self {
         self.rpc_metrics = Some(rpc_metrics);
+        self
+    }
+
+    /// Attach the live database for RocksDB statistics/property export (T2.1).
+    /// `Database` is a cheap `Arc` clone of the node's open DB.
+    pub fn with_storage(mut self, storage: Database) -> Self {
+        self.storage = Some(storage);
         self
     }
 
@@ -375,16 +386,207 @@ impl MetricsServer {
             rpc.render_prometheus(&mut out);
         }
 
-        // --- storage (T2.1, deferred) ---
-        // TODO(T2.1): RocksDB statistics export — compaction-stall counters,
-        // pending-compaction bytes, block-cache hit/miss, memtable size,
-        // per-CF read/write volume, WAL sync latency. Blocked on the
-        // qfc-storage statistics hook landing on a parallel branch (touches
-        // crates/qfc-storage/src/db.rs, owned by the T3 work). When it lands,
-        // render it here:
-        //   self.render_storage_metrics(&mut out);
+        // --- storage (T2.1) ---
+        if let Some(db) = &self.storage {
+            Self::render_storage_metrics(db, &mut out);
+        }
 
         out
+    }
+
+    /// T2.1: RocksDB metrics, two layers:
+    ///
+    /// 1. **Properties** (always exported): computed on demand from live
+    ///    engine state, no statistics overhead. Per-CF memtable size,
+    ///    pending-compaction bytes, immutable memtables, and L0 file count
+    ///    across all 18 CFs, plus DB-wide block-cache usage and the two
+    ///    write-stall condition gauges.
+    /// 2. **Statistics tickers/histograms** (only when the DB was opened with
+    ///    `enable_statistics`, i.e. `--db-statistics`): a deliberately small,
+    ///    alertable set — stall time, block-cache and bloom effectiveness,
+    ///    user/compaction/flush byte volume, and WAL sync count/bytes/latency.
+    ///    `qfc_storage_statistics_enabled` says which mode the node is in.
+    fn render_storage_metrics(db: &Database, out: &mut String) {
+        // --- properties: per-CF gauges (work without statistics) ---
+        let cf_props: &[(&str, &str, &str)] = &[
+            (
+                props::CUR_SIZE_ALL_MEM_TABLES,
+                "qfc_rocksdb_memtable_bytes",
+                "Approximate size of active and unflushed immutable memtables (bytes).",
+            ),
+            (
+                props::ESTIMATE_PENDING_COMPACTION_BYTES,
+                "qfc_rocksdb_pending_compaction_bytes",
+                "Estimated bytes compaction must rewrite to catch up (compaction debt).",
+            ),
+            (
+                props::NUM_IMMUTABLE_MEM_TABLE,
+                "qfc_rocksdb_immutable_memtables",
+                "Immutable memtables not yet flushed.",
+            ),
+            (
+                props::NUM_FILES_AT_LEVEL0,
+                "qfc_rocksdb_l0_files",
+                "SST files at level 0 (write stalls trigger when this grows).",
+            ),
+        ];
+        for (prop, name, help) in cf_props {
+            let _ = writeln!(out, "# HELP {name} {help}");
+            let _ = writeln!(out, "# TYPE {name} gauge");
+            for cf_name in cf::ALL {
+                if let Ok(Some(v)) = db.property_int_cf(cf_name, prop) {
+                    let _ = writeln!(out, "{name}{{cf=\"{cf_name}\"}} {v}");
+                }
+            }
+        }
+
+        // --- properties: DB-wide gauges ---
+        let db_props: &[(&str, &str, &str)] = &[
+            (
+                props::BLOCK_CACHE_USAGE,
+                "qfc_rocksdb_block_cache_usage_bytes",
+                "Memory used by the shared block cache (bytes).",
+            ),
+            (
+                props::IS_WRITE_STOPPED,
+                "qfc_rocksdb_write_stopped",
+                "1 if RocksDB has completely stopped writes (hard stall), else 0.",
+            ),
+            (
+                props::ACTUAL_DELAYED_WRITE_RATE,
+                "qfc_rocksdb_actual_delayed_write_rate",
+                "Current delayed-write rate in bytes/s (0 = writes not delayed).",
+            ),
+        ];
+        for (prop, name, help) in db_props {
+            if let Ok(Some(v)) = db.property_int(prop) {
+                let _ = writeln!(out, "# HELP {name} {help}");
+                let _ = writeln!(out, "# TYPE {name} gauge");
+                let _ = writeln!(out, "{name} {v}");
+            }
+        }
+
+        // --- statistics (tickers + histograms, gated on --db-statistics) ---
+        let enabled: u8 = if db.statistics_enabled() { 1 } else { 0 };
+        let _ = writeln!(
+            out,
+            "# HELP qfc_storage_statistics_enabled Whether RocksDB statistics collection is on (--db-statistics). Ticker metrics below are absent when 0."
+        );
+        let _ = writeln!(out, "# TYPE qfc_storage_statistics_enabled gauge");
+        let _ = writeln!(out, "qfc_storage_statistics_enabled {enabled}");
+
+        if !db.statistics_enabled() {
+            return;
+        }
+
+        let tickers: &[(Ticker, &str, &str)] = &[
+            (
+                Ticker::StallMicros,
+                "qfc_rocksdb_stall_micros_total",
+                "Cumulative microseconds writer threads spent stalled by compaction/flush backpressure.",
+            ),
+            (
+                Ticker::BlockCacheHit,
+                "qfc_rocksdb_block_cache_hits_total",
+                "Block cache hits (data + index + filter blocks).",
+            ),
+            (
+                Ticker::BlockCacheMiss,
+                "qfc_rocksdb_block_cache_misses_total",
+                "Block cache misses (data + index + filter blocks).",
+            ),
+            (
+                Ticker::BloomFilterUseful,
+                "qfc_rocksdb_bloom_filter_useful_total",
+                "Point lookups where a bloom filter avoided a data-block read.",
+            ),
+            (
+                Ticker::BytesWritten,
+                "qfc_rocksdb_bytes_written_total",
+                "Bytes written by user writes (WriteBatch payload).",
+            ),
+            (
+                Ticker::BytesRead,
+                "qfc_rocksdb_bytes_read_total",
+                "Bytes of values returned to user reads (Get).",
+            ),
+            (
+                Ticker::CompactReadBytes,
+                "qfc_rocksdb_compaction_read_bytes_total",
+                "Bytes read by compaction.",
+            ),
+            (
+                Ticker::CompactWriteBytes,
+                "qfc_rocksdb_compaction_write_bytes_total",
+                "Bytes written by compaction.",
+            ),
+            (
+                Ticker::FlushWriteBytes,
+                "qfc_rocksdb_flush_write_bytes_total",
+                "Bytes written by memtable flushes.",
+            ),
+            (
+                Ticker::WalFileSynced,
+                "qfc_rocksdb_wal_syncs_total",
+                "Number of WAL fsyncs.",
+            ),
+            (
+                Ticker::WalFileBytes,
+                "qfc_rocksdb_wal_bytes_total",
+                "Bytes written to the WAL.",
+            ),
+        ];
+        for (ticker, name, help) in tickers {
+            if let Some(v) = db.statistics_ticker(*ticker) {
+                let _ = writeln!(out, "# HELP {name} {help}");
+                let _ = writeln!(out, "# TYPE {name} counter");
+                let _ = writeln!(out, "{name} {v}");
+            }
+        }
+
+        // WAL sync latency: cumulative sum/count (rate(sum)/rate(count) gives
+        // the windowed mean) plus the engine-side p99 since DB open.
+        if let Some(h) = db.statistics_histogram(Histogram::WalFileSyncMicros) {
+            let sum_secs = h.sum as f64 / 1e6;
+            let p99_secs = h.p99 / 1e6;
+            let _ = writeln!(
+                out,
+                "# HELP qfc_rocksdb_wal_sync_duration_seconds_sum Cumulative time spent in WAL fsync."
+            );
+            let _ = writeln!(
+                out,
+                "# TYPE qfc_rocksdb_wal_sync_duration_seconds_sum counter"
+            );
+            let _ = writeln!(
+                out,
+                "qfc_rocksdb_wal_sync_duration_seconds_sum {sum_secs:.6}"
+            );
+            let _ = writeln!(
+                out,
+                "# HELP qfc_rocksdb_wal_sync_duration_seconds_count Number of WAL fsyncs measured."
+            );
+            let _ = writeln!(
+                out,
+                "# TYPE qfc_rocksdb_wal_sync_duration_seconds_count counter"
+            );
+            let _ = writeln!(
+                out,
+                "qfc_rocksdb_wal_sync_duration_seconds_count {}",
+                h.count
+            );
+            let _ = writeln!(
+                out,
+                "# HELP qfc_rocksdb_wal_sync_duration_seconds_p99 p99 WAL fsync latency since DB open (engine-side histogram)."
+            );
+            let _ = writeln!(
+                out,
+                "# TYPE qfc_rocksdb_wal_sync_duration_seconds_p99 gauge"
+            );
+            let _ = writeln!(
+                out,
+                "qfc_rocksdb_wal_sync_duration_seconds_p99 {p99_secs:.6}"
+            );
+        }
     }
 
     /// Wall-clock seconds since the head block's timestamp (block timestamps
@@ -470,21 +672,22 @@ mod tests {
         }
     }
 
-    /// T2.2: the exporter output must contain every metric name referenced by
-    /// docs/observability/ (dashboard + alert rules).
-    #[test]
-    fn render_metrics_includes_expected_metric_names() {
+    /// Build a `MetricsServer` over a temp DB (optionally with RocksDB
+    /// statistics) wired the same way `main.rs` does it. The returned
+    /// `TempDir` must stay alive as long as the server.
+    fn test_server(enable_statistics: bool) -> (MetricsServer, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
         let db = Database::open(StorageConfig {
             path: tmp.path().join("db"),
             create_if_missing: true,
+            enable_statistics,
             ..Default::default()
         })
         .unwrap();
         let consensus = Arc::new(ConsensusEngine::new(ConsensusConfig::default()));
         let chain = Arc::new(
             Chain::new(
-                db,
+                db.clone(),
                 ChainConfig {
                     chain_id: 9000,
                     genesis: GenesisConfig::dev(),
@@ -510,8 +713,16 @@ mod tests {
             9000,
         )
         .with_sync_status(Arc::new(FakeSync))
-        .with_rpc_metrics(rpc_metrics);
+        .with_rpc_metrics(rpc_metrics)
+        .with_storage(db);
+        (server, tmp)
+    }
 
+    /// T2.2/T2.1: the exporter output must contain every metric name
+    /// referenced by docs/observability/ (dashboard + alert rules).
+    #[test]
+    fn render_metrics_includes_expected_metric_names() {
+        let (server, _tmp) = test_server(true);
         let out = server.render_metrics();
 
         for name in [
@@ -535,10 +746,81 @@ mod tests {
             "qfc_rpc_requests_total",
             "qfc_rpc_request_duration_seconds_bucket",
             "qfc_rpc_errors_total",
+            // storage (T2.1) — properties, exported unconditionally
+            "qfc_rocksdb_memtable_bytes",
+            "qfc_rocksdb_pending_compaction_bytes",
+            "qfc_rocksdb_immutable_memtables",
+            "qfc_rocksdb_l0_files",
+            "qfc_rocksdb_block_cache_usage_bytes",
+            "qfc_rocksdb_write_stopped",
+            "qfc_rocksdb_actual_delayed_write_rate",
+            "qfc_storage_statistics_enabled",
+            // storage (T2.1) — statistics tickers (--db-statistics on)
+            "qfc_rocksdb_stall_micros_total",
+            "qfc_rocksdb_block_cache_hits_total",
+            "qfc_rocksdb_block_cache_misses_total",
+            "qfc_rocksdb_bloom_filter_useful_total",
+            "qfc_rocksdb_bytes_written_total",
+            "qfc_rocksdb_bytes_read_total",
+            "qfc_rocksdb_compaction_read_bytes_total",
+            "qfc_rocksdb_compaction_write_bytes_total",
+            "qfc_rocksdb_flush_write_bytes_total",
+            "qfc_rocksdb_wal_syncs_total",
+            "qfc_rocksdb_wal_bytes_total",
+            "qfc_rocksdb_wal_sync_duration_seconds_sum",
+            "qfc_rocksdb_wal_sync_duration_seconds_count",
+            "qfc_rocksdb_wal_sync_duration_seconds_p99",
         ] {
             assert!(
                 out.contains(name),
                 "missing metric `{name}` in exporter output:\n{out}"
+            );
+        }
+
+        assert!(out.contains("qfc_storage_statistics_enabled 1"));
+        // Per-CF metrics carry a {cf="..."} label for every CF in cf::ALL.
+        for cf_name in cf::ALL {
+            assert!(
+                out.contains(&format!("qfc_rocksdb_memtable_bytes{{cf=\"{cf_name}\"}}")),
+                "missing per-CF memtable metric for `{cf_name}`"
+            );
+        }
+    }
+
+    /// T2.1: with statistics off (the default), property metrics are still
+    /// exported but ticker/histogram metrics degrade to a single
+    /// `qfc_storage_statistics_enabled 0` gauge.
+    #[test]
+    fn render_metrics_degrades_without_statistics() {
+        let (server, _tmp) = test_server(false);
+        let out = server.render_metrics();
+
+        assert!(out.contains("qfc_storage_statistics_enabled 0"));
+
+        // Property-based metrics do not need statistics.
+        for name in [
+            "qfc_rocksdb_memtable_bytes",
+            "qfc_rocksdb_pending_compaction_bytes",
+            "qfc_rocksdb_immutable_memtables",
+            "qfc_rocksdb_l0_files",
+            "qfc_rocksdb_block_cache_usage_bytes",
+            "qfc_rocksdb_write_stopped",
+        ] {
+            assert!(
+                out.contains(name),
+                "property metric `{name}` should not be gated"
+            );
+        }
+
+        // Ticker/histogram metrics must be absent.
+        for name in [
+            "qfc_rocksdb_stall_micros_total",
+            "qfc_rocksdb_block_cache_hits_total",
+            "qfc_rocksdb_wal_sync_duration_seconds_sum",
+        ] {
+            assert!(
+                !out.contains(name),
+                "ticker metric `{name}` must not render without statistics"
             );
         }
     }
