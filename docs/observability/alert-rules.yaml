@@ -330,24 +330,50 @@ groups:
             Pending compaction bytes have been trending upward for 30m from an
             already-elevated level. Compaction is not keeping pace with writes.
 
-  # ------------------------------------------------------------- placeholders
+  # ------------------------------------------------- backup freshness (T4.2)
+  # Metric source: crates/qfc-node/src/metrics.rs `render_snapshot_backup_metrics`,
+  # fed by the snapshot backup task (crates/qfc-node/src/snapshot_backup.rs).
+  # The qfc_snapshot_* series only exist on nodes started with
+  # --snapshot-interval-secs, so these rules are no-data (silent) elsewhere.
   #
-  # T4 (DR automation) — backup freshness. Enable once the backup task exports
-  # qfc_backup_last_success_timestamp_seconds. Alert on AGE, not job success.
+  # We alert on AGE, not job success: a backup pipeline that "succeeds" but
+  # stopped running is the failure mode that loses data.
   #
-  # - name: qfc-backup-freshness
-  #   rules:
-  #     - alert: QfcBackupStale
-  #       expr: time() - qfc_backup_last_success_timestamp_seconds > 2 * 3600
-  #       for: 15m
-  #       labels:
-  #         severity: ticket
-  #       annotations:
-  #         summary: "Last successful backup is older than 2h ({{ $labels.instance }})"
-  #         description: "RPO at risk: snapshot shipping to object storage has not succeeded recently."
-  #     - alert: QfcBackupVeryStale
-  #       expr: time() - qfc_backup_last_success_timestamp_seconds > 12 * 3600
-  #       labels:
-  #         severity: page
-  #       annotations:
-  #         summary: "No successful backup for >12h ({{ $labels.instance }})"
+  # Threshold convention: stale at > 2x the deploy's --snapshot-interval-secs
+  # (one missed run + slack), page at clearly-broken. The snapshot interval is
+  # deploy-specific and not visible in any metric, so the 2x cannot be
+  # expressed generically in PromQL — the numbers below assume the recommended
+  # 1h interval (ticket at 2h = 2x1h, page at 12h). If you run a different
+  # interval, scale both thresholds accordingly (ticket = 2 * interval).
+  #
+  # qfc_snapshot_last_success_timestamp_seconds is 0 until the first success
+  # after process start, so a node whose backups never succeed fires these
+  # alerts too (age evaluates to ~now). The `for:` window absorbs restarts.
+  - name: qfc-backup-freshness
+    rules:
+      - alert: QfcSnapshotBackupStale
+        expr: time() - qfc_snapshot_last_success_timestamp_seconds > 2 * 3600
+        for: 15m
+        labels:
+          severity: ticket
+          slo: backup-freshness
+        annotations:
+          summary: "Last successful snapshot backup is older than 2h ({{ $labels.instance }})"
+          description: >-
+            RPO at risk: no snapshot has been created+shipped successfully for
+            2x the expected interval. Check qfc_snapshot_failures_total and
+            qfc_snapshot_last_attempt_timestamp_seconds — attempts without
+            successes mean the archive/upload step is failing (node logs have
+            the upload command stderr); no attempts mean the task is not
+            running.
+      - alert: QfcSnapshotBackupVeryStale
+        expr: time() - qfc_snapshot_last_success_timestamp_seconds > 12 * 3600
+        for: 15m
+        labels:
+          severity: page
+          slo: backup-freshness
+        annotations:
+          summary: "No successful snapshot backup for >12h ({{ $labels.instance }})"
+          description: >-
+            Disaster-recovery coverage is gone stale: a node loss now means
+            restoring from a >12h-old snapshot or a full peer re-sync.

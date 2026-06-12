@@ -3,6 +3,7 @@
 //! Lightweight `/metrics` endpoint using `tiny_http` on a background `std::thread`.
 //! Each scrape queries live state from shared `Arc` handles.
 
+use crate::snapshot_backup::SnapshotBackupMetrics;
 use parking_lot::{Mutex, RwLock};
 use qfc_ai_coordinator::ProofPool;
 use qfc_chain::Chain;
@@ -42,6 +43,9 @@ pub struct MetricsServer {
     reorgs_detected: AtomicU64,
     /// T2.1: handle to the live RocksDB for statistics/property export
     storage: Option<Database>,
+    /// T4.2: backup-freshness metrics, shared with the snapshot backup task.
+    /// Only present when backups are enabled (--snapshot-interval-secs).
+    snapshot_backup: Option<Arc<SnapshotBackupMetrics>>,
 }
 
 impl MetricsServer {
@@ -69,6 +73,7 @@ impl MetricsServer {
             last_head: Mutex::new(None),
             reorgs_detected: AtomicU64::new(0),
             storage: None,
+            snapshot_backup: None,
         }
     }
 
@@ -88,6 +93,15 @@ impl MetricsServer {
     /// `Database` is a cheap `Arc` clone of the node's open DB.
     pub fn with_storage(mut self, storage: Database) -> Self {
         self.storage = Some(storage);
+        self
+    }
+
+    /// Attach the backup-freshness metrics shared with the snapshot backup
+    /// task (T4.2). Only call when backups are enabled, so nodes without
+    /// backups simply do not export `qfc_snapshot_*` (alerts go to no-data
+    /// instead of firing on age 0).
+    pub fn with_snapshot_backup(mut self, metrics: Arc<SnapshotBackupMetrics>) -> Self {
+        self.snapshot_backup = Some(metrics);
         self
     }
 
@@ -391,7 +405,73 @@ impl MetricsServer {
             Self::render_storage_metrics(db, &mut out);
         }
 
+        // --- snapshot backups (T4.2) ---
+        if let Some(snap) = &self.snapshot_backup {
+            Self::render_snapshot_backup_metrics(snap, &mut out);
+        }
+
         out
+    }
+
+    /// T4.2: backup-freshness metrics. Only rendered when the snapshot
+    /// backup task is enabled (`--snapshot-interval-secs`). The alertable
+    /// signal is AGE — `time() - qfc_snapshot_last_success_timestamp_seconds`
+    /// — not per-run success/failure (see docs/observability/alert-rules.yaml,
+    /// group `qfc-backup-freshness`). Timestamps are 0 until the first
+    /// attempt/success after process start, which PromQL evaluates as
+    /// "infinitely stale" — exactly right for a node whose backups never ran.
+    fn render_snapshot_backup_metrics(snap: &SnapshotBackupMetrics, out: &mut String) {
+        let last_success = snap.last_success_unix.load(Ordering::Relaxed);
+        let _ = writeln!(
+            out,
+            "# HELP qfc_snapshot_last_success_timestamp_seconds Unix time of the last fully successful snapshot backup (snapshot + archive + upload). 0 = never since start."
+        );
+        let _ = writeln!(
+            out,
+            "# TYPE qfc_snapshot_last_success_timestamp_seconds gauge"
+        );
+        let _ = writeln!(
+            out,
+            "qfc_snapshot_last_success_timestamp_seconds {last_success}"
+        );
+
+        let last_attempt = snap.last_attempt_unix.load(Ordering::Relaxed);
+        let _ = writeln!(
+            out,
+            "# HELP qfc_snapshot_last_attempt_timestamp_seconds Unix time of the last snapshot backup attempt, successful or not. 0 = never since start."
+        );
+        let _ = writeln!(
+            out,
+            "# TYPE qfc_snapshot_last_attempt_timestamp_seconds gauge"
+        );
+        let _ = writeln!(
+            out,
+            "qfc_snapshot_last_attempt_timestamp_seconds {last_attempt}"
+        );
+
+        let failures = snap.failures_total.load(Ordering::Relaxed);
+        let _ = writeln!(
+            out,
+            "# HELP qfc_snapshot_failures_total Snapshot backup runs that failed (snapshot, archive, or upload step)."
+        );
+        let _ = writeln!(out, "# TYPE qfc_snapshot_failures_total counter");
+        let _ = writeln!(out, "qfc_snapshot_failures_total {failures}");
+
+        let duration = snap.last_duration_secs();
+        let _ = writeln!(
+            out,
+            "# HELP qfc_snapshot_duration_seconds Duration of the last successful snapshot backup run (checkpoint + tar + upload)."
+        );
+        let _ = writeln!(out, "# TYPE qfc_snapshot_duration_seconds gauge");
+        let _ = writeln!(out, "qfc_snapshot_duration_seconds {duration:.3}");
+
+        let size = snap.last_size_bytes.load(Ordering::Relaxed);
+        let _ = writeln!(
+            out,
+            "# HELP qfc_snapshot_size_bytes Size of the last successfully produced snapshot archive (.tar.gz)."
+        );
+        let _ = writeln!(out, "# TYPE qfc_snapshot_size_bytes gauge");
+        let _ = writeln!(out, "qfc_snapshot_size_bytes {size}");
     }
 
     /// T2.1: RocksDB metrics, two layers:
@@ -703,6 +783,18 @@ mod tests {
         rpc_metrics.request_started();
         rpc_metrics.request_finished("eth_blockNumber", std::time::Duration::from_millis(5), None);
 
+        // T4.2: backup-freshness metrics as the backup task would update them.
+        let snapshot_metrics = Arc::new(SnapshotBackupMetrics::default());
+        snapshot_metrics
+            .last_attempt_unix
+            .store(1_765_000_000, Ordering::Relaxed);
+        snapshot_metrics
+            .last_success_unix
+            .store(1_765_000_000, Ordering::Relaxed);
+        snapshot_metrics
+            .last_size_bytes
+            .store(4096, Ordering::Relaxed);
+
         let server = MetricsServer::new(
             "127.0.0.1:0".parse().unwrap(),
             chain,
@@ -714,7 +806,8 @@ mod tests {
         )
         .with_sync_status(Arc::new(FakeSync))
         .with_rpc_metrics(rpc_metrics)
-        .with_storage(db);
+        .with_storage(db)
+        .with_snapshot_backup(snapshot_metrics);
         (server, tmp)
     }
 
@@ -770,6 +863,12 @@ mod tests {
             "qfc_rocksdb_wal_sync_duration_seconds_sum",
             "qfc_rocksdb_wal_sync_duration_seconds_count",
             "qfc_rocksdb_wal_sync_duration_seconds_p99",
+            // snapshot backups (T4.2) — backup-freshness metrics
+            "qfc_snapshot_last_success_timestamp_seconds",
+            "qfc_snapshot_last_attempt_timestamp_seconds",
+            "qfc_snapshot_failures_total",
+            "qfc_snapshot_duration_seconds",
+            "qfc_snapshot_size_bytes",
         ] {
             assert!(
                 out.contains(name),
@@ -778,6 +877,10 @@ mod tests {
         }
 
         assert!(out.contains("qfc_storage_statistics_enabled 1"));
+        // T4.2: freshness gauges carry the values the backup task stored.
+        assert!(out.contains("qfc_snapshot_last_success_timestamp_seconds 1765000000"));
+        assert!(out.contains("qfc_snapshot_failures_total 0"));
+        assert!(out.contains("qfc_snapshot_size_bytes 4096"));
         // Per-CF metrics carry a {cf="..."} label for every CF in cf::ALL.
         for cf_name in cf::ALL {
             assert!(

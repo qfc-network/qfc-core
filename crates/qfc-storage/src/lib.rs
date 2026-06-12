@@ -6,8 +6,10 @@ mod batch;
 mod db;
 mod error;
 mod schema;
+mod snapshot;
 
 pub use batch::*;
 pub use db::*;
 pub use error::*;
 pub use schema::*;
+pub use snapshot::*;

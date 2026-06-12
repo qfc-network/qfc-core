@@ -596,6 +596,90 @@
         },
         "overrides": []
       }
+    },
+    {
+      "type": "row",
+      "title": "Backups (T4.2)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 57 }
+    },
+    {
+      "type": "stat",
+      "title": "Backup age (since last successful snapshot)",
+      "description": "time() - qfc_snapshot_last_success_timestamp_seconds. Only populated on nodes running with --snapshot-interval-secs. Thresholds assume the recommended 1h interval: stale (yellow) at 2h = 2x interval, broken (red) at 12h — matches the qfc-backup-freshness alert group.",
+      "gridPos": { "h": 7, "w": 4, "x": 0, "y": 58 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "time() - max(qfc_snapshot_last_success_timestamp_seconds{instance=~\"$instance\"})",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 7200 },
+              { "color": "red", "value": 43200 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Snapshot duration (checkpoint + tar + upload)",
+      "gridPos": { "h": 7, "w": 6, "x": 4, "y": 58 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "qfc_snapshot_duration_seconds{instance=~\"$instance\"}",
+          "legendFormat": "last run {{instance}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 10 } },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Snapshot archive size",
+      "gridPos": { "h": 7, "w": 7, "x": 10, "y": 58 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "qfc_snapshot_size_bytes{instance=~\"$instance\"}",
+          "legendFormat": "last archive {{instance}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "bytes", "custom": { "drawStyle": "line", "fillOpacity": 10 } },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Snapshot failures (increase, 6h)",
+      "gridPos": { "h": 7, "w": 7, "x": 17, "y": 58 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "increase(qfc_snapshot_failures_total{instance=~\"$instance\"}[6h])",
+          "legendFormat": "failures (6h) {{instance}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "none", "custom": { "drawStyle": "line", "fillOpacity": 10 } },
+        "overrides": []
+      }
     }
   ]
 }

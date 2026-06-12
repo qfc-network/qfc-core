@@ -6,6 +6,7 @@ mod dynamic_rewards;
 mod metrics;
 mod miner;
 mod producer;
+mod snapshot_backup;
 mod sync;
 
 use anyhow::Result;
@@ -118,6 +119,34 @@ struct Args {
     /// Run in light client mode (header-only sync, no state storage)
     #[arg(long, env = "QFC_LIGHT")]
     light: bool,
+
+    /// T4.2: take a live RocksDB snapshot (file-level checkpoint, near-instant)
+    /// every N seconds, pack it as <prefix>-<height>-<unix_ts>.tar.gz and
+    /// optionally ship it via --snapshot-upload-cmd. Unset/0 = disabled.
+    #[arg(long, env = "QFC_SNAPSHOT_INTERVAL_SECS")]
+    snapshot_interval_secs: Option<u64>,
+
+    /// Directory for snapshot archives (default: <datadir>/snapshots). Must
+    /// be on the same filesystem as the database for hard-link snapshots.
+    #[arg(long, env = "QFC_SNAPSHOT_DIR")]
+    snapshot_dir: Option<PathBuf>,
+
+    /// Shell command to ship each snapshot archive to object storage; {file}
+    /// is replaced with the archive path (appended if no placeholder).
+    /// Examples: "rclone copy {file} remote:qfc-backups/",
+    /// "aws s3 cp {file} s3://qfc-backups/", "mc cp {file} minio/qfc-backups/".
+    /// Failures are logged + counted (qfc_snapshot_failures_total), never fatal.
+    #[arg(long, env = "QFC_SNAPSHOT_UPLOAD_CMD")]
+    snapshot_upload_cmd: Option<String>,
+
+    /// How many snapshot archives to keep locally (older ones are pruned;
+    /// minimum 1).
+    #[arg(long, default_value_t = 2, env = "QFC_SNAPSHOT_RETAIN")]
+    snapshot_retain: usize,
+
+    /// Snapshot archive name prefix.
+    #[arg(long, default_value = "qfc-snapshot", env = "QFC_SNAPSHOT_PREFIX")]
+    snapshot_prefix: String,
 }
 
 #[tokio::main]
@@ -471,6 +500,27 @@ async fn main() -> Result<()> {
         false
     };
 
+    // T4.2: periodic snapshot backups (RocksDB checkpoint → tar.gz → object
+    // storage). Off unless --snapshot-interval-secs is set.
+    let snapshot_metrics = match args.snapshot_interval_secs {
+        Some(secs) if secs > 0 => {
+            let backup_config = snapshot_backup::SnapshotBackupConfig {
+                interval: std::time::Duration::from_secs(secs),
+                dir: args
+                    .snapshot_dir
+                    .clone()
+                    .unwrap_or_else(|| args.datadir.join("snapshots")),
+                prefix: args.snapshot_prefix.clone(),
+                upload_cmd: args.snapshot_upload_cmd.clone(),
+                retain: args.snapshot_retain.max(1),
+            };
+            let backup_metrics = Arc::new(snapshot_backup::SnapshotBackupMetrics::default());
+            snapshot_backup::spawn(db.clone(), backup_config, backup_metrics.clone());
+            Some(backup_metrics)
+        }
+        _ => None,
+    };
+
     // Start Prometheus metrics server
     let mut metrics_server = metrics::MetricsServer::new(
         args.metrics_addr,
@@ -486,6 +536,9 @@ async fn main() -> Result<()> {
     if let Some(ref sync) = _sync_manager {
         metrics_server =
             metrics_server.with_sync_status(sync.clone() as Arc<dyn qfc_rpc::SyncStatusProvider>);
+    }
+    if let Some(snap) = snapshot_metrics {
+        metrics_server = metrics_server.with_snapshot_backup(snap);
     }
     metrics_server.start();
 

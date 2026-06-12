@@ -523,6 +523,12 @@ impl Database {
         &self.config.path
     }
 
+    /// Crate-internal handle to the underlying RocksDB instance (used by the
+    /// snapshot module to create file-level checkpoints).
+    pub(crate) fn rocksdb(&self) -> &DBWithThreadMode<MultiThreaded> {
+        &self.db
+    }
+
     /// Compact the database
     pub fn compact(&self) -> Result<()> {
         for cf_name in cf::ALL {

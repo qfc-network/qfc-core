@@ -36,6 +36,8 @@ hex.workspace = true
 qfc-inference.workspace = true
 qfc-ai-coordinator.workspace = true
 tiny_http.workspace = true
+tar.workspace = true
+flate2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
