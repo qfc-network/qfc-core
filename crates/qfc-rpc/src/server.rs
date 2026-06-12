@@ -2444,9 +2444,9 @@ impl QfcApiServer for RpcServer {
         // reject entries where weights_hash and assembled_hash disagree (a
         // registry entry with both set must have them equal).
         if let Some(manifest) = &request.shard_manifest {
-            manifest.validate().map_err(|e| {
-                RpcError::InvalidParams(format!("invalid shard manifest: {}", e))
-            })?;
+            manifest
+                .validate()
+                .map_err(|e| RpcError::InvalidParams(format!("invalid shard manifest: {}", e)))?;
             if let Some(wh) = weights_hash {
                 if wh != manifest.assembled_hash {
                     return Err(RpcError::InvalidParams(format!(

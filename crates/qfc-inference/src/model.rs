@@ -291,7 +291,11 @@ impl ModelCache {
 
         downloader.download_and_assemble(manifest, &dest)?;
 
-        self.register(info.id.clone(), model_dir.clone(), manifest.total_size_bytes);
+        self.register(
+            info.id.clone(),
+            model_dir.clone(),
+            manifest.total_size_bytes,
+        );
         self.evict_lru();
 
         Ok(model_dir)
@@ -661,8 +665,7 @@ mod tests {
 
     #[test]
     fn test_ensure_sharded_model_weights_hash_mismatch() {
-        let dir =
-            std::env::temp_dir().join(format!("qfc_sharded_mismatch_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("qfc_sharded_mismatch_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
 
         let downloader =

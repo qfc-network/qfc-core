@@ -25,9 +25,7 @@ use crate::data_store::LocalDataStore;
 use crate::InferenceError;
 
 /// One byte-range shard of a model weight file.
-#[derive(
-    Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize, Serialize, Deserialize,
-)]
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
 pub struct ShardEntry {
     /// IPFS CID of the shard bytes (empty until published to IPFS)
     pub cid: String,
@@ -44,9 +42,7 @@ pub struct ShardEntry {
 ///
 /// Concatenating the shards in order yields the weight file; its Blake3
 /// hash must equal `assembled_hash` (and `ModelInfo::weights_hash` when set).
-#[derive(
-    Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize, Serialize, Deserialize,
-)]
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
 pub struct ShardManifest {
     /// Shards in file order (concatenation order = byte order)
     pub shards: Vec<ShardEntry>,
@@ -106,7 +102,11 @@ impl ShardManifest {
         }
 
         // Layer ranges: all-or-none, each non-empty, contiguous and in order.
-        let with_range = self.shards.iter().filter(|s| s.layer_range.is_some()).count();
+        let with_range = self
+            .shards
+            .iter()
+            .filter(|s| s.layer_range.is_some())
+            .count();
         if with_range > 0 {
             if with_range != self.shards.len() {
                 return Err(InferenceError::ShardVerification(
@@ -716,7 +716,9 @@ mod tests {
 
     #[test]
     fn test_validate_rejects_invalid_cid() {
-        for bad_cid in ["../evil", "Qm/Foo", "cid?x=1", "cid#frag", "cid%2e", "cid foo"] {
+        for bad_cid in [
+            "../evil", "Qm/Foo", "cid?x=1", "cid#frag", "cid%2e", "cid foo",
+        ] {
             let mut entry = make_entry(b"abc");
             entry.cid = bad_cid.to_string();
             let manifest = ShardManifest {
@@ -734,7 +736,11 @@ mod tests {
         }
 
         // Valid CIDv0/CIDv1 shapes (and the pre-upload empty cid) pass.
-        for ok_cid in ["QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG", "bafybeigdyrzt5", ""] {
+        for ok_cid in [
+            "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG",
+            "bafybeigdyrzt5",
+            "",
+        ] {
             let mut entry = make_entry(b"abc");
             entry.cid = ok_cid.to_string();
             let manifest = ShardManifest {
@@ -742,7 +748,11 @@ mod tests {
                 total_size_bytes: 3,
                 assembled_hash: Hash::ZERO,
             };
-            assert!(manifest.validate().is_ok(), "cid {:?} should be valid", ok_cid);
+            assert!(
+                manifest.validate().is_ok(),
+                "cid {:?} should be valid",
+                ok_cid
+            );
         }
     }
 
@@ -823,7 +833,8 @@ mod tests {
     fn test_tampered_shard_fails_integrity() {
         let dir = test_dir("tamper");
         let shard_dir = dir.join("shards");
-        let downloader = ShardDownloader::new("http://invalid.invalid:1", shard_dir.clone()).unwrap();
+        let downloader =
+            ShardDownloader::new("http://invalid.invalid:1", shard_dir.clone()).unwrap();
 
         let shard: Vec<u8> = vec![0x33; 512];
         let data_ref = downloader.store().put(&shard).unwrap();

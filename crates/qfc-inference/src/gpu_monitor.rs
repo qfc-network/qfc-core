@@ -273,11 +273,10 @@ fn get_windows_memory() -> (u64, u64) {
         .and_then(|o| {
             if o.status.success() {
                 let stdout = String::from_utf8_lossy(&o.stdout).to_string();
-                stdout.lines()
-                    .find_map(|line| {
-                        line.strip_prefix("TotalPhysicalMemory=")
-                            .and_then(|v| v.trim().parse::<u64>().ok())
-                    })
+                stdout.lines().find_map(|line| {
+                    line.strip_prefix("TotalPhysicalMemory=")
+                        .and_then(|v| v.trim().parse::<u64>().ok())
+                })
             } else {
                 None
             }
@@ -292,11 +291,10 @@ fn get_windows_memory() -> (u64, u64) {
         .and_then(|o| {
             if o.status.success() {
                 let stdout = String::from_utf8_lossy(&o.stdout).to_string();
-                stdout.lines()
-                    .find_map(|line| {
-                        line.strip_prefix("FreePhysicalMemory=")
-                            .and_then(|v| v.trim().parse::<u64>().ok())
-                    })
+                stdout.lines().find_map(|line| {
+                    line.strip_prefix("FreePhysicalMemory=")
+                        .and_then(|v| v.trim().parse::<u64>().ok())
+                })
             } else {
                 None
             }
