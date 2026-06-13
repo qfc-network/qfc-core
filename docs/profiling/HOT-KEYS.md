@@ -179,9 +179,17 @@ stable keys (code, transactions, receipts) and for per-CF traffic *volume*.
 - Counts are estimates: ±`sqrt(64/T)` relative sampling noise plus the
   space-saving bound surfaced per entry as `max_overestimate`.
 
-## Follow-up (deferred)
+## Follow-up
 
-Exporter/RPC wiring (Prometheus surface for `hot_key_report` /
-`hot_account_report`, periodic windowing in the node) is deferred to the
-orchestrator — T2's exporter is the natural home; this item deliberately
-stops at the library + reports to keep the scope at qfc-storage/qfc-state.
+**Exporter wiring — done.** The Prometheus surface for `hot_key_report` /
+`hot_account_report` is now wired into the node's `/metrics` endpoint, gated
+on a new `--hot-key-sampling <N>` flag (env `QFC_HOT_KEY_SAMPLING`). To avoid
+leaking churning identities as labels, the exporter publishes bounded
+aggregates and skew gauges only (per-CF traffic estimates, hottest-entry
+counts); the ranked identities above stay in the report accessors. Full metric
+inventory: [docs/observability/README.md](../observability/README.md#metric-inventory--hot-key--hot-account-analytics-t8).
+
+Still open: a Grafana panel group for the hot-key metrics, an RPC method to
+fetch the full ranked `hot_key_report` on demand, and periodic window resets
+(the exporter reads a cumulative window; `reset_hot_key_stats` exists but no
+scheduler calls it yet).
