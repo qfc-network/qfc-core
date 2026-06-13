@@ -203,6 +203,43 @@ Notes:
   engine-side p99 gauge. RocksDB's C API exposes histogram percentiles, not
   bucket boundaries, so a full Prometheus histogram is not derivable.
 
+## Metric inventory — hot-key / hot-account analytics (T8)
+
+Exported only when the node runs with `--hot-key-sampling <N>` (env
+`QFC_HOT_KEY_SAMPLING`; 1-in-N access sampling, N rounded up to a power of
+two). When sampling is off, the single gauge `qfc_hot_key_sampling_enabled 0`
+is emitted and nothing else — zero per-op cost in the hot path.
+
+**Cardinality:** the top-N hot *identities* (raw keys, account addresses, code
+hashes) are deliberately **not** Prometheus labels — the hot set churns
+window-to-window and would leak unbounded short-lived series (same reasoning
+as the T5 tier-only labels). What is exported is bounded and stable: per-CF
+traffic estimates (one series per column family) and per-CF / DB-wide **skew**
+gauges (the hottest entry's *count*, without its identity). The actual ranked
+identities live in `Database::hot_key_report` / `StateDB::hot_account_report`
+and in the findings: [docs/profiling/HOT-KEYS.md](../profiling/HOT-KEYS.md).
+
+| Metric | Type | Labels | Source |
+|---|---|---|---|
+| `qfc_hot_key_sampling_enabled` | gauge (0/1) | — | `--hot-key-sampling` flag (always emitted) |
+| `qfc_hot_key_sampling_rate` | gauge | — | effective 1-in-N rate (power of two) |
+| `qfc_hot_key_window_start_timestamp_seconds` | gauge | — | window open time (resets with `reset_hot_key_stats`) |
+| `qfc_hot_key_estimated_reads` | gauge | `cf` | per-CF sampled reads × rate |
+| `qfc_hot_key_estimated_writes` | gauge | `cf` | per-CF sampled writes × rate |
+| `qfc_hot_key_top_estimated_count` | gauge | `cf` | hottest key's estimated accesses in each CF (skew) |
+| `qfc_hot_account_estimated_reads` | gauge | — | sampled `get_account` × rate |
+| `qfc_hot_account_estimated_writes` | gauge | — | sampled `set_account` × rate |
+| `qfc_hot_account_estimated_code_reads` | gauge | — | sampled contract-code reads × rate |
+| `qfc_hot_account_top_estimated_count` | gauge | — | hottest account's estimated accesses (skew) |
+| `qfc_hot_code_top_estimated_count` | gauge | — | hottest bytecode's estimated reads (skew) |
+
+Accuracy caveat: per-CF key stats are complete (the storage sampler is shared
+across every `Database` clone). Per-account stats cover only the chain's
+persistent state handle (`chain.state()`); the sync path's transient
+`state_at` handles carry their own trackers and are not aggregated into the
+exporter. The estimates carry space-saving overestimation plus 1-in-N sampling
+noise (~`sqrt(N / true_count)` relative) — see HOT-KEYS.md for error bounds.
+
 ## Snapshot backups (T4.2) and the backup-freshness metrics
 
 Nodes started with `--snapshot-interval-secs <N>` (env

@@ -104,6 +104,13 @@ struct Args {
     #[arg(long, env = "QFC_DB_STATISTICS")]
     db_statistics: bool,
 
+    /// T8: enable hot-key/hot-account access sampling at a 1-in-N rate
+    /// (rounded up to a power of two; e.g. 64). Unset/0 = disabled (zero
+    /// per-op cost). Results surface on /metrics (aggregate skew gauges) and
+    /// via the in-memory report accessors. See docs/profiling/HOT-KEYS.md.
+    #[arg(long, env = "QFC_HOT_KEY_SAMPLING")]
+    hot_key_sampling: Option<u32>,
+
     /// IPFS Kubo API URL for large inference result storage (optional)
     #[arg(long, env = "QFC_IPFS_API_URL")]
     ipfs_api_url: Option<String>,
@@ -206,12 +213,17 @@ async fn main() -> Result<()> {
         path: args.datadir.join("db"),
         create_if_missing: true,
         enable_statistics: args.db_statistics,
+        hot_key_sampling: args.hot_key_sampling.filter(|&n| n > 0),
         ..Default::default()
     };
     let db = Database::open(storage_config)?;
     info!(
-        "Database opened (statistics: {})",
-        if args.db_statistics { "on" } else { "off" }
+        "Database opened (statistics: {}, hot-key sampling: {})",
+        if args.db_statistics { "on" } else { "off" },
+        match db.hot_key_sampling() {
+            Some(rate) => format!("1-in-{rate}"),
+            None => "off".to_string(),
+        }
     );
 
     // Create genesis config

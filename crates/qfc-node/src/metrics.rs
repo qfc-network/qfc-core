@@ -426,6 +426,9 @@ impl MetricsServer {
             Self::render_ai_quota_metrics(&snapshot, &mut out);
         }
 
+        // --- hot-key / hot-account analytics (T8) ---
+        self.render_hot_key_metrics(&mut out);
+
         out
     }
 
@@ -765,6 +768,151 @@ impl MetricsServer {
         }
     }
 
+    /// T8: hot-key / hot-account analytics.
+    ///
+    /// **Cardinality:** the top-N hot *identities* (raw keys, account
+    /// addresses, code hashes) are deliberately NOT exported as Prometheus
+    /// labels — the hot set churns window-to-window, which would leak
+    /// unbounded, short-lived time series (same reasoning as T5's tier-only
+    /// labels). What we export is bounded and stable: per-CF traffic
+    /// estimates (one series per `cf::ALL` entry) and per-CF / DB-wide skew
+    /// gauges (the hottest entry's *count*, without its identity). The actual
+    /// top-N identities live in `Database::hot_key_report` /
+    /// `StateDB::hot_account_report` and the findings in
+    /// `docs/profiling/HOT-KEYS.md`.
+    ///
+    /// **Accuracy caveat:** per-CF key stats are complete (the storage
+    /// sampler is shared across every `Database` clone). Per-account stats
+    /// cover only the chain's persistent state handle (`chain.state()`); the
+    /// sync path's transient `state_at` handles carry their own trackers and
+    /// are not aggregated here.
+    fn render_hot_key_metrics(&self, out: &mut String) {
+        const TOP_N: usize = 16;
+
+        let storage_report = self
+            .storage
+            .as_ref()
+            .and_then(|db| db.hot_key_report(TOP_N));
+
+        let enabled: u8 = if storage_report.is_some() { 1 } else { 0 };
+        let _ = writeln!(
+            out,
+            "# HELP qfc_hot_key_sampling_enabled 1 if T8 hot-key sampling is active, else 0."
+        );
+        let _ = writeln!(out, "# TYPE qfc_hot_key_sampling_enabled gauge");
+        let _ = writeln!(out, "qfc_hot_key_sampling_enabled {enabled}");
+
+        let Some(report) = storage_report else {
+            return;
+        };
+
+        let _ = writeln!(
+            out,
+            "# HELP qfc_hot_key_sampling_rate Effective 1-in-N sampling rate (power of two)."
+        );
+        let _ = writeln!(out, "# TYPE qfc_hot_key_sampling_rate gauge");
+        let _ = writeln!(out, "qfc_hot_key_sampling_rate {}", report.sampling_rate);
+
+        let _ = writeln!(
+            out,
+            "# HELP qfc_hot_key_window_start_timestamp_seconds Unix time the current sampling window opened (0 = never reset)."
+        );
+        let _ = writeln!(
+            out,
+            "# TYPE qfc_hot_key_window_start_timestamp_seconds gauge"
+        );
+        let _ = writeln!(
+            out,
+            "qfc_hot_key_window_start_timestamp_seconds {}",
+            report.window_start_unix_ms / 1000
+        );
+
+        // Per-CF estimated traffic (bounded by cf::ALL). Gauges: windowed
+        // estimates that reset with the sampling window.
+        let _ = writeln!(
+            out,
+            "# HELP qfc_hot_key_estimated_reads Estimated read ops per CF this window (sampled * rate)."
+        );
+        let _ = writeln!(out, "# TYPE qfc_hot_key_estimated_reads gauge");
+        for cf in &report.cfs {
+            let _ = writeln!(
+                out,
+                "qfc_hot_key_estimated_reads{{cf=\"{}\"}} {}",
+                cf.cf, cf.estimated_reads
+            );
+        }
+        let _ = writeln!(
+            out,
+            "# HELP qfc_hot_key_estimated_writes Estimated write ops per CF this window (sampled * rate)."
+        );
+        let _ = writeln!(out, "# TYPE qfc_hot_key_estimated_writes gauge");
+        for cf in &report.cfs {
+            let _ = writeln!(
+                out,
+                "qfc_hot_key_estimated_writes{{cf=\"{}\"}} {}",
+                cf.cf, cf.estimated_writes
+            );
+        }
+
+        // Per-CF skew: the hottest single key's estimated count (no identity).
+        let _ = writeln!(
+            out,
+            "# HELP qfc_hot_key_top_estimated_count Estimated access count of the hottest key in each CF (skew indicator)."
+        );
+        let _ = writeln!(out, "# TYPE qfc_hot_key_top_estimated_count gauge");
+        for cf in &report.cfs {
+            if let Some(top) = cf.top_keys.first() {
+                let _ = writeln!(
+                    out,
+                    "qfc_hot_key_top_estimated_count{{cf=\"{}\"}} {}",
+                    cf.cf, top.estimated_count
+                );
+            }
+        }
+
+        // Hot-account analytics from the chain's persistent state handle.
+        if let Some(acct) = self.chain.state().hot_account_report(TOP_N) {
+            let aggregates: &[(&str, &str, u64)] = &[
+                (
+                    "qfc_hot_account_estimated_reads",
+                    "Estimated account reads this window (sampled * rate).",
+                    acct.estimated_account_reads,
+                ),
+                (
+                    "qfc_hot_account_estimated_writes",
+                    "Estimated account writes this window (sampled * rate).",
+                    acct.estimated_account_writes,
+                ),
+                (
+                    "qfc_hot_account_estimated_code_reads",
+                    "Estimated contract-code reads this window (sampled * rate).",
+                    acct.estimated_code_reads,
+                ),
+            ];
+            for (name, help, value) in aggregates {
+                let _ = writeln!(out, "# HELP {name} {help}");
+                let _ = writeln!(out, "# TYPE {name} gauge");
+                let _ = writeln!(out, "{name} {value}");
+            }
+
+            let _ = writeln!(
+                out,
+                "# HELP qfc_hot_account_top_estimated_count Estimated access count of the hottest account (skew indicator)."
+            );
+            let _ = writeln!(out, "# TYPE qfc_hot_account_top_estimated_count gauge");
+            let top_account = acct.top_accounts.first().map_or(0, |a| a.estimated_count);
+            let _ = writeln!(out, "qfc_hot_account_top_estimated_count {top_account}");
+
+            let _ = writeln!(
+                out,
+                "# HELP qfc_hot_code_top_estimated_count Estimated read count of the hottest contract bytecode (skew indicator)."
+            );
+            let _ = writeln!(out, "# TYPE qfc_hot_code_top_estimated_count gauge");
+            let top_code = acct.top_code.first().map_or(0, |c| c.estimated_count);
+            let _ = writeln!(out, "qfc_hot_code_top_estimated_count {top_code}");
+        }
+    }
+
     /// Wall-clock seconds since the head block's timestamp (block timestamps
     /// are unix milliseconds). Returns 0 when the chain is empty or clocks
     /// disagree.
@@ -851,12 +999,16 @@ mod tests {
     /// Build a `MetricsServer` over a temp DB (optionally with RocksDB
     /// statistics) wired the same way `main.rs` does it. The returned
     /// `TempDir` must stay alive as long as the server.
-    fn test_server(enable_statistics: bool) -> (MetricsServer, tempfile::TempDir) {
+    fn test_server(
+        enable_statistics: bool,
+        hot_key_sampling: Option<u32>,
+    ) -> (MetricsServer, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
         let db = Database::open(StorageConfig {
             path: tmp.path().join("db"),
             create_if_missing: true,
             enable_statistics,
+            hot_key_sampling,
             ..Default::default()
         })
         .unwrap();
@@ -953,7 +1105,7 @@ mod tests {
     /// referenced by docs/observability/ (dashboard + alert rules).
     #[test]
     fn render_metrics_includes_expected_metric_names() {
-        let (server, _tmp) = test_server(true);
+        let (server, _tmp) = test_server(true, Some(1));
         let out = server.render_metrics();
 
         for name in [
@@ -1015,6 +1167,18 @@ mod tests {
             "qfc_ai_flops_metered_total",
             "qfc_ai_tenant_inflight",
             "qfc_ai_cost_report_last_timestamp_seconds",
+            // hot-key / hot-account analytics (T8)
+            "qfc_hot_key_sampling_enabled",
+            "qfc_hot_key_sampling_rate",
+            "qfc_hot_key_window_start_timestamp_seconds",
+            "qfc_hot_key_estimated_reads",
+            "qfc_hot_key_estimated_writes",
+            "qfc_hot_key_top_estimated_count",
+            "qfc_hot_account_estimated_reads",
+            "qfc_hot_account_estimated_writes",
+            "qfc_hot_account_estimated_code_reads",
+            "qfc_hot_account_top_estimated_count",
+            "qfc_hot_code_top_estimated_count",
         ] {
             assert!(
                 out.contains(name),
@@ -1040,6 +1204,9 @@ mod tests {
         assert!(out.contains("qfc_ai_flops_metered_total{tenant_tier=\"1\"} 1000000000"));
         assert!(out.contains("qfc_ai_tenant_inflight{tenant_tier=\"1\"} 0"));
         assert!(out.contains("qfc_ai_cost_report_last_timestamp_seconds 1765000000"));
+        // T8: sampling enabled at 1-in-1; genesis writes populate the reports.
+        assert!(out.contains("qfc_hot_key_sampling_enabled 1"));
+        assert!(out.contains("qfc_hot_key_sampling_rate 1"));
         // Per-CF metrics carry a {cf="..."} label for every CF in cf::ALL.
         for cf_name in cf::ALL {
             assert!(
@@ -1054,7 +1221,7 @@ mod tests {
     /// `qfc_storage_statistics_enabled 0` gauge.
     #[test]
     fn render_metrics_degrades_without_statistics() {
-        let (server, _tmp) = test_server(false);
+        let (server, _tmp) = test_server(false, Some(1));
         let out = server.render_metrics();
 
         assert!(out.contains("qfc_storage_statistics_enabled 0"));
@@ -1083,6 +1250,30 @@ mod tests {
             assert!(
                 !out.contains(name),
                 "ticker metric `{name}` must not render without statistics"
+            );
+        }
+    }
+
+    /// T8: with sampling off, only the single `enabled 0` gauge renders; the
+    /// detail/skew metrics must be absent (no zero-valued noise, no panic
+    /// from the `None` reports).
+    #[test]
+    fn render_metrics_hot_keys_disabled() {
+        let (server, _tmp) = test_server(false, None);
+        let out = server.render_metrics();
+
+        assert!(out.contains("qfc_hot_key_sampling_enabled 0"));
+        for name in [
+            "qfc_hot_key_sampling_rate",
+            "qfc_hot_key_estimated_reads",
+            "qfc_hot_key_top_estimated_count",
+            "qfc_hot_account_estimated_reads",
+            "qfc_hot_account_top_estimated_count",
+            "qfc_hot_code_top_estimated_count",
+        ] {
+            assert!(
+                !out.contains(name),
+                "hot-key detail metric `{name}` must not render when sampling is off"
             );
         }
     }
