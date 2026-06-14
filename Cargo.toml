@@ -25,6 +25,8 @@ members = [
     "crates/qfc-bridge",
     # v3: decentralized training (off-chain parameter server)
     "crates/qfc-ps",
+    # v3 A6: in-process end-to-end training pilot
+    "crates/qfc-training-pilot",
     # SRE T6: out-of-process self-healing watchdog (detection-first)
     "crates/qfc-watchdog",
 ]
@@ -145,6 +147,7 @@ qfc-ai-coordinator = { path = "crates/qfc-ai-coordinator" }
 qfc-miner = { path = "crates/qfc-miner" }
 qfc-bridge = { path = "crates/qfc-bridge" }
 qfc-ps = { path = "crates/qfc-ps" }
+qfc-training-pilot = { path = "crates/qfc-training-pilot" }
 qfc-watchdog = { path = "crates/qfc-watchdog" }
 
 [profile.release]
