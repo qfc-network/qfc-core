@@ -214,7 +214,9 @@ Add `--hot-key-window-secs <N>` (env `QFC_HOT_KEY_WINDOW_SECS`, 0 = cumulative)
 to make sampling **windowed**: every N seconds the node logs a ranked report
 (`tracing` target `qfc::hot_keys`) and resets the sketches, so estimates stay
 accurate and these gauges read per-window (a sawtooth) rather than
-cumulative-since-start.
+cumulative-since-start. The full ranked report (the hot *identities* kept out
+of the labels here) is also available on demand via the `qfc_hotKeyReport`
+JSON-RPC method (optional `topN`).
 
 **Cardinality:** the top-N hot *identities* (raw keys, account addresses, code
 hashes) are deliberately **not** Prometheus labels — the hot set churns

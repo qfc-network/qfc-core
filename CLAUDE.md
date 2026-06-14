@@ -96,6 +96,7 @@ Proof of Contribution (PoC) - 多维度贡献评分:
 - `qfc_getFinalizedBlock` - 最终确认区块
 - `qfc_getNetworkState` - 网络状态 (normal/congested/storage_shortage/under_attack)
 - `qfc_nodeInfo` - 节点信息
+- `qfc_hotKeyReport` - 热点 key/账户分析报告 (SRE T8, 参数 topN; 需 --hot-key-sampling)
 - `qfc_requestFaucet` - 请求测试币 (仅 dev 模式, chain_id=9000)
 - `qfc_getAgentInfo` - 查询 Agent 信息 (AgentRegistry 合约)
 - `qfc_listAgentsByOwner` - 按 owner 列出 Agent
