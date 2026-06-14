@@ -111,6 +111,14 @@ struct Args {
     #[arg(long, env = "QFC_HOT_KEY_SAMPLING")]
     hot_key_sampling: Option<u32>,
 
+    /// T8: hot-key sampling window in seconds. Every window the node logs a
+    /// ranked report (target `qfc::hot_keys`) and resets the sketches, so the
+    /// space-saving estimates stay accurate and the /metrics gauges read
+    /// per-window instead of cumulative-since-start. 0 = never reset
+    /// (cumulative). No effect without --hot-key-sampling.
+    #[arg(long, default_value_t = 0, env = "QFC_HOT_KEY_WINDOW_SECS")]
+    hot_key_window_secs: u64,
+
     /// IPFS Kubo API URL for large inference result storage (optional)
     #[arg(long, env = "QFC_IPFS_API_URL")]
     ipfs_api_url: Option<String>,
@@ -304,6 +312,10 @@ async fn main() -> Result<()> {
         args.ai_quotas.clone(),
         args.ai_cost_report_interval_secs,
     );
+
+    // T8: periodic hot-key/hot-account window reset (no-op unless sampling is
+    // on and a window is configured).
+    spawn_hot_key_window_task(db.clone(), chain.clone(), args.hot_key_window_secs);
 
     // v2.0 P2: Shared challenge generator, redundant verifier, task router
     let challenge_generator = Arc::new(RwLock::new(
@@ -681,4 +693,161 @@ fn spawn_ai_quota_task(
             }
         }
     });
+}
+
+/// T8: drive the hot-key/hot-account sampling window. Every
+/// `--hot-key-window-secs`, [`hot_key_window_tick`] logs a ranked report
+/// (target `qfc::hot_keys` — the permanent record of the hot *identities*
+/// that are deliberately kept out of the Prometheus labels) and resets both
+/// sketches, keeping the space-saving estimates accurate and making the
+/// `/metrics` gauges per-window instead of cumulative. No-op unless sampling
+/// is enabled and a window is configured.
+fn spawn_hot_key_window_task(db: Database, chain: Arc<Chain>, window_secs: u64) {
+    if window_secs == 0 || db.hot_key_sampling().is_none() {
+        return;
+    }
+    info!(
+        "Hot-key sampling window: {}s (reports logged to target qfc::hot_keys, then sketches reset)",
+        window_secs
+    );
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(window_secs));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // The first tick fires immediately; skip it so the first reset lands
+        // after a full window rather than at startup.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            hot_key_window_tick(&db, &chain);
+        }
+    });
+}
+
+/// Log the current hot-key/hot-account reports, then reset both windows.
+/// Split out from the spawn loop so it is directly unit-testable.
+fn hot_key_window_tick(db: &Database, chain: &Chain) {
+    const TOP_N: usize = 16;
+
+    if let Some(report) = db.hot_key_report(TOP_N) {
+        let busiest = report
+            .cfs
+            .iter()
+            .max_by_key(|c| c.estimated_reads + c.estimated_writes);
+        let hottest = report
+            .cfs
+            .iter()
+            .filter_map(|c| c.top_keys.first().map(|k| (c.cf.as_str(), k)))
+            .max_by_key(|(_, k)| k.estimated_count);
+        info!(
+            target: "qfc::hot_keys",
+            rate = report.sampling_rate,
+            cfs_active = report.cfs.len(),
+            busiest_cf = busiest.map(|c| c.cf.as_str()).unwrap_or("-"),
+            busiest_cf_reads = busiest.map(|c| c.estimated_reads).unwrap_or(0),
+            busiest_cf_writes = busiest.map(|c| c.estimated_writes).unwrap_or(0),
+            hottest_key_cf = hottest.map(|(cf, _)| cf).unwrap_or("-"),
+            hottest_key = hottest.map(|(_, k)| k.key_hex.as_str()).unwrap_or("-"),
+            hottest_key_count = hottest.map(|(_, k)| k.estimated_count).unwrap_or(0),
+            "hot-key window closed (storage)"
+        );
+        db.reset_hot_key_stats();
+    }
+
+    let state = chain.state();
+    if let Some(acct) = state.hot_account_report(TOP_N) {
+        let top_acct = acct.top_accounts.first();
+        let top_code = acct.top_code.first();
+        info!(
+            target: "qfc::hot_keys",
+            est_account_reads = acct.estimated_account_reads,
+            est_account_writes = acct.estimated_account_writes,
+            est_code_reads = acct.estimated_code_reads,
+            hottest_account = top_acct.map(|a| a.address.as_str()).unwrap_or("-"),
+            hottest_account_count = top_acct.map(|a| a.estimated_count).unwrap_or(0),
+            hottest_code = top_code.map(|c| c.code_hash.as_str()).unwrap_or("-"),
+            hottest_code_count = top_code.map(|c| c.estimated_count).unwrap_or(0),
+            "hot-key window closed (accounts)"
+        );
+        state.reset_hot_account_stats();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use qfc_chain::{ChainConfig, GenesisConfig};
+    use qfc_consensus::{ConsensusConfig, ConsensusEngine};
+
+    fn total_traffic(db: &Database) -> u64 {
+        db.hot_key_report(16)
+            .map(|r| {
+                r.cfs
+                    .iter()
+                    .map(|c| c.estimated_reads + c.estimated_writes)
+                    .sum()
+            })
+            .unwrap_or(0)
+    }
+
+    /// A window tick logs and then resets both sketches: traffic accumulated
+    /// before the tick is gone after it, and the window keeps sampling.
+    #[test]
+    fn hot_key_window_tick_resets_sketches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open(StorageConfig {
+            path: tmp.path().join("db"),
+            create_if_missing: true,
+            hot_key_sampling: Some(1),
+            ..Default::default()
+        })
+        .unwrap();
+        let consensus = Arc::new(ConsensusEngine::new(ConsensusConfig::default()));
+        let chain = Chain::new(
+            db.clone(),
+            ChainConfig {
+                chain_id: 9000,
+                genesis: GenesisConfig::dev(),
+            },
+            consensus,
+        )
+        .unwrap();
+
+        // Genesis init wrote to several CFs, so the window has traffic.
+        assert!(total_traffic(&db) > 0, "expected genesis sampling traffic");
+        let window_before = db.hot_key_report(16).unwrap().window_start_unix_ms;
+
+        hot_key_window_tick(&db, &chain);
+
+        // Reset: counts cleared, sampling still on, new window opened.
+        assert_eq!(total_traffic(&db), 0, "tick must reset the sketch");
+        assert!(db.hot_key_sampling().is_some(), "sampling stays enabled");
+        let window_after = db.hot_key_report(16).unwrap().window_start_unix_ms;
+        assert!(window_after >= window_before, "reset opens a fresh window");
+    }
+
+    /// With sampling off, a tick is a harmless no-op (reports are `None`).
+    #[test]
+    fn hot_key_window_tick_noop_when_sampling_off() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open(StorageConfig {
+            path: tmp.path().join("db"),
+            create_if_missing: true,
+            ..Default::default()
+        })
+        .unwrap();
+        let consensus = Arc::new(ConsensusEngine::new(ConsensusConfig::default()));
+        let chain = Chain::new(
+            db.clone(),
+            ChainConfig {
+                chain_id: 9000,
+                genesis: GenesisConfig::dev(),
+            },
+            consensus,
+        )
+        .unwrap();
+
+        assert!(db.hot_key_sampling().is_none());
+        hot_key_window_tick(&db, &chain); // must not panic
+        assert!(db.hot_key_report(16).is_none());
+    }
 }

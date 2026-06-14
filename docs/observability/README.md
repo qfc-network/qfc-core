@@ -210,6 +210,12 @@ Exported only when the node runs with `--hot-key-sampling <N>` (env
 two). When sampling is off, the single gauge `qfc_hot_key_sampling_enabled 0`
 is emitted and nothing else — zero per-op cost in the hot path.
 
+Add `--hot-key-window-secs <N>` (env `QFC_HOT_KEY_WINDOW_SECS`, 0 = cumulative)
+to make sampling **windowed**: every N seconds the node logs a ranked report
+(`tracing` target `qfc::hot_keys`) and resets the sketches, so estimates stay
+accurate and these gauges read per-window (a sawtooth) rather than
+cumulative-since-start.
+
 **Cardinality:** the top-N hot *identities* (raw keys, account addresses, code
 hashes) are deliberately **not** Prometheus labels — the hot set churns
 window-to-window and would leak unbounded short-lived series (same reasoning
