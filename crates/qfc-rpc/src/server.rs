@@ -4,20 +4,21 @@ use crate::error::RpcError;
 use crate::eth::EthApiServer;
 use crate::qfc::{
     QfcApiServer, RpcAccountRentInfo, RpcAgentBalance, RpcAgentDetailView, RpcAgentInfo,
-    RpcAgentWriteResult, RpcBridgeDeposit, RpcBridgeStatus, RpcBridgeWithdrawal, RpcComputeInfo,
-    RpcEarningRecord, RpcEpoch, RpcEstimateInferenceFee, RpcFaucetResponse, RpcFreezeAgentParams,
-    RpcFundAgentRequest, RpcInferenceFeeEstimate, RpcInferenceProofSubmission, RpcInferenceStats,
-    RpcInferenceTask, RpcIssueSessionKeyParams, RpcListAgentsParams, RpcListAgentsResponse,
-    RpcListPublicTasksFilter, RpcMinerEarnings, RpcMinerEvent, RpcMinerStatusReport,
-    RpcMinerVesting, RpcModel, RpcModelProposal, RpcNodeInfo, RpcParameterOverride,
-    RpcParameterProposal, RpcProofResult, RpcProposeModelRequest, RpcProposeParameterRequest,
-    RpcProposeSpendRequest, RpcPublicTaskStatus, RpcQueryByCapabilityParams,
-    RpcRegisterAgentRequest, RpcRegisterMinerRequest, RpcRegisterMinerResult,
-    RpcRegisterWebhookRequest, RpcRegisteredMiner, RpcRemoveWebhookRequest, RpcRevokeAgentRequest,
-    RpcSessionKeyDetail, RpcSessionKeyInfo, RpcSpendProposal, RpcSubmitPublicTask, RpcTaskRequest,
-    RpcTreasuryInfo, RpcUndelegation, RpcUserOperation, RpcUserOperationStatus, RpcValidator,
-    RpcValidatorMetrics, RpcValidatorScoreBreakdown, RpcVoteModelRequest, RpcVoteParameterRequest,
-    RpcVoteSpendRequest, RpcWebhook,
+    RpcAgentWriteResult, RpcBridgeDeposit, RpcBridgeStatus, RpcBridgeWithdrawal, RpcCfHotKeys,
+    RpcComputeInfo, RpcEarningRecord, RpcEpoch, RpcEstimateInferenceFee, RpcFaucetResponse,
+    RpcFreezeAgentParams, RpcFundAgentRequest, RpcHotAccountEntry, RpcHotAccounts, RpcHotCodeEntry,
+    RpcHotKeyEntry, RpcHotKeyReport, RpcHotKeyStorage, RpcInferenceFeeEstimate,
+    RpcInferenceProofSubmission, RpcInferenceStats, RpcInferenceTask, RpcIssueSessionKeyParams,
+    RpcListAgentsParams, RpcListAgentsResponse, RpcListPublicTasksFilter, RpcMinerEarnings,
+    RpcMinerEvent, RpcMinerStatusReport, RpcMinerVesting, RpcModel, RpcModelProposal, RpcNodeInfo,
+    RpcParameterOverride, RpcParameterProposal, RpcProofResult, RpcProposeModelRequest,
+    RpcProposeParameterRequest, RpcProposeSpendRequest, RpcPublicTaskStatus,
+    RpcQueryByCapabilityParams, RpcRegisterAgentRequest, RpcRegisterMinerRequest,
+    RpcRegisterMinerResult, RpcRegisterWebhookRequest, RpcRegisteredMiner, RpcRemoveWebhookRequest,
+    RpcRevokeAgentRequest, RpcSessionKeyDetail, RpcSessionKeyInfo, RpcSpendProposal,
+    RpcSubmitPublicTask, RpcTaskRequest, RpcTreasuryInfo, RpcUndelegation, RpcUserOperation,
+    RpcUserOperationStatus, RpcValidator, RpcValidatorMetrics, RpcValidatorScoreBreakdown,
+    RpcVoteModelRequest, RpcVoteParameterRequest, RpcVoteSpendRequest, RpcWebhook,
 };
 use crate::txpool::{TxPoolApiServer, TxPoolContent, TxPoolStatus};
 use crate::types::{
@@ -141,6 +142,8 @@ pub struct RpcServer {
     session_key_store: Arc<RwLock<qfc_qvm::stdlib::session_keys::SessionKeyStore>>,
     /// v3.0: Agent discovery index
     agent_index: Arc<RwLock<qfc_qvm::stdlib::agent_index::AgentIndex>>,
+    /// T2.2: RPC observability metrics (latency histograms, in-flight, errors)
+    metrics: Option<Arc<crate::metrics::RpcMetrics>>,
 }
 
 impl Clone for RpcServer {
@@ -174,6 +177,7 @@ impl Clone for RpcServer {
             capability_store: self.capability_store.clone(),
             session_key_store: self.session_key_store.clone(),
             agent_index: self.agent_index.clone(),
+            metrics: self.metrics.clone(),
         }
     }
 }
@@ -230,7 +234,16 @@ impl RpcServer {
                 qfc_qvm::stdlib::session_keys::SessionKeyStore::new(),
             )),
             agent_index: Arc::new(RwLock::new(qfc_qvm::stdlib::agent_index::AgentIndex::new())),
+            metrics: None,
         }
+    }
+
+    /// Set the RPC metrics registry (T2.2). When set, every JSON-RPC call is
+    /// timed and counted via middleware; the registry is rendered by the
+    /// node's Prometheus exporter.
+    pub fn with_metrics(mut self, metrics: Arc<crate::metrics::RpcMetrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     /// Set the challenge generator (P2)
@@ -310,7 +323,22 @@ impl RpcServer {
 
         info!("Starting RPC server on {}", config.http_addr);
 
-        let server = ServerBuilder::default().build(config.http_addr).await?;
+        // T2.2: per-method latency/error/in-flight metrics middleware.
+        // If no registry was attached via `with_metrics`, record into a
+        // private throwaway registry so the server type stays uniform.
+        let metrics = self
+            .metrics
+            .clone()
+            .unwrap_or_else(|| Arc::new(crate::metrics::RpcMetrics::new()));
+        let rpc_middleware =
+            jsonrpsee::server::middleware::rpc::RpcServiceBuilder::new().layer_fn(move |service| {
+                crate::metrics::MetricsMiddleware::new(service, metrics.clone())
+            });
+
+        let server = ServerBuilder::default()
+            .set_rpc_middleware(rpc_middleware)
+            .build(config.http_addr)
+            .await?;
 
         // Merge all RPC modules
         let mut eth_module = EthApiServer::into_rpc(self.clone());
@@ -2434,6 +2462,30 @@ impl QfcApiServer for RpcServer {
             _ => qfc_inference::GpuTier::Cold,
         };
 
+        let weights_hash = request
+            .weights_hash
+            .as_deref()
+            .map(Self::parse_hash)
+            .transpose()?;
+
+        // ADR-0001: validate the manifest before it can enter governance, and
+        // reject entries where weights_hash and assembled_hash disagree (a
+        // registry entry with both set must have them equal).
+        if let Some(manifest) = &request.shard_manifest {
+            manifest
+                .validate()
+                .map_err(|e| RpcError::InvalidParams(format!("invalid shard manifest: {}", e)))?;
+            if let Some(wh) = weights_hash {
+                if wh != manifest.assembled_hash {
+                    return Err(RpcError::InvalidParams(format!(
+                        "weightsHash {} does not match shard manifest assembledHash {}",
+                        wh, manifest.assembled_hash
+                    ))
+                    .into());
+                }
+            }
+        }
+
         let model_info = qfc_inference::model::ModelInfo {
             id: qfc_inference::task::ModelId::new(&request.model_name, &request.model_version),
             description: request.description,
@@ -2442,7 +2494,8 @@ impl QfcApiServer for RpcServer {
             size_mb: request.size_mb,
             approved: false,
             canonical_format: qfc_inference::CanonicalFormat::SafetensorsFp32,
-            weights_hash: None,
+            weights_hash,
+            shard_manifest: request.shard_manifest,
         };
 
         let now = std::time::SystemTime::now()
@@ -3407,7 +3460,26 @@ impl QfcApiServer for RpcServer {
             now + 60_000, // 60s deadline
         );
 
-        let public_task_id = pool.submit_public_task(submitter, task, max_fee);
+        // T5: per-tenant quota admission (QPS / in-flight / FLOPs budget /
+        // pool-pressure shedding). The fee was already escrowed above, so a
+        // rejection refunds it before surfacing the typed error (-32029).
+        let public_task_id = match pool.try_submit_public_task(submitter, task, max_fee, now) {
+            Ok(id) => id,
+            Err(quota_err) => {
+                drop(pool);
+                if let Err(e) = state.add_balance(&submitter, fee_u256) {
+                    warn!(
+                        "Failed to refund escrowed fee after quota rejection for {}: {}",
+                        submitter, e
+                    );
+                }
+                info!(
+                    "Public task rejected by quota for {}: {}",
+                    submitter, quota_err
+                );
+                return Err(RpcError::from(quota_err).into());
+            }
+        };
         info!(
             "Public task submitted by {}: {} (fee: {})",
             submitter,
@@ -4469,6 +4541,87 @@ impl QfcApiServer for RpcServer {
             stake_tier: tier.to_string(),
         })
     }
+
+    // ---- SRE T8: hot-key analytics ----
+
+    async fn hot_key_report(&self, top_n: Option<usize>) -> RpcResult<RpcHotKeyReport> {
+        let top_n = top_n.unwrap_or(16).clamp(1, 256);
+
+        // Per-CF storage-level report (sampler shared across all DB clones).
+        let storage = self
+            .chain
+            .db()
+            .hot_key_report(top_n)
+            .map(|r| RpcHotKeyStorage {
+                sampling_rate: r.sampling_rate,
+                sketch_capacity: r.sketch_capacity,
+                window_start_unix_ms: r.window_start_unix_ms,
+                cfs: r
+                    .cfs
+                    .into_iter()
+                    .map(|c| RpcCfHotKeys {
+                        cf: c.cf,
+                        reads_sampled: c.reads_sampled,
+                        writes_sampled: c.writes_sampled,
+                        estimated_reads: c.estimated_reads,
+                        estimated_writes: c.estimated_writes,
+                        top_keys: c
+                            .top_keys
+                            .into_iter()
+                            .map(|k| RpcHotKeyEntry {
+                                key_hex: k.key_hex,
+                                sampled_count: k.sampled_count,
+                                estimated_count: k.estimated_count,
+                                max_overestimate: k.max_overestimate,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            });
+
+        // Account/bytecode-level report (chain's persistent state handle).
+        let accounts = self
+            .chain
+            .state()
+            .hot_account_report(top_n)
+            .map(|a| RpcHotAccounts {
+                sampling_rate: a.sampling_rate,
+                sketch_capacity: a.sketch_capacity,
+                window_start_unix_ms: a.window_start_unix_ms,
+                estimated_account_reads: a.estimated_account_reads,
+                estimated_account_writes: a.estimated_account_writes,
+                estimated_code_reads: a.estimated_code_reads,
+                top_accounts: a
+                    .top_accounts
+                    .into_iter()
+                    .map(|e| RpcHotAccountEntry {
+                        address: e.address,
+                        sampled_count: e.sampled_count,
+                        estimated_count: e.estimated_count,
+                        max_overestimate: e.max_overestimate,
+                    })
+                    .collect(),
+                top_code: a
+                    .top_code
+                    .into_iter()
+                    .map(|e| RpcHotCodeEntry {
+                        code_hash: e.code_hash,
+                        sampled_count: e.sampled_count,
+                        estimated_count: e.estimated_count,
+                        max_overestimate: e.max_overestimate,
+                    })
+                    .collect(),
+            });
+
+        let sampling_rate = storage.as_ref().map(|s| s.sampling_rate).unwrap_or(0);
+        Ok(RpcHotKeyReport {
+            sampling_enabled: storage.is_some(),
+            sampling_rate,
+            top_n,
+            storage,
+            accounts,
+        })
+    }
 }
 
 /// ABI helper: encode registerAgent(string,uint8[],uint256,uint256) calldata.
@@ -5026,5 +5179,171 @@ mod tests_agent_write_rpcs {
         assert!(
             qfc_crypto::verify_hash_signature(&keypair.public_key(), &hash_without, &sig).is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod tests_model_governance_rpcs {
+    use crate::qfc::RpcProposeModelRequest;
+
+    /// Old-style requests without the new optional fields must still parse
+    /// (serde defaults — backward compatible).
+    #[test]
+    fn test_propose_model_request_without_optional_fields() {
+        let json = r#"{
+            "proposer": "0x1234567890abcdef1234567890abcdef12345678",
+            "modelName": "qfc-llm-test",
+            "modelVersion": "v1.0",
+            "description": "test model",
+            "minMemoryMb": 1024,
+            "minTier": "Cold",
+            "sizeMb": 100
+        }"#;
+        let parsed: RpcProposeModelRequest = serde_json::from_str(json).unwrap();
+        assert!(parsed.weights_hash.is_none());
+        assert!(parsed.shard_manifest.is_none());
+    }
+
+    /// Manifest round-trips through the RPC request with 0x-hex hashes.
+    #[test]
+    fn test_propose_model_request_with_manifest_round_trip() {
+        let data = vec![0x42u8; 64];
+        let manifest = qfc_inference::ShardManifest {
+            shards: vec![qfc_inference::ShardEntry {
+                cid: "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG".to_string(),
+                hash: qfc_crypto::blake3_hash(&data),
+                size_bytes: data.len() as u64,
+                layer_range: None,
+            }],
+            total_size_bytes: data.len() as u64,
+            assembled_hash: qfc_crypto::blake3_hash(&data),
+        };
+        manifest.validate().unwrap();
+
+        let req = RpcProposeModelRequest {
+            proposer: "0x1234567890abcdef1234567890abcdef12345678".into(),
+            model_name: "qfc-llm-test".into(),
+            model_version: "v1.0".into(),
+            description: "sharded test model".into(),
+            min_memory_mb: 1024,
+            min_tier: "Cold".into(),
+            size_mb: 100,
+            weights_hash: Some(format!("{}", manifest.assembled_hash)),
+            shard_manifest: Some(manifest.clone()),
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        // Hashes serialize as 0x-hex strings (qfc_types::Hash serde).
+        assert!(json.contains(&format!("{}", manifest.assembled_hash)));
+        let parsed: RpcProposeModelRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.shard_manifest.as_ref().unwrap(), &manifest);
+        assert_eq!(
+            parsed.weights_hash.as_deref().unwrap(),
+            format!("{}", manifest.assembled_hash)
+        );
+    }
+
+    /// An invalid manifest (bad cid) is rejected by the same validate() the
+    /// propose_model handler runs before building ModelInfo.
+    #[test]
+    fn test_propose_model_manifest_with_invalid_cid_rejected() {
+        let data = vec![0x42u8; 64];
+        let manifest = qfc_inference::ShardManifest {
+            shards: vec![qfc_inference::ShardEntry {
+                cid: "../evil".to_string(),
+                hash: qfc_crypto::blake3_hash(&data),
+                size_bytes: data.len() as u64,
+                layer_range: None,
+            }],
+            total_size_bytes: data.len() as u64,
+            assembled_hash: qfc_crypto::blake3_hash(&data),
+        };
+        assert!(manifest.validate().is_err());
+    }
+}
+
+#[cfg(test)]
+mod tests_hot_key_rpc {
+    use crate::qfc::{
+        RpcCfHotKeys, RpcHotAccountEntry, RpcHotAccounts, RpcHotKeyEntry, RpcHotKeyReport,
+        RpcHotKeyStorage,
+    };
+
+    /// The combined report round-trips through JSON with camelCase keys (the
+    /// field names operators and the dashboard reference).
+    #[test]
+    fn test_hot_key_report_serde_camel_case() {
+        let report = RpcHotKeyReport {
+            sampling_enabled: true,
+            sampling_rate: 64,
+            top_n: 16,
+            storage: Some(RpcHotKeyStorage {
+                sampling_rate: 64,
+                sketch_capacity: 256,
+                window_start_unix_ms: 1_765_000_000_000,
+                cfs: vec![RpcCfHotKeys {
+                    cf: "state".into(),
+                    reads_sampled: 10,
+                    writes_sampled: 3,
+                    estimated_reads: 640,
+                    estimated_writes: 192,
+                    top_keys: vec![RpcHotKeyEntry {
+                        key_hex: "0xabcd".into(),
+                        sampled_count: 5,
+                        estimated_count: 320,
+                        max_overestimate: 64,
+                    }],
+                }],
+            }),
+            accounts: Some(RpcHotAccounts {
+                sampling_rate: 64,
+                sketch_capacity: 256,
+                window_start_unix_ms: 1_765_000_000_000,
+                estimated_account_reads: 1280,
+                estimated_account_writes: 0,
+                estimated_code_reads: 64,
+                top_accounts: vec![RpcHotAccountEntry {
+                    address: "0x0000000000000000000000000000000000000003".into(),
+                    sampled_count: 8,
+                    estimated_count: 512,
+                    max_overestimate: 64,
+                }],
+                top_code: vec![],
+            }),
+        };
+
+        let json = serde_json::to_string(&report).unwrap();
+        // camelCase field names on the wire.
+        assert!(json.contains("\"samplingEnabled\":true"));
+        assert!(json.contains("\"samplingRate\":64"));
+        assert!(json.contains("\"topN\":16"));
+        assert!(json.contains("\"keyHex\":\"0xabcd\""));
+        assert!(json.contains("\"maxOverestimate\":64"));
+        assert!(json.contains("\"estimatedAccountReads\":1280"));
+
+        let parsed: RpcHotKeyReport = serde_json::from_str(&json).unwrap();
+        assert!(parsed.sampling_enabled);
+        assert_eq!(parsed.sampling_rate, 64);
+        assert_eq!(parsed.storage.as_ref().unwrap().cfs[0].cf, "state");
+        assert_eq!(
+            parsed.accounts.as_ref().unwrap().top_accounts[0].estimated_count,
+            512
+        );
+    }
+
+    /// Sampling-off shape: detail fields are null, not omitted.
+    #[test]
+    fn test_hot_key_report_disabled_shape() {
+        let report = RpcHotKeyReport {
+            sampling_enabled: false,
+            sampling_rate: 0,
+            top_n: 16,
+            storage: None,
+            accounts: None,
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.contains("\"samplingEnabled\":false"));
+        assert!(json.contains("\"storage\":null"));
+        assert!(json.contains("\"accounts\":null"));
     }
 }

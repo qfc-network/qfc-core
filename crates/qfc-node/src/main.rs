@@ -6,6 +6,7 @@ mod dynamic_rewards;
 mod metrics;
 mod miner;
 mod producer;
+mod snapshot_backup;
 mod sync;
 
 use anyhow::Result;
@@ -97,6 +98,27 @@ struct Args {
     #[arg(long, default_value = "0.0.0.0:6060", env = "QFC_METRICS_ADDR")]
     metrics_addr: SocketAddr,
 
+    /// Enable RocksDB statistics collection (tickers + histograms; costs a few
+    /// percent of storage throughput). Exposes qfc_rocksdb_* counter metrics
+    /// on /metrics; property-based gauges are exported regardless.
+    #[arg(long, env = "QFC_DB_STATISTICS")]
+    db_statistics: bool,
+
+    /// T8: enable hot-key/hot-account access sampling at a 1-in-N rate
+    /// (rounded up to a power of two; e.g. 64). Unset/0 = disabled (zero
+    /// per-op cost). Results surface on /metrics (aggregate skew gauges) and
+    /// via the in-memory report accessors. See docs/profiling/HOT-KEYS.md.
+    #[arg(long, env = "QFC_HOT_KEY_SAMPLING")]
+    hot_key_sampling: Option<u32>,
+
+    /// T8: hot-key sampling window in seconds. Every window the node logs a
+    /// ranked report (target `qfc::hot_keys`) and resets the sketches, so the
+    /// space-saving estimates stay accurate and the /metrics gauges read
+    /// per-window instead of cumulative-since-start. 0 = never reset
+    /// (cumulative). No effect without --hot-key-sampling.
+    #[arg(long, default_value_t = 0, env = "QFC_HOT_KEY_WINDOW_SECS")]
+    hot_key_window_secs: u64,
+
     /// IPFS Kubo API URL for large inference result storage (optional)
     #[arg(long, env = "QFC_IPFS_API_URL")]
     ipfs_api_url: Option<String>,
@@ -112,6 +134,47 @@ struct Args {
     /// Run in light client mode (header-only sync, no state storage)
     #[arg(long, env = "QFC_LIGHT")]
     light: bool,
+
+    /// T4.2: take a live RocksDB snapshot (file-level checkpoint, near-instant)
+    /// every N seconds, pack it as <prefix>-<height>-<unix_ts>.tar.gz and
+    /// optionally ship it via --snapshot-upload-cmd. Unset/0 = disabled.
+    #[arg(long, env = "QFC_SNAPSHOT_INTERVAL_SECS")]
+    snapshot_interval_secs: Option<u64>,
+
+    /// Directory for snapshot archives (default: <datadir>/snapshots). Must
+    /// be on the same filesystem as the database for hard-link snapshots.
+    #[arg(long, env = "QFC_SNAPSHOT_DIR")]
+    snapshot_dir: Option<PathBuf>,
+
+    /// Shell command to ship each snapshot archive to object storage; {file}
+    /// is replaced with the archive path (appended if no placeholder).
+    /// Examples: "rclone copy {file} remote:qfc-backups/",
+    /// "aws s3 cp {file} s3://qfc-backups/", "mc cp {file} minio/qfc-backups/".
+    /// Failures are logged + counted (qfc_snapshot_failures_total), never fatal.
+    #[arg(long, env = "QFC_SNAPSHOT_UPLOAD_CMD")]
+    snapshot_upload_cmd: Option<String>,
+
+    /// How many snapshot archives to keep locally (older ones are pruned;
+    /// minimum 1).
+    #[arg(long, default_value_t = 2, env = "QFC_SNAPSHOT_RETAIN")]
+    snapshot_retain: usize,
+
+    /// Snapshot archive name prefix.
+    #[arg(long, default_value = "qfc-snapshot", env = "QFC_SNAPSHOT_PREFIX")]
+    snapshot_prefix: String,
+
+    /// T5: per-tenant AI task-pool quota config (JSON; see docs/AI-QUOTAS.md).
+    /// Unset = quotas off (admission always succeeds). The file is
+    /// hot-reloaded: changes are picked up within ~30s (mtime check); a
+    /// parse error keeps the previous config and logs the failure.
+    #[arg(long, env = "QFC_AI_QUOTAS")]
+    ai_quotas: Option<PathBuf>,
+
+    /// T5: interval in seconds between AI cost reports (per-tenant/per-miner
+    /// FLOPs + fees, emitted as a structured log and handed to the treasury
+    /// hook). 0 = disabled.
+    #[arg(long, default_value_t = 600, env = "QFC_AI_COST_REPORT_INTERVAL_SECS")]
+    ai_cost_report_interval_secs: u64,
 }
 
 #[tokio::main]
@@ -157,10 +220,19 @@ async fn main() -> Result<()> {
     let storage_config = StorageConfig {
         path: args.datadir.join("db"),
         create_if_missing: true,
+        enable_statistics: args.db_statistics,
+        hot_key_sampling: args.hot_key_sampling.filter(|&n| n > 0),
         ..Default::default()
     };
     let db = Database::open(storage_config)?;
-    info!("Database opened");
+    info!(
+        "Database opened (statistics: {}, hot-key sampling: {})",
+        if args.db_statistics { "on" } else { "off" },
+        match db.hot_key_sampling() {
+            Some(rate) => format!("1-in-{rate}"),
+            None => "off".to_string(),
+        }
+    );
 
     // Create genesis config
     let genesis = if args.dev {
@@ -219,6 +291,31 @@ async fn main() -> Result<()> {
     // v2.0: Shared proof pool and task pool for RPC, sync, and block producer
     let proof_pool = Arc::new(RwLock::new(ProofPool::new()));
     let task_pool = Arc::new(RwLock::new(TaskPool::new()));
+
+    // T5: per-tenant quotas (--ai-quotas) + periodic cost reports.
+    if let Some(ref quota_path) = args.ai_quotas {
+        let cfg = qfc_ai_coordinator::QuotaConfig::from_file(quota_path)
+            .map_err(|e| anyhow::anyhow!("Invalid --ai-quotas file {:?}: {}", quota_path, e))?;
+        info!(
+            "AI quotas enabled from {:?} ({} tenant overrides, default tier: {} qps / {} in-flight, window {}s, max pending {})",
+            quota_path,
+            cfg.tenants.len(),
+            cfg.default_tier.max_qps,
+            cfg.default_tier.max_inflight,
+            cfg.window_secs,
+            cfg.max_pending
+        );
+        task_pool.write().set_quota_config(Some(cfg));
+    }
+    spawn_ai_quota_task(
+        task_pool.clone(),
+        args.ai_quotas.clone(),
+        args.ai_cost_report_interval_secs,
+    );
+
+    // T8: periodic hot-key/hot-account window reset (no-op unless sampling is
+    // on and a window is configured).
+    spawn_hot_key_window_task(db.clone(), chain.clone(), args.hot_key_window_secs);
 
     // v2.0 P2: Shared challenge generator, redundant verifier, task router
     let challenge_generator = Arc::new(RwLock::new(
@@ -326,6 +423,10 @@ async fn main() -> Result<()> {
         None => (None, None),
     };
 
+    // T2.2: RPC metrics registry, shared between the RPC middleware (writer)
+    // and the Prometheus exporter (reader)
+    let rpc_metrics = Arc::new(qfc_rpc::metrics::RpcMetrics::new());
+
     // Start RPC server (with network for transaction broadcasting)
     let _rpc_handle = if args.rpc {
         let rpc_config = RpcConfig {
@@ -343,6 +444,7 @@ async fn main() -> Result<()> {
         // Attach CPU inference engine for spot-check verification
         let rpc_engine = qfc_inference::create_engine_for_backend(qfc_inference::BackendType::Cpu)?;
         rpc_server = rpc_server
+            .with_metrics(rpc_metrics.clone())
             .with_inference_engine(rpc_engine)
             .with_proof_pool(proof_pool.clone())
             .with_task_pool(task_pool.clone())
@@ -456,8 +558,29 @@ async fn main() -> Result<()> {
         false
     };
 
+    // T4.2: periodic snapshot backups (RocksDB checkpoint → tar.gz → object
+    // storage). Off unless --snapshot-interval-secs is set.
+    let snapshot_metrics = match args.snapshot_interval_secs {
+        Some(secs) if secs > 0 => {
+            let backup_config = snapshot_backup::SnapshotBackupConfig {
+                interval: std::time::Duration::from_secs(secs),
+                dir: args
+                    .snapshot_dir
+                    .clone()
+                    .unwrap_or_else(|| args.datadir.join("snapshots")),
+                prefix: args.snapshot_prefix.clone(),
+                upload_cmd: args.snapshot_upload_cmd.clone(),
+                retain: args.snapshot_retain.max(1),
+            };
+            let backup_metrics = Arc::new(snapshot_backup::SnapshotBackupMetrics::default());
+            snapshot_backup::spawn(db.clone(), backup_config, backup_metrics.clone());
+            Some(backup_metrics)
+        }
+        _ => None,
+    };
+
     // Start Prometheus metrics server
-    let metrics_server = metrics::MetricsServer::new(
+    let mut metrics_server = metrics::MetricsServer::new(
         args.metrics_addr,
         chain.clone(),
         consensus.clone(),
@@ -465,7 +588,17 @@ async fn main() -> Result<()> {
         _network_service.clone(),
         proof_pool.clone(),
         args.chain_id,
-    );
+    )
+    .with_rpc_metrics(rpc_metrics.clone())
+    .with_storage(db.clone())
+    .with_task_pool(task_pool.clone());
+    if let Some(ref sync) = _sync_manager {
+        metrics_server =
+            metrics_server.with_sync_status(sync.clone() as Arc<dyn qfc_rpc::SyncStatusProvider>);
+    }
+    if let Some(snap) = snapshot_metrics {
+        metrics_server = metrics_server.with_snapshot_backup(snap);
+    }
     metrics_server.start();
 
     // Print startup info
@@ -494,4 +627,227 @@ async fn main() -> Result<()> {
     info!("Shutting down...");
 
     Ok(())
+}
+
+/// T5: background task driving (a) periodic AI cost reports
+/// (`--ai-cost-report-interval-secs`, 0 = disabled) and (b) hot reload of
+/// the `--ai-quotas` config file (mtime check every tick; a file that fails
+/// to parse keeps the previous config). No-op when both are disabled.
+fn spawn_ai_quota_task(
+    task_pool: Arc<RwLock<TaskPool>>,
+    quota_path: Option<PathBuf>,
+    report_interval_secs: u64,
+) {
+    if quota_path.is_none() && report_interval_secs == 0 {
+        return;
+    }
+
+    const TICK_SECS: u64 = 30;
+    tokio::spawn(async move {
+        let mut last_mtime: Option<std::time::SystemTime> = quota_path
+            .as_ref()
+            .and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
+        let mut secs_since_report = 0u64;
+
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(TICK_SECS)).await;
+
+            // Hot reload on mtime change.
+            if let Some(ref path) = quota_path {
+                let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+                if mtime.is_some() && mtime != last_mtime {
+                    last_mtime = mtime;
+                    match qfc_ai_coordinator::QuotaConfig::from_file(path) {
+                        Ok(cfg) => {
+                            info!(
+                                "AI quota config reloaded from {:?} ({} tenant overrides)",
+                                path,
+                                cfg.tenants.len()
+                            );
+                            task_pool.write().set_quota_config(Some(cfg));
+                        }
+                        Err(e) => {
+                            warn!(
+                                "AI quota config reload failed, keeping previous config: {}",
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Periodic cost report.
+            if report_interval_secs > 0 {
+                secs_since_report += TICK_SECS;
+                if secs_since_report >= report_interval_secs {
+                    secs_since_report = 0;
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    // generate_cost_report logs via the treasury hook
+                    // (target qfc::ai_cost) and retains the report for
+                    // the exporter/RPC.
+                    let _ = task_pool.write().generate_cost_report(now_ms);
+                }
+            }
+        }
+    });
+}
+
+/// T8: drive the hot-key/hot-account sampling window. Every
+/// `--hot-key-window-secs`, [`hot_key_window_tick`] logs a ranked report
+/// (target `qfc::hot_keys` — the permanent record of the hot *identities*
+/// that are deliberately kept out of the Prometheus labels) and resets both
+/// sketches, keeping the space-saving estimates accurate and making the
+/// `/metrics` gauges per-window instead of cumulative. No-op unless sampling
+/// is enabled and a window is configured.
+fn spawn_hot_key_window_task(db: Database, chain: Arc<Chain>, window_secs: u64) {
+    if window_secs == 0 || db.hot_key_sampling().is_none() {
+        return;
+    }
+    info!(
+        "Hot-key sampling window: {}s (reports logged to target qfc::hot_keys, then sketches reset)",
+        window_secs
+    );
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(window_secs));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // The first tick fires immediately; skip it so the first reset lands
+        // after a full window rather than at startup.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            hot_key_window_tick(&db, &chain);
+        }
+    });
+}
+
+/// Log the current hot-key/hot-account reports, then reset both windows.
+/// Split out from the spawn loop so it is directly unit-testable.
+fn hot_key_window_tick(db: &Database, chain: &Chain) {
+    const TOP_N: usize = 16;
+
+    if let Some(report) = db.hot_key_report(TOP_N) {
+        let busiest = report
+            .cfs
+            .iter()
+            .max_by_key(|c| c.estimated_reads + c.estimated_writes);
+        let hottest = report
+            .cfs
+            .iter()
+            .filter_map(|c| c.top_keys.first().map(|k| (c.cf.as_str(), k)))
+            .max_by_key(|(_, k)| k.estimated_count);
+        info!(
+            target: "qfc::hot_keys",
+            rate = report.sampling_rate,
+            cfs_active = report.cfs.len(),
+            busiest_cf = busiest.map(|c| c.cf.as_str()).unwrap_or("-"),
+            busiest_cf_reads = busiest.map(|c| c.estimated_reads).unwrap_or(0),
+            busiest_cf_writes = busiest.map(|c| c.estimated_writes).unwrap_or(0),
+            hottest_key_cf = hottest.map(|(cf, _)| cf).unwrap_or("-"),
+            hottest_key = hottest.map(|(_, k)| k.key_hex.as_str()).unwrap_or("-"),
+            hottest_key_count = hottest.map(|(_, k)| k.estimated_count).unwrap_or(0),
+            "hot-key window closed (storage)"
+        );
+        db.reset_hot_key_stats();
+    }
+
+    let state = chain.state();
+    if let Some(acct) = state.hot_account_report(TOP_N) {
+        let top_acct = acct.top_accounts.first();
+        let top_code = acct.top_code.first();
+        info!(
+            target: "qfc::hot_keys",
+            est_account_reads = acct.estimated_account_reads,
+            est_account_writes = acct.estimated_account_writes,
+            est_code_reads = acct.estimated_code_reads,
+            hottest_account = top_acct.map(|a| a.address.as_str()).unwrap_or("-"),
+            hottest_account_count = top_acct.map(|a| a.estimated_count).unwrap_or(0),
+            hottest_code = top_code.map(|c| c.code_hash.as_str()).unwrap_or("-"),
+            hottest_code_count = top_code.map(|c| c.estimated_count).unwrap_or(0),
+            "hot-key window closed (accounts)"
+        );
+        state.reset_hot_account_stats();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use qfc_chain::{ChainConfig, GenesisConfig};
+    use qfc_consensus::{ConsensusConfig, ConsensusEngine};
+
+    fn total_traffic(db: &Database) -> u64 {
+        db.hot_key_report(16)
+            .map(|r| {
+                r.cfs
+                    .iter()
+                    .map(|c| c.estimated_reads + c.estimated_writes)
+                    .sum()
+            })
+            .unwrap_or(0)
+    }
+
+    /// A window tick logs and then resets both sketches: traffic accumulated
+    /// before the tick is gone after it, and the window keeps sampling.
+    #[test]
+    fn hot_key_window_tick_resets_sketches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open(StorageConfig {
+            path: tmp.path().join("db"),
+            create_if_missing: true,
+            hot_key_sampling: Some(1),
+            ..Default::default()
+        })
+        .unwrap();
+        let consensus = Arc::new(ConsensusEngine::new(ConsensusConfig::default()));
+        let chain = Chain::new(
+            db.clone(),
+            ChainConfig {
+                chain_id: 9000,
+                genesis: GenesisConfig::dev(),
+            },
+            consensus,
+        )
+        .unwrap();
+
+        // Genesis init wrote to several CFs, so the window has traffic.
+        assert!(total_traffic(&db) > 0, "expected genesis sampling traffic");
+        let window_before = db.hot_key_report(16).unwrap().window_start_unix_ms;
+
+        hot_key_window_tick(&db, &chain);
+
+        // Reset: counts cleared, sampling still on, new window opened.
+        assert_eq!(total_traffic(&db), 0, "tick must reset the sketch");
+        assert!(db.hot_key_sampling().is_some(), "sampling stays enabled");
+        let window_after = db.hot_key_report(16).unwrap().window_start_unix_ms;
+        assert!(window_after >= window_before, "reset opens a fresh window");
+    }
+
+    /// With sampling off, a tick is a harmless no-op (reports are `None`).
+    #[test]
+    fn hot_key_window_tick_noop_when_sampling_off() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open(StorageConfig {
+            path: tmp.path().join("db"),
+            create_if_missing: true,
+            ..Default::default()
+        })
+        .unwrap();
+        let consensus = Arc::new(ConsensusEngine::new(ConsensusConfig::default()));
+        let chain = Chain::new(
+            db.clone(),
+            ChainConfig {
+                chain_id: 9000,
+                genesis: GenesisConfig::dev(),
+            },
+            consensus,
+        )
+        .unwrap();
+
+        assert!(db.hot_key_sampling().is_none());
+        hot_key_window_tick(&db, &chain); // must not panic
+        assert!(db.hot_key_report(16).is_none());
+    }
 }

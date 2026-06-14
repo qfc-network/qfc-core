@@ -1,0 +1,46 @@
+Attaching 13 probes...
+
+
+
+@lat_us[tracepoint:syscalls:sys_enter_fsync]: 
+[2K, 4K)               3 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+
+@lat_us[tracepoint:syscalls:sys_enter_write]: 
+[0]               264343 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                 |
+[1]               310535 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@           |
+[2, 4)            385269 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4, 8)            278700 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@               |
+[8, 16)            77871 |@@@@@@@@@@                                          |
+[16, 32)           11841 |@                                                   |
+[32, 64)            3882 |                                                    |
+[64, 128)           2254 |                                                    |
+[128, 256)           575 |                                                    |
+[256, 512)           363 |                                                    |
+[512, 1K)            229 |                                                    |
+[1K, 2K)             129 |                                                    |
+[2K, 4K)              60 |                                                    |
+[4K, 8K)              14 |                                                    |
+[8K, 16K)             16 |                                                    |
+[16K, 32K)            12 |                                                    |
+[32K, 64K)             3 |                                                    |
+
+@op_by_thread[alloy, tracepoint:syscalls:sys_enter_fsync]: 3
+@op_by_thread[irqbalance, tracepoint:syscalls:sys_enter_write]: 4
+@op_by_thread[6, tracepoint:syscalls:sys_enter_write]: 6
+@op_by_thread[node_exporter, tracepoint:syscalls:sys_enter_write]: 8
+@op_by_thread[runc:[0:PARENT], tracepoint:syscalls:sys_enter_write]: 18
+@op_by_thread[runc:[1:CHILD], tracepoint:syscalls:sys_enter_write]: 18
+@op_by_thread[node, tracepoint:syscalls:sys_enter_write]: 19
+@op_by_thread[runc:[2:INIT], tracepoint:syscalls:sys_enter_write]: 24
+@op_by_thread[futures-timer, tracepoint:syscalls:sys_enter_write]: 25
+@op_by_thread[runc, tracepoint:syscalls:sys_enter_write]: 30
+@op_by_thread[qfc-miner, tracepoint:syscalls:sys_enter_write]: 41
+@op_by_thread[multipathd, tracepoint:syscalls:sys_enter_write]: 54
+@op_by_thread[alloy, tracepoint:syscalls:sys_enter_write]: 301
+@op_by_thread[containerd, tracepoint:syscalls:sys_enter_write]: 942
+@op_by_thread[curl, tracepoint:syscalls:sys_enter_write]: 1135
+@op_by_thread[containerd-shim, tracepoint:syscalls:sys_enter_write]: 260783
+@op_by_thread[tokio-rt-worker, tracepoint:syscalls:sys_enter_write]: 503774
+@op_by_thread[dockerd, tracepoint:syscalls:sys_enter_write]: 568914
+
+

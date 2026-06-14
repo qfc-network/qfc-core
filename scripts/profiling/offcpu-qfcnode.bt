@@ -1,0 +1,21 @@
+#!/usr/bin/env bpftrace
+/*
+ * offcpu-qfcnode.bt — off-CPU time of qfc-node threads, aggregated by the
+ * kernel stack at the point they blocked. Answers "what does the node wait
+ * on?" — io_schedule (disk), futex (locks/parking), tcp_recvmsg (network).
+ * A write stall would appear as io_schedule under a WAL/fsync path. See
+ * docs/profiling/ebpf/T1-eBPF.md.
+ *
+ *   sudo bpftrace scripts/profiling/offcpu-qfcnode.bt
+ */
+tracepoint:sched:sched_switch /args.prev_comm == "qfc-node"/ {
+  @off[args.prev_pid] = nsecs;
+  @ks[args.prev_pid] = kstack;
+}
+
+tracepoint:sched:sched_switch /@off[args.next_pid]/ {
+  @offcpu_us[@ks[args.next_pid]] = sum((nsecs - @off[args.next_pid]) / 1000);
+  delete(@off[args.next_pid]); delete(@ks[args.next_pid]);
+}
+
+interval:s:30 { exit(); }

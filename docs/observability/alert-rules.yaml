@@ -1,0 +1,445 @@
+# QFC node Prometheus alerting rules (T2.3)
+#
+# Metric names match the exporter in crates/qfc-node/src/metrics.rs and the
+# RPC middleware in crates/qfc-rpc/src/metrics.rs.
+#
+# SLOs:
+#   - Block production: 99.9% of time, head block is < 30s old
+#     (block interval is 3-5s, so 30s ~= 6+ consecutive missed blocks).
+#   - RPC availability: 99.9% of requests succeed (client errors excluded).
+#   - RPC latency: 99% of requests complete within 250ms.
+#
+# Burn-rate alerting follows the multi-window multi-burn-rate pattern from the
+# Google SRE Workbook ch.5: page on 14.4x/1h(+5m) and 6x/6h(+30m); ticket on
+# 1x/3d(+6h). Budget for a 99.9% SLO is 0.001; for 99% it is 0.01.
+
+groups:
+  # ---------------------------------------------------------------- recording
+  - name: qfc-slo-recording
+    interval: 15s
+    rules:
+      # 1 when block production is stalled (head older than 30s), else 0.
+      - record: qfc:block_production_stalled:bool
+        expr: (qfc_time_since_last_block_seconds > bool 30)
+
+      # RPC error ratio, excluding caller-side JSON-RPC errors
+      # (-32700 parse, -32600 invalid request, -32601 method not found,
+      #  -32602 invalid params).
+      - record: qfc:rpc_error_ratio:rate5m
+        expr: |
+          sum(rate(qfc_rpc_errors_total{code!~"-32700|-32600|-32601|-32602"}[5m]))
+          /
+          clamp_min(sum(rate(qfc_rpc_requests_total[5m])), 1e-10)
+      - record: qfc:rpc_error_ratio:rate30m
+        expr: |
+          sum(rate(qfc_rpc_errors_total{code!~"-32700|-32600|-32601|-32602"}[30m]))
+          /
+          clamp_min(sum(rate(qfc_rpc_requests_total[30m])), 1e-10)
+      - record: qfc:rpc_error_ratio:rate1h
+        expr: |
+          sum(rate(qfc_rpc_errors_total{code!~"-32700|-32600|-32601|-32602"}[1h]))
+          /
+          clamp_min(sum(rate(qfc_rpc_requests_total[1h])), 1e-10)
+      - record: qfc:rpc_error_ratio:rate6h
+        expr: |
+          sum(rate(qfc_rpc_errors_total{code!~"-32700|-32600|-32601|-32602"}[6h]))
+          /
+          clamp_min(sum(rate(qfc_rpc_requests_total[6h])), 1e-10)
+      - record: qfc:rpc_error_ratio:rate3d
+        expr: |
+          sum(rate(qfc_rpc_errors_total{code!~"-32700|-32600|-32601|-32602"}[3d]))
+          /
+          clamp_min(sum(rate(qfc_rpc_requests_total[3d])), 1e-10)
+
+      # RPC slow-request ratio: fraction of requests slower than 250ms.
+      - record: qfc:rpc_slow_ratio:rate5m
+        expr: |
+          1 - (
+            sum(rate(qfc_rpc_request_duration_seconds_bucket{le="0.25"}[5m]))
+            /
+            clamp_min(sum(rate(qfc_rpc_request_duration_seconds_count[5m])), 1e-10)
+          )
+      - record: qfc:rpc_slow_ratio:rate30m
+        expr: |
+          1 - (
+            sum(rate(qfc_rpc_request_duration_seconds_bucket{le="0.25"}[30m]))
+            /
+            clamp_min(sum(rate(qfc_rpc_request_duration_seconds_count[30m])), 1e-10)
+          )
+      - record: qfc:rpc_slow_ratio:rate1h
+        expr: |
+          1 - (
+            sum(rate(qfc_rpc_request_duration_seconds_bucket{le="0.25"}[1h]))
+            /
+            clamp_min(sum(rate(qfc_rpc_request_duration_seconds_count[1h])), 1e-10)
+          )
+      - record: qfc:rpc_slow_ratio:rate6h
+        expr: |
+          1 - (
+            sum(rate(qfc_rpc_request_duration_seconds_bucket{le="0.25"}[6h]))
+            /
+            clamp_min(sum(rate(qfc_rpc_request_duration_seconds_count[6h])), 1e-10)
+          )
+
+  # ----------------------------------------------- block production SLO 99.9%
+  - name: qfc-block-production-slo
+    rules:
+      # Fast burn: 14.4x budget over 1h, confirmed by 5m window. At this rate
+      # the 30-day budget is gone in ~2 days.
+      - alert: QfcBlockProductionBurnRateFast
+        expr: |
+          avg_over_time(qfc:block_production_stalled:bool[1h]) > (14.4 * 0.001)
+          and
+          avg_over_time(qfc:block_production_stalled:bool[5m]) > (14.4 * 0.001)
+        for: 2m
+        labels:
+          severity: page
+          slo: block-production
+        annotations:
+          summary: "Block production SLO fast burn (14.4x) on {{ $labels.instance }}"
+          description: >-
+            Block production has been stalled (head older than 30s) for more
+            than 1.44% of the last hour. Current head age:
+            {{ with query "qfc_time_since_last_block_seconds" }}{{ . | first | value | printf "%.0f" }}s{{ end }}.
+
+      # Slow burn: 6x budget over 6h, confirmed by 30m window.
+      - alert: QfcBlockProductionBurnRateSlow
+        expr: |
+          avg_over_time(qfc:block_production_stalled:bool[6h]) > (6 * 0.001)
+          and
+          avg_over_time(qfc:block_production_stalled:bool[30m]) > (6 * 0.001)
+        for: 15m
+        labels:
+          severity: ticket
+          slo: block-production
+        annotations:
+          summary: "Block production SLO slow burn (6x) on {{ $labels.instance }}"
+          description: >-
+            Block production stalls are consuming error budget 6x faster than
+            sustainable over the last 6h.
+
+      # Hard stall: head hasn't advanced for 2 minutes — page regardless of
+      # budget math (this is a dead node / dead producer).
+      - alert: QfcBlockProductionStalled
+        expr: qfc_time_since_last_block_seconds > 120
+        for: 1m
+        labels:
+          severity: page
+          slo: block-production
+        annotations:
+          summary: "No block produced for >2m on {{ $labels.instance }}"
+          description: >-
+            Head block is {{ $value | printf "%.0f" }}s old. Check the block
+            producer, validator status (qfc_is_validator), and peers.
+
+  # ------------------------------------------------- RPC availability SLO 99.9%
+  - name: qfc-rpc-availability-slo
+    rules:
+      - alert: QfcRpcErrorBurnRateFast
+        expr: |
+          qfc:rpc_error_ratio:rate1h > (14.4 * 0.001)
+          and
+          qfc:rpc_error_ratio:rate5m > (14.4 * 0.001)
+        for: 2m
+        labels:
+          severity: page
+          slo: rpc-availability
+        annotations:
+          summary: "RPC availability SLO fast burn (14.4x)"
+          description: >-
+            Server-side RPC error ratio over the last hour is
+            {{ $value | humanizePercentage }} (budget burn 14.4x for a 99.9% SLO).
+
+      - alert: QfcRpcErrorBurnRateSlow
+        expr: |
+          qfc:rpc_error_ratio:rate6h > (6 * 0.001)
+          and
+          qfc:rpc_error_ratio:rate30m > (6 * 0.001)
+        for: 15m
+        labels:
+          severity: ticket
+          slo: rpc-availability
+        annotations:
+          summary: "RPC availability SLO slow burn (6x)"
+          description: "Sustained elevated RPC error ratio over 6h."
+
+      - alert: QfcRpcErrorBudgetSlowLeak
+        expr: |
+          qfc:rpc_error_ratio:rate3d > 0.001
+          and
+          qfc:rpc_error_ratio:rate6h > 0.001
+        for: 1h
+        labels:
+          severity: ticket
+          slo: rpc-availability
+        annotations:
+          summary: "RPC availability error budget leaking (1x over 3d)"
+          description: "Error ratio above SLO target for 3 days; budget will be exhausted by month end."
+
+  # ---------------------------------------------------- RPC latency SLO 99%
+  - name: qfc-rpc-latency-slo
+    rules:
+      - alert: QfcRpcLatencyBurnRateFast
+        expr: |
+          qfc:rpc_slow_ratio:rate1h > (14.4 * 0.01)
+          and
+          qfc:rpc_slow_ratio:rate5m > (14.4 * 0.01)
+        for: 2m
+        labels:
+          severity: page
+          slo: rpc-latency
+        annotations:
+          summary: "RPC latency SLO fast burn (14.4x)"
+          description: >-
+            More than 14.4% of RPC requests in the last hour took longer than
+            250ms (99% <250ms SLO).
+
+      - alert: QfcRpcLatencyBurnRateSlow
+        expr: |
+          qfc:rpc_slow_ratio:rate6h > (6 * 0.01)
+          and
+          qfc:rpc_slow_ratio:rate30m > (6 * 0.01)
+        for: 15m
+        labels:
+          severity: ticket
+          slo: rpc-latency
+        annotations:
+          summary: "RPC latency SLO slow burn (6x)"
+          description: "Sustained slow RPC requests over the last 6h."
+
+  # -------------------------------------------------------- operational alerts
+  - name: qfc-node-operational
+    rules:
+      - alert: QfcNodeDown
+        expr: up{job="qfc-node"} == 0
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "qfc-node exporter down on {{ $labels.instance }}"
+          description: "Prometheus cannot scrape the node's /metrics endpoint."
+
+      - alert: QfcNoPeers
+        expr: qfc_peer_count == 0
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Node has no peers ({{ $labels.instance }})"
+          description: "qfc_peer_count has been 0 for 10m; node is isolated from the network."
+
+      - alert: QfcSyncLagHigh
+        expr: qfc_sync_lag_blocks > 50
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Node {{ $labels.instance }} is {{ $value }} blocks behind peers"
+          description: >-
+            qfc_sync_lag_blocks has exceeded 50 for 10m. Check qfc_sync_syncing
+            and qfc_sync_pending_blocks for a stuck sync pipeline.
+
+      - alert: QfcMempoolStuckTransactions
+        expr: qfc_mempool_oldest_tx_age_seconds > 900 and qfc_mempool_size > 0
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Oldest mempool tx is {{ $value | printf \"%.0f\" }}s old on {{ $labels.instance }}"
+          description: >-
+            Transactions are not being included in blocks (mempool TTL is 1h,
+            so >15m age means inclusion has stalled while txs still pend).
+
+      - alert: QfcReorgDetected
+        expr: increase(qfc_reorgs_detected_total[1h]) > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Chain reorg detected on {{ $labels.instance }}"
+          description: >-
+            The exporter observed a canonical-chain rewrite (scrape-granularity
+            detection). Investigate consensus health and peer divergence.
+
+  # ----------------------------------------------------------- rocksdb (T2.1)
+  # Metric sources: crates/qfc-node/src/metrics.rs `render_storage_metrics`.
+  # Property gauges (qfc_rocksdb_write_stopped, qfc_rocksdb_pending_compaction_bytes,
+  # qfc_rocksdb_l0_files, ...) are always exported; ticker counters
+  # (qfc_rocksdb_stall_micros_total, ...) require the node to run with
+  # --db-statistics (check qfc_storage_statistics_enabled). Alerts on ticker
+  # metrics simply never fire on nodes with statistics off — the hard-stop
+  # property alert below covers those nodes too.
+  - name: qfc-rocksdb
+    rules:
+      # Hard stall: RocksDB has stopped accepting writes entirely. The node
+      # cannot import blocks while this is 1. Property-based: fires even
+      # without --db-statistics.
+      - alert: QfcRocksdbWriteStopped
+        expr: qfc_rocksdb_write_stopped == 1
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "RocksDB writes are STOPPED on {{ $labels.instance }}"
+          description: >-
+            rocksdb.is-write-stopped = 1: L0/memtable/pending-compaction limits
+            were hit and writes are blocked. Block import is stalled. Check
+            qfc_rocksdb_l0_files and qfc_rocksdb_pending_compaction_bytes.
+
+      # Sustained soft stall: stall.micros is cumulative microseconds writer
+      # threads spent stalled, so rate() is stalled-µs per second. 50000 = 5%
+      # of wall-clock time spent stalled, sustained for 10m. Needs
+      # --db-statistics.
+      - alert: QfcRocksdbWriteStall
+        expr: rate(qfc_rocksdb_stall_micros_total[5m]) > 50000
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "RocksDB write stalls >5% of wall time on {{ $labels.instance }}"
+          description: >-
+            Compaction/flush cannot keep up with the write rate
+            ({{ $value | printf "%.0f" }}µs stalled per second). Check
+            pending-compaction bytes and L0 file counts per CF.
+
+      # Absolute compaction backlog. Property-based; pending bytes are per-CF,
+      # so sum to a node-level debt figure.
+      - alert: QfcRocksdbCompactionBacklog
+        expr: sum by (instance, job) (qfc_rocksdb_pending_compaction_bytes) > 64 * 1024 * 1024 * 1024
+        for: 30m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "RocksDB pending compaction backlog >64GiB ({{ $labels.instance }})"
+          description: >-
+            Total estimate-pending-compaction-bytes has exceeded 64GiB for 30m;
+            the LSM tree is falling behind and write stalls will follow.
+
+      # Growing backlog: debt rising for a sustained period while already
+      # non-trivial (>8GiB) — catches the trend before the absolute alert.
+      - alert: QfcRocksdbCompactionBacklogGrowing
+        expr: |
+          sum by (instance, job) (deriv(qfc_rocksdb_pending_compaction_bytes[30m])) > 0
+          and
+          sum by (instance, job) (qfc_rocksdb_pending_compaction_bytes) > 8 * 1024 * 1024 * 1024
+        for: 30m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "RocksDB compaction backlog growing on {{ $labels.instance }}"
+          description: >-
+            Pending compaction bytes have been trending upward for 30m from an
+            already-elevated level. Compaction is not keeping pace with writes.
+
+  # ------------------------------------------------- backup freshness (T4.2)
+  # Metric source: crates/qfc-node/src/metrics.rs `render_snapshot_backup_metrics`,
+  # fed by the snapshot backup task (crates/qfc-node/src/snapshot_backup.rs).
+  # The qfc_snapshot_* series only exist on nodes started with
+  # --snapshot-interval-secs, so these rules are no-data (silent) elsewhere.
+  #
+  # We alert on AGE, not job success: a backup pipeline that "succeeds" but
+  # stopped running is the failure mode that loses data.
+  #
+  # Threshold convention: stale at > 2x the deploy's --snapshot-interval-secs
+  # (one missed run + slack), page at clearly-broken. The snapshot interval is
+  # deploy-specific and not visible in any metric, so the 2x cannot be
+  # expressed generically in PromQL — the numbers below assume the recommended
+  # 1h interval (ticket at 2h = 2x1h, page at 12h). If you run a different
+  # interval, scale both thresholds accordingly (ticket = 2 * interval).
+  #
+  # qfc_snapshot_last_success_timestamp_seconds is 0 until the first success
+  # after process start, so a node whose backups never succeed fires these
+  # alerts too (age evaluates to ~now). The `for:` window absorbs restarts.
+  # ----------------------------------------------------------- watchdog (T6)
+  # Metric source: crates/qfc-watchdog/src/exporter.rs — the OUT-OF-PROCESS
+  # watchdog's own /metrics endpoint (default :6061), one watchdog per node.
+  # Scrape it as its own job:
+  #
+  #   - job_name: qfc-watchdog
+  #     scrape_interval: 15s
+  #     static_configs:
+  #       - targets: ["node-a:6061", "node-b:6061"]
+  #
+  # Design (docs/WATCHDOG.md): detection-first. The health score aggregates
+  # the watchdog's detectors (block-production stall, stuck sync, compaction
+  # stall, metrics-down, rpc-down); each firing detector subtracts its weight
+  # from 100. Action mode is opt-in (--action-cmd) and hard-gated; the alerts
+  # below are the human side of those gates.
+  - name: qfc-watchdog
+    rules:
+      # Sustained sub-100 health = some detector has been firing for 15m.
+      # Ticket, not page: the per-cause pages (QfcBlockProductionStalled,
+      # QfcRocksdbWriteStopped, QfcNodeDown) already cover the acute cases —
+      # this is the watchdog's own aggregated view for triage.
+      - alert: QfcWatchdogHealthScoreLow
+        expr: qfc_watchdog_health_score < 100
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Watchdog health score {{ $value }} on {{ $labels.instance }} for 15m"
+          description: >-
+            One or more watchdog detectors have been firing for 15 minutes.
+            Check qfc_watchdog_detector_firing == 1 for which, and the
+            watchdog logs for the evidence lines (detector FIRED entries).
+
+      # An automated restart happened. Always worth a look even when it
+      # worked: a node that needed restarting has an underlying problem, and
+      # automation that acts silently does not earn trust.
+      - alert: QfcWatchdogActionTaken
+        expr: increase(qfc_watchdog_actions_total[1h]) > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Watchdog executed a remediation action on {{ $labels.instance }}"
+          description: >-
+            The watchdog ran its --action-cmd (e.g. a node restart). Verify
+            the node recovered (qfc_watchdog_health_score back at 100) and
+            read the evidence dump in the watchdog logs. Repeated actions on
+            the same node mean the restart is treating a symptom.
+
+      # Automation is out of budget AND the node is still unhealthy: the
+      # watchdog is standing down by design — a human must take over now.
+      - alert: QfcWatchdogActionBudgetExhausted
+        expr: |
+          qfc_watchdog_action_budget_exhausted == 1
+          and
+          qfc_watchdog_health_score < 100
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Watchdog action budget exhausted, node still unhealthy ({{ $labels.instance }})"
+          description: >-
+            The watchdog wants to act but --max-actions-per-hour is spent
+            (restarts are not fixing it). Automation will keep alerting only.
+            Investigate the node directly; the watchdog logs carry the full
+            evidence for every action taken this hour.
+
+  - name: qfc-backup-freshness
+    rules:
+      - alert: QfcSnapshotBackupStale
+        expr: time() - qfc_snapshot_last_success_timestamp_seconds > 2 * 3600
+        for: 15m
+        labels:
+          severity: ticket
+          slo: backup-freshness
+        annotations:
+          summary: "Last successful snapshot backup is older than 2h ({{ $labels.instance }})"
+          description: >-
+            RPO at risk: no snapshot has been created+shipped successfully for
+            2x the expected interval. Check qfc_snapshot_failures_total and
+            qfc_snapshot_last_attempt_timestamp_seconds — attempts without
+            successes mean the archive/upload step is failing (node logs have
+            the upload command stderr); no attempts mean the task is not
+            running.
+      - alert: QfcSnapshotBackupVeryStale
+        expr: time() - qfc_snapshot_last_success_timestamp_seconds > 12 * 3600
+        for: 15m
+        labels:
+          severity: page
+          slo: backup-freshness
+        annotations:
+          summary: "No successful snapshot backup for >12h ({{ $labels.instance }})"
+          description: >-
+            Disaster-recovery coverage is gone stale: a node loss now means
+            restoring from a >12h-old snapshot or a full peer re-sync.

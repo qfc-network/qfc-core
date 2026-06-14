@@ -11,31 +11,51 @@
 //! - **Registry**: Governance-approved model list
 
 pub mod assignment;
+pub mod chain_store;
 pub mod challenge;
+pub mod cost;
 pub mod governance;
 pub mod ipfs;
 pub mod param_governance;
 pub mod proof_pool;
+pub mod quota;
 pub mod redundant;
 pub mod registry;
 pub mod router;
+pub mod settlement;
 pub mod task_pool;
 pub mod task_types;
+pub mod training;
+pub mod training_verification;
 pub mod treasury;
 pub mod verification;
 
 pub use assignment::{MinerCapability, MinerRegistry};
+pub use chain_store::TrainingChainStore;
 pub use challenge::{
     ArbitrationManager, ArbitrationOutcome, ArbitrationPanel, ArbitrationVote, ChallengeGenerator,
     ChallengePenalty, ChallengeVerdict,
 };
+pub use cost::{CostEntry, CostMeter, CostReport, LoggingTreasuryHook, TreasuryHook};
 pub use governance::{GovernanceError, ModelGovernance, ModelProposal, ProposalStatus};
 pub use param_governance::{
     ParamGovernanceError, ParamProposalStatus, ParameterGovernance, ParameterKey, ParameterProposal,
 };
 pub use proof_pool::ProofPool;
-pub use task_pool::{PublicTaskFilter, TaskPool};
+pub use quota::{QuotaConfig, QuotaConfigError, QuotaError, TierQuota};
+pub use settlement::{
+    penalty_to_slash, records_root, settle_epoch, EpochSettlement, RewardCredit, SettlementError,
+    TrainingEpochCommit,
+};
+pub use task_pool::{AiQuotaMetrics, PublicTaskFilter, TaskPool};
 pub use task_types::estimate_base_fee;
+pub use training::{
+    TrainingAssignment, TrainingError, TrainingJobSpec, TrainingJobStatus, TrainingPool,
+};
+pub use training_verification::{
+    CompareMode, ReplayContext, TrainingExecutor, TrainingPenalty, TrainingVerdict,
+    TrainingVerificationError, TrainingVerifier, INVALID_TRAINING_JAIL_MS,
+};
 pub use treasury::{SpendProposal, SpendStatus, Treasury, TreasuryError};
 pub use verification::{
     should_spot_check, verify_basic, verify_spot_check, VerificationError, VerificationResult,

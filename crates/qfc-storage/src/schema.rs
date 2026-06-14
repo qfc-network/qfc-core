@@ -59,6 +59,13 @@ pub mod cf {
     /// Persists completed/expired/failed tasks for long-term querying
     pub const TASKS: &str = "tasks";
 
+    /// Training-epoch commitments (ROADMAP-AI-V3 ADR-0009 Decision 5):
+    /// job_id (32 bytes Hash) + epoch (u64 BE) -> TrainingEpochCommit (borsh).
+    /// Append-only on-chain anchor for each closed training epoch; range-scan
+    /// over the job_id prefix yields a job's commits in epoch order. Written
+    /// by `qfc-ai-coordinator`'s `TrainingChainStore`.
+    pub const TRAINING_COMMITMENTS: &str = "training_commitments";
+
     /// All column families
     pub const ALL: &[&str] = &[
         BLOCK_HEADERS,
@@ -79,6 +86,7 @@ pub mod cf {
         ETH_TX_INDEX,
         MINER_EARNINGS,
         TASKS,
+        TRAINING_COMMITMENTS,
     ];
 }
 

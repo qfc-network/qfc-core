@@ -1,0 +1,31 @@
+[package]
+name = "qfc-training-pilot"
+description = "In-process end-to-end decentralized-training pilot (ROADMAP-AI-V3 milestone A6, ADR-0010)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "qfc_training_pilot"
+path = "src/lib.rs"
+
+[[bin]]
+name = "qfc-training-pilot"
+path = "src/main.rs"
+
+[dependencies]
+qfc-ps.workspace = true
+qfc-ai-coordinator.workspace = true
+qfc-types.workspace = true
+qfc-crypto.workspace = true
+qfc-inference.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+rand.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

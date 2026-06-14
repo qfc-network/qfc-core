@@ -226,7 +226,12 @@ pub trait QfcApi {
 
     // ---- v2.0: Public Inference API endpoints ----
 
-    /// Submit a public inference task (paid)
+    /// Submit a public inference task (paid).
+    ///
+    /// T5: may fail with JSON-RPC error `-32029` when the submitter's quota
+    /// is exceeded (QPS / in-flight / FLOPs budget) or the pool is shedding
+    /// low-priority tenants under pressure; the error `data` carries
+    /// `{reason, retryAfterMs}`. See docs/AI-QUOTAS.md.
     #[method(name = "submitPublicTask")]
     async fn submit_public_task(&self, request: RpcSubmitPublicTask) -> RpcResult<String>;
 
@@ -405,6 +410,104 @@ pub trait QfcApi {
     /// Get agent balance (stake + deposit)
     #[method(name = "getAgentBalance")]
     async fn get_agent_balance(&self, agent_id: String) -> RpcResult<RpcAgentBalance>;
+
+    // ---- SRE T8: hot-key analytics ----
+
+    /// On-demand hot-key / hot-account analytics report.
+    ///
+    /// Returns the current sampling-window snapshot: per-CF traffic with the
+    /// ranked hottest keys, plus the hottest accounts and contract bytecode —
+    /// the full ranked identities that are deliberately kept out of the
+    /// Prometheus labels. `topN` (default 16, clamped to 1..=256) bounds the
+    /// ranked lists. When the node runs without `--hot-key-sampling`,
+    /// `samplingEnabled` is false and the detail fields are null. The same
+    /// data is logged per window to the `qfc::hot_keys` target when
+    /// `--hot-key-window-secs` is set. See docs/profiling/HOT-KEYS.md.
+    #[method(name = "hotKeyReport")]
+    async fn hot_key_report(&self, top_n: Option<usize>) -> RpcResult<RpcHotKeyReport>;
+}
+
+/// T8: combined hot-key / hot-account report. Detail fields are `null` when
+/// the node is not running with `--hot-key-sampling`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcHotKeyReport {
+    /// Whether hot-key sampling is active on this node.
+    pub sampling_enabled: bool,
+    /// Effective 1-in-N sampling rate (0 when disabled).
+    pub sampling_rate: u32,
+    /// Size of the ranked lists requested.
+    pub top_n: usize,
+    /// Per-CF storage-level sampling, or `null` when disabled.
+    pub storage: Option<RpcHotKeyStorage>,
+    /// Account/bytecode-level sampling, or `null` when disabled.
+    pub accounts: Option<RpcHotAccounts>,
+}
+
+/// Storage-level (per-column-family) hot-key sampling.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcHotKeyStorage {
+    pub sampling_rate: u32,
+    pub sketch_capacity: usize,
+    pub window_start_unix_ms: u64,
+    pub cfs: Vec<RpcCfHotKeys>,
+}
+
+/// Per-column-family hot-key stats.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcCfHotKeys {
+    pub cf: String,
+    pub reads_sampled: u64,
+    pub writes_sampled: u64,
+    pub estimated_reads: u64,
+    pub estimated_writes: u64,
+    pub top_keys: Vec<RpcHotKeyEntry>,
+}
+
+/// One ranked hot key (`keyHex` is the raw `0x…` key).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcHotKeyEntry {
+    pub key_hex: String,
+    pub sampled_count: u64,
+    pub estimated_count: u64,
+    pub max_overestimate: u64,
+}
+
+/// Account/bytecode-level hot-key sampling.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcHotAccounts {
+    pub sampling_rate: u32,
+    pub sketch_capacity: usize,
+    pub window_start_unix_ms: u64,
+    pub estimated_account_reads: u64,
+    pub estimated_account_writes: u64,
+    pub estimated_code_reads: u64,
+    pub top_accounts: Vec<RpcHotAccountEntry>,
+    pub top_code: Vec<RpcHotCodeEntry>,
+}
+
+/// One ranked hot account.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcHotAccountEntry {
+    pub address: String,
+    pub sampled_count: u64,
+    pub estimated_count: u64,
+    pub max_overestimate: u64,
+}
+
+/// One ranked hot contract bytecode (by code hash).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcHotCodeEntry {
+    pub code_hash: String,
+    pub sampled_count: u64,
+    pub estimated_count: u64,
+    pub max_overestimate: u64,
 }
 
 /// Faucet response
@@ -670,6 +773,13 @@ pub struct RpcProposeModelRequest {
     pub min_memory_mb: u64,
     pub min_tier: String,
     pub size_mb: u64,
+    /// Blake3 hash of the model weight file (0x-hex, optional)
+    #[serde(default)]
+    pub weights_hash: Option<String>,
+    /// Sharded distribution manifest (ADR-0001, optional). Reuses the
+    /// canonical `ShardManifest` serde shape: hashes are 0x-hex strings.
+    #[serde(default)]
+    pub shard_manifest: Option<qfc_inference::ShardManifest>,
 }
 
 /// Request to vote on a model proposal

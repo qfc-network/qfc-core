@@ -36,7 +36,8 @@ pub fn collect_gpu_metrics(backend: BackendType) -> GpuMetrics {
 
 /// Parse nvidia-smi CSV output for GPU metrics
 fn collect_nvidia_metrics() -> GpuMetrics {
-    let output = std::process::Command::new("nvidia-smi")
+    let nvidia_smi = crate::runtime::find_nvidia_smi();
+    let output = std::process::Command::new(&nvidia_smi)
         .args([
             "--query-gpu=temperature.gpu,power.draw,utilization.gpu,memory.used,memory.total",
             "--format=csv,noheader,nounits",
@@ -248,10 +249,60 @@ fn get_system_memory() -> (u64, u64) {
         let available = parse_field("MemAvailable:");
         (total.saturating_sub(available), total)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        get_macos_memory()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        get_windows_memory()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         (0, 0)
     }
+}
+
+#[cfg(target_os = "windows")]
+fn get_windows_memory() -> (u64, u64) {
+    // Use wmic to get total and free physical memory
+    let total = std::process::Command::new("wmic")
+        .args(["ComputerSystem", "get", "TotalPhysicalMemory", "/value"])
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+                stdout.lines().find_map(|line| {
+                    line.strip_prefix("TotalPhysicalMemory=")
+                        .and_then(|v| v.trim().parse::<u64>().ok())
+                })
+            } else {
+                None
+            }
+        })
+        .map(|bytes| bytes / (1024 * 1024))
+        .unwrap_or(0);
+
+    let free = std::process::Command::new("wmic")
+        .args(["OS", "get", "FreePhysicalMemory", "/value"])
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+                stdout.lines().find_map(|line| {
+                    line.strip_prefix("FreePhysicalMemory=")
+                        .and_then(|v| v.trim().parse::<u64>().ok())
+                })
+            } else {
+                None
+            }
+        })
+        .map(|kb| kb / 1024) // wmic reports free memory in KB
+        .unwrap_or(0);
+
+    (total.saturating_sub(free), total)
 }
 
 #[cfg(test)]

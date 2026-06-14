@@ -886,6 +886,26 @@ impl SyncManager {
             evidence.offender, evidence.offense, evidence.reporter
         );
 
+        // InvalidTraining is settled ONLY via the A5 absolute-slash path
+        // (`SlashResult.slashed_amount` = `slash_multiple × per_step_reward`,
+        // ADR-0009 Decision 4) and applied by the A6 absolute-amount slash
+        // entry point in consensus — it MUST NOT flow through the
+        // percent-of-stake `slash_validator(percent, ..)` path below. Routing
+        // it here would (a) silently drop the absolute-40r deterrent (a 0%
+        // slash) and (b) let any known validator jail an arbitrary victim for
+        // free by signing `SlashingEvidence{offense: InvalidTraining}`. Reject
+        // it explicitly: no state change, no jail.
+        if evidence.offense == qfc_types::SlashableOffense::InvalidTraining {
+            warn!(
+                "Rejecting InvalidTraining slashing evidence against {} from {}: \
+                 InvalidTraining is settled via the A5 absolute-slash path \
+                 (SlashResult.slashed_amount, ADR-0009 D4) and MUST NOT be applied \
+                 through the percent slash path (A6)",
+                evidence.offender, evidence.reporter
+            );
+            return;
+        }
+
         // Determine slash parameters based on offense type
         let (slash_percent, jail_duration_ms) = match evidence.offense {
             qfc_types::SlashableOffense::DoubleSign => (10, 24 * 60 * 60 * 1000), // 10%, 24 hours
@@ -894,6 +914,11 @@ impl SyncManager {
             qfc_types::SlashableOffense::Offline => (1, 1 * 60 * 60 * 1000),      // 1%, 1 hour
             qfc_types::SlashableOffense::FalseVote => (2, 2 * 60 * 60 * 1000),    // 2%, 2 hours
             qfc_types::SlashableOffense::InvalidInference => (5, 6 * 60 * 60 * 1000), // 5%, 6 hours
+            // InvalidTraining is handled by the early-return guard above
+            // (A5 absolute-slash path, ADR-0009 D4 + A6) and never reaches here.
+            qfc_types::SlashableOffense::InvalidTraining => {
+                unreachable!("InvalidTraining must be rejected before the percent-slash dispatch")
+            }
         };
 
         // Apply the slash

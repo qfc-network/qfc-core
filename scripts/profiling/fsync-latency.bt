@@ -1,0 +1,23 @@
+#!/usr/bin/env bpftrace
+/*
+ * fsync-latency.bt — distribution of fsync/fdatasync syscall latency, per
+ * thread name. On a QFC validator this is the WAL durability cost: once T3.2
+ * (set_sync(true) per canonical block, PR #103) is deployed, the commit
+ * thread fsyncs every block and shows up here. Run while the node produces
+ * blocks. See docs/profiling/ebpf/T1-eBPF.md.
+ *
+ *   sudo bpftrace scripts/profiling/fsync-latency.bt
+ */
+tracepoint:syscalls:sys_enter_fsync,
+tracepoint:syscalls:sys_enter_fdatasync { @start[tid] = nsecs; @c[tid] = comm; }
+
+tracepoint:syscalls:sys_exit_fsync,
+tracepoint:syscalls:sys_exit_fdatasync /@start[tid]/ {
+  $us = (nsecs - @start[tid]) / 1000;
+  @fsync_latency_us = hist($us);
+  @by_comm_us[@c[tid]] = hist($us);
+  @calls[@c[tid]] = count();
+  delete(@start[tid]); delete(@c[tid]);
+}
+
+interval:s:60 { exit(); }

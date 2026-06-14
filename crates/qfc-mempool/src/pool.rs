@@ -343,6 +343,12 @@ impl Mempool {
         *self.size.read()
     }
 
+    /// Age of the oldest transaction currently in the pool (T2.2 observability).
+    /// Returns `None` when the pool is empty.
+    pub fn oldest_tx_age(&self) -> Option<Duration> {
+        self.by_hash.iter().map(|r| r.added_at.elapsed()).max()
+    }
+
     /// Check if pool is empty
     pub fn is_empty(&self) -> bool {
         self.size() == 0
@@ -456,6 +462,20 @@ mod tests {
 
         pool.remove(&hash);
         assert!(!pool.contains(&hash));
+    }
+
+    #[test]
+    fn test_oldest_tx_age() {
+        let pool = Mempool::default_pool();
+        assert!(pool.oldest_tx_age().is_none());
+
+        let sender = Address::new([0x11; 20]);
+        pool.add(create_test_tx(0, 2_000_000_000), sender).unwrap();
+        std::thread::sleep(Duration::from_millis(10));
+        pool.add(create_test_tx(1, 2_000_000_000), sender).unwrap();
+
+        let age = pool.oldest_tx_age().unwrap();
+        assert!(age >= Duration::from_millis(10));
     }
 
     #[test]

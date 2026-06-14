@@ -1,0 +1,23 @@
+# T1 eBPF capture context
+
+## host
+Linux qfc-node 6.17.0-1007-aws #7~24.04.1-Ubuntu SMP Thu Jan 22 20:37:30 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+PRETTY_NAME="Ubuntu 24.04.4 LTS"
+
+## disk
+NAME     SIZE ROTA TYPE
+nvme0n1  100G    0 disk
+
+## qfc-node-1 image
+ghcr.io/qfc-network/qfc-core:staging-sha-8cf3cb0
+## qfc-node-1 PID/threads
+pid=2555487
+      8 qfc-node
+      3 tokio-rt-worker
+      1 rocksdb:low
+      1 rocksdb:high
+      1 futures-timer
+
+## tools
+bpftrace v0.20.2
+perf version 6.17.9

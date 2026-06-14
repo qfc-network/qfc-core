@@ -217,6 +217,7 @@ mod tests {
             approved: false,
             canonical_format: qfc_inference::CanonicalFormat::SafetensorsFp32,
             weights_hash: None,
+            shard_manifest: None,
         }
     }
 
