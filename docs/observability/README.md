@@ -240,6 +240,12 @@ persistent state handle (`chain.state()`); the sync path's transient
 exporter. The estimates carry space-saving overestimation plus 1-in-N sampling
 noise (~`sqrt(N / true_count)` relative) — see HOT-KEYS.md for error bounds.
 
+These metrics are visualized in the **Hot keys & accounts (T8)** row of the
+Grafana dashboard (sampling status, per-CF access rate, and the per-CF /
+account / bytecode skew gauges). The traffic panels apply `deriv()` to the
+cumulative window gauges to show throughput; the skew panels plot the raw
+cumulative top-entry counts.
+
 ## Snapshot backups (T4.2) and the backup-freshness metrics
 
 Nodes started with `--snapshot-interval-secs <N>` (env
