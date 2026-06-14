@@ -405,6 +405,13 @@ async fn main() -> Result<()> {
                     }
                 });
 
+                // Forward catch-up loop: range-sync missing blocks in order
+                // when we fall behind peers (initial sync + recovery).
+                let sync_manager_for_catchup = sync_manager.clone();
+                tokio::spawn(async move {
+                    sync_manager_for_catchup.run_catch_up_loop().await;
+                });
+
                 Some((service, sync_manager))
             }
             Err(e) => {

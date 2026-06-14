@@ -18,8 +18,18 @@ use tracing::{debug, error, info, warn};
 /// Maximum number of blocks to request at once
 const MAX_BLOCKS_PER_REQUEST: u64 = 32;
 
-/// Maximum number of pending blocks waiting for parents (prevents memory exhaustion)
+/// Maximum number of pending blocks waiting for parents (prevents memory exhaustion).
+/// Only the gossip backward-walk uses this, for small reorg gaps — deep
+/// catch-up goes through the forward range sync (`run_catch_up_loop`), which
+/// imports in order and never queues out-of-order blocks.
 const MAX_PENDING_BLOCKS: usize = 1_000;
+
+/// How often the catch-up loop checks whether we've fallen behind peers.
+const CATCH_UP_INTERVAL_SECS: u64 = 5;
+
+/// Begin a forward catch-up once we are more than this many blocks behind the
+/// highest block height seen from peers.
+const CATCH_UP_LAG_THRESHOLD: u64 = 2;
 
 /// Sync state information
 #[derive(Clone, Debug, Default)]
@@ -148,6 +158,54 @@ impl SyncManager {
         let mut highest = self.highest_peer_block.write();
         if height > *highest {
             *highest = height;
+        }
+    }
+
+    /// Whether a node at `our_height` should start a forward catch-up given the
+    /// highest block height seen from peers. Pure; split out for testing.
+    fn should_catch_up(our_height: u64, highest_peer: u64) -> bool {
+        highest_peer > our_height + CATCH_UP_LAG_THRESHOLD
+    }
+
+    /// Periodic forward catch-up loop.
+    ///
+    /// When we fall behind the highest known peer, download the missing blocks
+    /// **in order by number** (range requests) and import them sequentially.
+    /// In-order import never hits a missing parent, so this catches a node up
+    /// from any depth — including a fresh node syncing from genesis. The gossip
+    /// backward-walk (`request_missing_blocks`) is kept only for small reorg
+    /// gaps; its bounded pending buffer cannot bridge a large lag, which is why
+    /// behind nodes previously got stuck re-requesting forever.
+    ///
+    /// Runs sequentially (each tick awaits the full sync), so catch-ups never
+    /// overlap. Spawn once at startup.
+    pub async fn run_catch_up_loop(self: Arc<Self>) {
+        let mut ticker =
+            tokio::time::interval(std::time::Duration::from_secs(CATCH_UP_INTERVAL_SECS));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+
+            let our_height = self.chain.block_number();
+            let highest_peer = *self.highest_peer_block.read();
+            if !Self::should_catch_up(our_height, highest_peer) {
+                continue;
+            }
+
+            let Some(peer) = self.network.peers().first().copied() else {
+                continue;
+            };
+
+            info!(
+                "Catch-up: {} blocks behind (us {}, peer head {}), syncing forward from {}",
+                highest_peer.saturating_sub(our_height),
+                our_height,
+                highest_peer,
+                peer
+            );
+            // sync_with_peer verifies the peer's genesis, then range-syncs
+            // forward in order via sync_blocks_from_peer.
+            self.sync_with_peer(peer).await;
         }
     }
 
@@ -1265,8 +1323,9 @@ impl SyncManager {
         );
     }
 
-    /// Initiate sync with a peer
-    #[allow(dead_code)] // Will be used when initial sync is implemented
+    /// Initiate sync with a peer: check its status, and if it is ahead,
+    /// range-sync the missing blocks forward in order. Driven by
+    /// [`run_catch_up_loop`].
     pub async fn sync_with_peer(&self, peer_id: PeerId) {
         info!("Starting sync with peer {}", peer_id);
 
@@ -1369,5 +1428,23 @@ impl SyncStatusProvider for SyncManager {
 
     fn pending_count(&self) -> usize {
         self.pending_blocks.read().len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SyncManager;
+
+    /// Catch-up triggers only once we are more than the lag threshold (2)
+    /// behind the highest known peer — never when level or only marginally
+    /// behind (avoids thrashing on normal gossip latency).
+    #[test]
+    fn should_catch_up_threshold() {
+        assert!(!SyncManager::should_catch_up(100, 0)); // no peer height yet
+        assert!(!SyncManager::should_catch_up(100, 100)); // level
+        assert!(!SyncManager::should_catch_up(100, 101)); // 1 behind
+        assert!(!SyncManager::should_catch_up(100, 102)); // 2 behind (== threshold)
+        assert!(SyncManager::should_catch_up(100, 103)); // 3 behind → catch up
+        assert!(SyncManager::should_catch_up(0, 500_000)); // fresh node from genesis
     }
 }
