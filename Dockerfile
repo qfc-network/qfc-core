@@ -6,7 +6,7 @@
 # ============================================
 # Stage 1: Chef planner — analyse dependencies
 # ============================================
-FROM rust:1.88-bookworm AS chef
+FROM rust:1-bookworm AS chef
 RUN cargo install cargo-chef --locked
 WORKDIR /build
 
