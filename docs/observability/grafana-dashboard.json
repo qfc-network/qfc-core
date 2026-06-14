@@ -11,24 +11,38 @@
   ],
   "title": "QFC Node Observability (T2)",
   "uid": "qfc-node-observability",
-  "tags": ["qfc", "blockchain", "sre"],
+  "tags": [
+    "qfc",
+    "blockchain",
+    "sre"
+  ],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 2,
+  "version": 3,
   "refresh": "15s",
-  "time": { "from": "now-6h", "to": "now" },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
   "templating": {
     "list": [
       {
         "name": "instance",
         "type": "query",
         "label": "Instance",
-        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
         "query": "label_values(qfc_block_height, instance)",
         "refresh": 2,
         "includeAll": true,
         "multi": false,
-        "current": { "selected": false, "text": "All", "value": "$__all" }
+        "current": {
+          "selected": false,
+          "text": "All",
+          "value": "$__all"
+        }
       }
     ]
   },
@@ -36,27 +50,60 @@
     {
       "type": "row",
       "title": "Block production",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
       "collapsed": false,
       "panels": []
     },
     {
       "type": "stat",
       "title": "Block height",
-      "gridPos": { "h": 5, "w": 4, "x": 0, "y": 1 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 0,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
-        { "expr": "max(qfc_block_height{instance=~\"$instance\"})", "refId": "A" }
+        {
+          "expr": "max(qfc_block_height{instance=~\"$instance\"})",
+          "refId": "A"
+        }
       ],
-      "fieldConfig": { "defaults": { "unit": "none", "decimals": 0 }, "overrides": [] }
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0
+        },
+        "overrides": []
+      }
     },
     {
       "type": "stat",
       "title": "Reorgs detected (24h)",
-      "gridPos": { "h": 5, "w": 4, "x": 4, "y": 1 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 4,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
-        { "expr": "sum(increase(qfc_reorgs_detected_total{instance=~\"$instance\"}[24h]))", "refId": "A" }
+        {
+          "expr": "sum(increase(qfc_reorgs_detected_total{instance=~\"$instance\"}[24h]))",
+          "refId": "A"
+        }
       ],
       "fieldConfig": {
         "defaults": {
@@ -65,8 +112,14 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "red", "value": 1 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
             ]
           }
         },
@@ -76,8 +129,16 @@
     {
       "type": "timeseries",
       "title": "Time since last block (block-production SLI, alert at 30s)",
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 1 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "qfc_time_since_last_block_seconds{instance=~\"$instance\"}",
@@ -88,12 +149,21 @@
       "fieldConfig": {
         "defaults": {
           "unit": "s",
-          "custom": { "drawStyle": "line", "fillOpacity": 10 },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "red", "value": 30 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 30
+              }
             ]
           }
         },
@@ -103,8 +173,16 @@
     {
       "type": "timeseries",
       "title": "Block production rate (blocks/min) & block time",
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 1 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "rate(qfc_blocks_produced_total{instance=~\"$instance\"}[5m]) * 60",
@@ -118,15 +196,28 @@
         }
       ],
       "fieldConfig": {
-        "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 5 } },
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 5
+          }
+        },
         "overrides": []
       }
     },
     {
       "type": "timeseries",
       "title": "Transactions processed (rate)",
-      "gridPos": { "h": 3, "w": 8, "x": 0, "y": 6 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "h": 3,
+        "w": 8,
+        "x": 0,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "rate(qfc_transactions_total{instance=~\"$instance\"}[5m])",
@@ -134,20 +225,38 @@
           "refId": "A"
         }
       ],
-      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      }
     },
     {
       "type": "row",
       "title": "Sync & network",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 9
+      },
       "collapsed": false,
       "panels": []
     },
     {
       "type": "timeseries",
       "title": "Sync lag vs peers (blocks)",
-      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 10 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 10
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "qfc_sync_lag_blocks{instance=~\"$instance\"}",
@@ -162,13 +271,25 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "custom": { "drawStyle": "line", "fillOpacity": 10 },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 10 },
-              { "color": "red", "value": 50 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 10
+              },
+              {
+                "color": "red",
+                "value": 50
+              }
             ]
           }
         },
@@ -178,8 +299,16 @@
     {
       "type": "timeseries",
       "title": "Local height vs highest peer",
-      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 10 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 10
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "qfc_block_height{instance=~\"$instance\"}",
@@ -192,13 +321,28 @@
           "refId": "B"
         }
       ],
-      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line" } }, "overrides": [] }
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line"
+          }
+        },
+        "overrides": []
+      }
     },
     {
       "type": "timeseries",
       "title": "Peers / validators / syncing",
-      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 10 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 10
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "qfc_peer_count{instance=~\"$instance\"}",
@@ -216,20 +360,40 @@
           "refId": "C"
         }
       ],
-      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line" } }, "overrides": [] }
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line"
+          }
+        },
+        "overrides": []
+      }
     },
     {
       "type": "row",
       "title": "Mempool",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 17 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
       "collapsed": false,
       "panels": []
     },
     {
       "type": "timeseries",
       "title": "Mempool depth",
-      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 18 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 18
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "qfc_mempool_size{instance=~\"$instance\"}",
@@ -238,15 +402,28 @@
         }
       ],
       "fieldConfig": {
-        "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 20 } },
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 20
+          }
+        },
         "overrides": []
       }
     },
     {
       "type": "timeseries",
       "title": "Oldest pending tx age (alert at 15m)",
-      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 18 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 18
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "qfc_mempool_oldest_tx_age_seconds{instance=~\"$instance\"}",
@@ -257,12 +434,21 @@
       "fieldConfig": {
         "defaults": {
           "unit": "s",
-          "custom": { "drawStyle": "line", "fillOpacity": 10 },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "red", "value": 900 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 900
+              }
             ]
           }
         },
@@ -271,16 +457,29 @@
     },
     {
       "type": "row",
-      "title": "RPC — latency & error SLOs",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 25 },
+      "title": "RPC \u2014 latency & error SLOs",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 25
+      },
       "collapsed": false,
       "panels": []
     },
     {
       "type": "timeseries",
       "title": "RPC latency p50 / p99 / p999 (all methods)",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 26 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 26
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "histogram_quantile(0.5, sum by (le) (rate(qfc_rpc_request_duration_seconds_bucket{instance=~\"$instance\"}[5m])))",
@@ -301,12 +500,21 @@
       "fieldConfig": {
         "defaults": {
           "unit": "s",
-          "custom": { "drawStyle": "line", "fillOpacity": 5 },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 5
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "red", "value": 0.25 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.25
+              }
             ]
           }
         },
@@ -316,8 +524,16 @@
     {
       "type": "timeseries",
       "title": "RPC p99 latency by method (top consumers)",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 26 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 26
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "histogram_quantile(0.99, sum by (le, method) (rate(qfc_rpc_request_duration_seconds_bucket{instance=~\"$instance\"}[5m])))",
@@ -326,15 +542,28 @@
         }
       ],
       "fieldConfig": {
-        "defaults": { "unit": "s", "custom": { "drawStyle": "line" } },
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line"
+          }
+        },
         "overrides": []
       }
     },
     {
       "type": "timeseries",
       "title": "RPC request rate by method",
-      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 34 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 34
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "sum by (method) (rate(qfc_rpc_requests_total{instance=~\"$instance\"}[5m]))",
@@ -343,15 +572,32 @@
         }
       ],
       "fieldConfig": {
-        "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "stacking": { "mode": "normal" }, "fillOpacity": 30 } },
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "drawStyle": "line",
+            "stacking": {
+              "mode": "normal"
+            },
+            "fillOpacity": 30
+          }
+        },
         "overrides": []
       }
     },
     {
       "type": "timeseries",
-      "title": "RPC error ratio (availability SLO 99.9% — budget line 0.1%)",
-      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 34 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "title": "RPC error ratio (availability SLO 99.9% \u2014 budget line 0.1%)",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 34
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "sum(rate(qfc_rpc_errors_total{instance=~\"$instance\",code!~\"-32700|-32600|-32601|-32602\"}[5m])) / clamp_min(sum(rate(qfc_rpc_requests_total{instance=~\"$instance\"}[5m])), 1e-10)",
@@ -367,28 +613,53 @@
       "fieldConfig": {
         "defaults": {
           "unit": "percentunit",
-          "custom": { "drawStyle": "line", "fillOpacity": 10 },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "red", "value": 0.001 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.001
+              }
             ]
           }
         },
         "overrides": [
           {
-            "matcher": { "id": "byFrameRefID", "options": "B" },
-            "properties": [{ "id": "unit", "value": "ops" }]
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ops"
+              }
+            ]
           }
         ]
       }
     },
     {
       "type": "timeseries",
-      "title": "RPC slow-request ratio (>250ms; latency SLO 99% — budget line 1%) & in-flight",
-      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 34 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "title": "RPC slow-request ratio (>250ms; latency SLO 99% \u2014 budget line 1%) & in-flight",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 34
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "1 - (sum(rate(qfc_rpc_request_duration_seconds_bucket{instance=~\"$instance\",le=\"0.25\"}[5m])) / clamp_min(sum(rate(qfc_rpc_request_duration_seconds_count{instance=~\"$instance\"}[5m])), 1e-10))",
@@ -404,19 +675,36 @@
       "fieldConfig": {
         "defaults": {
           "unit": "percentunit",
-          "custom": { "drawStyle": "line", "fillOpacity": 10 },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "red", "value": 0.01 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.01
+              }
             ]
           }
         },
         "overrides": [
           {
-            "matcher": { "id": "byFrameRefID", "options": "B" },
-            "properties": [{ "id": "unit", "value": "none" }]
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              }
+            ]
           }
         ]
       }
@@ -424,15 +712,28 @@
     {
       "type": "row",
       "title": "RocksDB storage engine",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 41 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 41
+      },
       "collapsed": false,
       "panels": []
     },
     {
       "type": "timeseries",
       "title": "Write stall time (fraction of wall clock; counters need --db-statistics)",
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 42 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 42
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "rate(qfc_rocksdb_stall_micros_total{instance=~\"$instance\"}[5m]) / 1e6",
@@ -448,12 +749,21 @@
       "fieldConfig": {
         "defaults": {
           "unit": "percentunit",
-          "custom": { "drawStyle": "line", "fillOpacity": 10 },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "red", "value": 0.05 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.05
+              }
             ]
           }
         },
@@ -463,8 +773,16 @@
     {
       "type": "timeseries",
       "title": "Pending compaction bytes (alert at 64GiB total)",
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 42 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 42
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "sum by (instance) (qfc_rocksdb_pending_compaction_bytes{instance=~\"$instance\"})",
@@ -480,12 +798,21 @@
       "fieldConfig": {
         "defaults": {
           "unit": "bytes",
-          "custom": { "drawStyle": "line", "fillOpacity": 10 },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "red", "value": 68719476736 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 68719476736
+              }
             ]
           }
         },
@@ -495,8 +822,16 @@
     {
       "type": "timeseries",
       "title": "Block cache hit ratio & bloom negatives (need --db-statistics)",
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 42 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 42
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "rate(qfc_rocksdb_block_cache_hits_total{instance=~\"$instance\"}[5m]) / clamp_min(rate(qfc_rocksdb_block_cache_hits_total{instance=~\"$instance\"}[5m]) + rate(qfc_rocksdb_block_cache_misses_total{instance=~\"$instance\"}[5m]), 1e-10)",
@@ -512,12 +847,23 @@
       "fieldConfig": {
         "defaults": {
           "unit": "percentunit",
-          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
         },
         "overrides": [
           {
-            "matcher": { "id": "byFrameRefID", "options": "B" },
-            "properties": [{ "id": "unit", "value": "ops" }]
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ops"
+              }
+            ]
           }
         ]
       }
@@ -525,8 +871,16 @@
     {
       "type": "timeseries",
       "title": "Storage memory: memtables (top CFs) & shared block cache",
-      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 50 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 50
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "topk(8, qfc_rocksdb_memtable_bytes{instance=~\"$instance\"})",
@@ -542,7 +896,10 @@
       "fieldConfig": {
         "defaults": {
           "unit": "bytes",
-          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
         },
         "overrides": []
       }
@@ -550,8 +907,16 @@
     {
       "type": "timeseries",
       "title": "Compaction pressure: L0 files & immutable memtables (top CFs)",
-      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 50 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 50
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "topk(5, qfc_rocksdb_l0_files{instance=~\"$instance\"})",
@@ -567,7 +932,10 @@
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
         },
         "overrides": []
       }
@@ -575,8 +943,16 @@
     {
       "type": "timeseries",
       "title": "WAL fsync latency (needs --db-statistics)",
-      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 50 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 50
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "rate(qfc_rocksdb_wal_sync_duration_seconds_sum{instance=~\"$instance\"}[5m]) / clamp_min(rate(qfc_rocksdb_wal_sync_duration_seconds_count{instance=~\"$instance\"}[5m]), 1e-10)",
@@ -592,7 +968,10 @@
       "fieldConfig": {
         "defaults": {
           "unit": "s",
-          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
         },
         "overrides": []
       }
@@ -600,14 +979,27 @@
     {
       "type": "row",
       "title": "Backups (T4.2)",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 57 }
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 57
+      }
     },
     {
       "type": "stat",
       "title": "Backup age (since last successful snapshot)",
-      "description": "time() - qfc_snapshot_last_success_timestamp_seconds. Only populated on nodes running with --snapshot-interval-secs. Thresholds assume the recommended 1h interval: stale (yellow) at 2h = 2x interval, broken (red) at 12h — matches the qfc-backup-freshness alert group.",
-      "gridPos": { "h": 7, "w": 4, "x": 0, "y": 58 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "time() - qfc_snapshot_last_success_timestamp_seconds. Only populated on nodes running with --snapshot-interval-secs. Thresholds assume the recommended 1h interval: stale (yellow) at 2h = 2x interval, broken (red) at 12h \u2014 matches the qfc-backup-freshness alert group.",
+      "gridPos": {
+        "h": 7,
+        "w": 4,
+        "x": 0,
+        "y": 58
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "time() - max(qfc_snapshot_last_success_timestamp_seconds{instance=~\"$instance\"})",
@@ -621,9 +1013,18 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "yellow", "value": 7200 },
-              { "color": "red", "value": 43200 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 7200
+              },
+              {
+                "color": "red",
+                "value": 43200
+              }
             ]
           }
         },
@@ -633,8 +1034,16 @@
     {
       "type": "timeseries",
       "title": "Snapshot duration (checkpoint + tar + upload)",
-      "gridPos": { "h": 7, "w": 6, "x": 4, "y": 58 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 4,
+        "y": 58
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "qfc_snapshot_duration_seconds{instance=~\"$instance\"}",
@@ -643,15 +1052,29 @@
         }
       ],
       "fieldConfig": {
-        "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 10 } },
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
+        },
         "overrides": []
       }
     },
     {
       "type": "timeseries",
       "title": "Snapshot archive size",
-      "gridPos": { "h": 7, "w": 7, "x": 10, "y": 58 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "h": 7,
+        "w": 7,
+        "x": 10,
+        "y": 58
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "qfc_snapshot_size_bytes{instance=~\"$instance\"}",
@@ -660,15 +1083,29 @@
         }
       ],
       "fieldConfig": {
-        "defaults": { "unit": "bytes", "custom": { "drawStyle": "line", "fillOpacity": 10 } },
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
+        },
         "overrides": []
       }
     },
     {
       "type": "timeseries",
       "title": "Snapshot failures (increase, 6h)",
-      "gridPos": { "h": 7, "w": 7, "x": 17, "y": 58 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "h": 7,
+        "w": 7,
+        "x": 17,
+        "y": 58
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "increase(qfc_snapshot_failures_total{instance=~\"$instance\"}[6h])",
@@ -677,7 +1114,202 @@
         }
       ],
       "fieldConfig": {
-        "defaults": { "unit": "none", "custom": { "drawStyle": "line", "fillOpacity": 10 } },
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "Hot keys & accounts (T8)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 65
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Hot-key sampling rate (1-in-N)",
+      "description": "max(qfc_hot_key_sampling_rate). Absent / No Data = sampling is off; start a node with --hot-key-sampling N (env QFC_HOT_KEY_SAMPLING). The companion qfc_hot_key_sampling_enabled is the 0/1 gauge.",
+      "gridPos": {
+        "h": 8,
+        "w": 4,
+        "x": 0,
+        "y": 66
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "max(qfc_hot_key_sampling_rate{instance=~\"$instance\"})",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "noValue": "off"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Per-CF estimated access rate (reads & writes)",
+      "description": "deriv() of the cumulative per-CF window gauges = estimated sampled access throughput, scaled by the sampling rate. The CF split is the cache-sizing signal (T3). Per-CF stats are complete (storage sampler shared across all DB clones).",
+      "gridPos": {
+        "h": 8,
+        "w": 10,
+        "x": 4,
+        "y": 66
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "topk(6, deriv(qfc_hot_key_estimated_reads{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "read {{cf}}",
+          "refId": "A"
+        },
+        {
+          "expr": "topk(6, deriv(qfc_hot_key_estimated_writes{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "write {{cf}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Per-CF hottest-key skew (est. accesses to top key)",
+      "description": "Cumulative estimated accesses to the single hottest key in each CF since the sampling window opened (power-law hotspot indicator; identities deliberately not labelled). No periodic window-reset scheduler yet \u2014 see docs/profiling/HOT-KEYS.md.",
+      "gridPos": {
+        "h": 8,
+        "w": 10,
+        "x": 14,
+        "y": 66
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "topk(8, qfc_hot_key_top_estimated_count{instance=~\"$instance\"})",
+          "legendFormat": "{{cf}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Hot-account access rate (accounts & code)",
+      "description": "Account-level throughput from the chain's persistent state handle (chain.state()). Caveat: the sync path's transient state_at handles are not aggregated here \u2014 see HOT-KEYS.md.",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 74
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "deriv(qfc_hot_account_estimated_reads{instance=~\"$instance\"}[5m])",
+          "legendFormat": "account reads",
+          "refId": "A"
+        },
+        {
+          "expr": "deriv(qfc_hot_account_estimated_writes{instance=~\"$instance\"}[5m])",
+          "legendFormat": "account writes",
+          "refId": "B"
+        },
+        {
+          "expr": "deriv(qfc_hot_account_estimated_code_reads{instance=~\"$instance\"}[5m])",
+          "legendFormat": "code reads",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Hottest account & bytecode (skew)",
+      "description": "Cumulative estimated accesses to the single hottest account and the hottest contract bytecode since the window opened (skew; identities not labelled, available via StateDB::hot_account_report).",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 74
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "qfc_hot_account_top_estimated_count{instance=~\"$instance\"}",
+          "legendFormat": "hottest account",
+          "refId": "A"
+        },
+        {
+          "expr": "qfc_hot_code_top_estimated_count{instance=~\"$instance\"}",
+          "legendFormat": "hottest bytecode",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
+        },
         "overrides": []
       }
     }
