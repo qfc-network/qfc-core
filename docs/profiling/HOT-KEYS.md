@@ -182,14 +182,26 @@ stable keys (code, transactions, receipts) and for per-CF traffic *volume*.
 ## Follow-up
 
 **Exporter wiring — done.** The Prometheus surface for `hot_key_report` /
-`hot_account_report` is now wired into the node's `/metrics` endpoint, gated
-on a new `--hot-key-sampling <N>` flag (env `QFC_HOT_KEY_SAMPLING`). To avoid
-leaking churning identities as labels, the exporter publishes bounded
-aggregates and skew gauges only (per-CF traffic estimates, hottest-entry
-counts); the ranked identities above stay in the report accessors. Full metric
-inventory: [docs/observability/README.md](../observability/README.md#metric-inventory--hot-key--hot-account-analytics-t8).
+`hot_account_report` is wired into the node's `/metrics` endpoint, gated on
+`--hot-key-sampling <N>` (env `QFC_HOT_KEY_SAMPLING`). To avoid leaking
+churning identities as labels, the exporter publishes bounded aggregates and
+skew gauges only (per-CF traffic estimates, hottest-entry counts); the ranked
+identities above stay in the report accessors. Full metric inventory:
+[docs/observability/README.md](../observability/README.md#metric-inventory--hot-key--hot-account-analytics-t8).
 
-Still open: a Grafana panel group for the hot-key metrics, an RPC method to
-fetch the full ranked `hot_key_report` on demand, and periodic window resets
-(the exporter reads a cumulative window; `reset_hot_key_stats` exists but no
-scheduler calls it yet).
+**Grafana panel — done.** The *Hot keys & accounts (T8)* dashboard row plots
+sampling status, per-CF access rate (`deriv()` of the window gauges), and the
+per-CF / account / bytecode skew gauges.
+
+**Window reset scheduler — done.** `--hot-key-window-secs <N>` (env
+`QFC_HOT_KEY_WINDOW_SECS`, 0 = cumulative) makes sampling *windowed*: every N
+seconds the node logs a ranked report (`tracing` target `qfc::hot_keys` — the
+permanent record of the hot identities kept out of Prometheus) and then resets
+both sketches. This keeps the space-saving estimates accurate (the `state`-CF
+saturation noted above is bounded to one window) and makes the `/metrics`
+gauges read per-window. With a window set the gauges are a sawtooth; the
+dashboard's traffic panels already apply `deriv()`, so they read correctly
+either way.
+
+Still open: an RPC method to fetch the full ranked `hot_key_report` on demand
+(the windowed `qfc::hot_keys` log is the current record of ranked identities).

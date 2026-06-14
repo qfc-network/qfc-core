@@ -18,7 +18,7 @@
   ],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 3,
+  "version": 4,
   "refresh": "15s",
   "time": {
     "from": "now-6h",
@@ -1205,7 +1205,7 @@
     {
       "type": "timeseries",
       "title": "Per-CF hottest-key skew (est. accesses to top key)",
-      "description": "Cumulative estimated accesses to the single hottest key in each CF since the sampling window opened (power-law hotspot indicator; identities deliberately not labelled). No periodic window-reset scheduler yet \u2014 see docs/profiling/HOT-KEYS.md.",
+      "description": "Cumulative estimated accesses to the single hottest key in each CF since the sampling window opened (power-law hotspot indicator; identities deliberately not labelled). With --hot-key-window-secs set, the gauge is per-window (sawtooth, reset each window); otherwise cumulative since start. See docs/profiling/HOT-KEYS.md.",
       "gridPos": {
         "h": 8,
         "w": 10,
