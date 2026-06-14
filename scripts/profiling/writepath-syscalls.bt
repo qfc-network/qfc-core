@@ -1,0 +1,30 @@
+#!/usr/bin/env bpftrace
+/*
+ * writepath-syscalls.bt — write/read/sync syscall latency by syscall, and
+ * call counts by thread name, across ALL processes. Surfaces who actually
+ * drives the I/O: RocksDB does its file writes on rocksdb:low / rocksdb:high
+ * and the tokio workers, NOT the main "qfc-node" threads. Also exposes
+ * stdout-logging volume (tokio-rt-worker write() mirrored by containerd-shim
+ * / dockerd). See docs/profiling/ebpf/T1-eBPF.md.
+ *
+ *   sudo bpftrace scripts/profiling/writepath-syscalls.bt
+ */
+tracepoint:syscalls:sys_enter_write,
+tracepoint:syscalls:sys_enter_pwrite64,
+tracepoint:syscalls:sys_enter_pwritev,
+tracepoint:syscalls:sys_enter_fdatasync,
+tracepoint:syscalls:sys_enter_fsync,
+tracepoint:syscalls:sys_enter_sync_file_range { @st[tid] = nsecs; @pr[tid] = probe; @cm[tid] = comm; }
+
+tracepoint:syscalls:sys_exit_write,
+tracepoint:syscalls:sys_exit_pwrite64,
+tracepoint:syscalls:sys_exit_pwritev,
+tracepoint:syscalls:sys_exit_fdatasync,
+tracepoint:syscalls:sys_exit_fsync,
+tracepoint:syscalls:sys_exit_sync_file_range /@st[tid]/ {
+  @lat_us[@pr[tid]] = hist((nsecs - @st[tid]) / 1000);
+  @op_by_thread[@cm[tid], @pr[tid]] = count();
+  delete(@st[tid]); delete(@pr[tid]); delete(@cm[tid]);
+}
+
+interval:s:25 { exit(); }

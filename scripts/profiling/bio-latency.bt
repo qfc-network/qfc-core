@@ -1,0 +1,21 @@
+#!/usr/bin/env bpftrace
+/*
+ * bio-latency.bt — block-I/O service-time histogram, split by RWBS flags
+ * (W = write, WS = write-sync, WM = write-metadata, R = read, RA = readahead),
+ * plus bytes transferred per class. The disk-side view of RocksDB WAL + flush
+ * + compaction traffic. On EBS-backed nvme, write service time (not IOPS) is
+ * the dominant cost. See docs/profiling/ebpf/T1-eBPF.md.
+ *
+ *   sudo bpftrace scripts/profiling/bio-latency.bt
+ */
+tracepoint:block:block_rq_issue { @start[args.dev, args.sector] = nsecs; }
+
+tracepoint:block:block_rq_complete /@start[args.dev, args.sector]/ {
+  $us = (nsecs - @start[args.dev, args.sector]) / 1000;
+  @bio_latency_us = hist($us);
+  @bio_by_rwbs_us[args.rwbs] = hist($us);
+  @bytes_by_rwbs[args.rwbs] = sum(args.nr_sector * 512);
+  delete(@start[args.dev, args.sector]);
+}
+
+interval:s:60 { exit(); }
