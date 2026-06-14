@@ -11,6 +11,7 @@
 //! - **Registry**: Governance-approved model list
 
 pub mod assignment;
+pub mod chain_store;
 pub mod challenge;
 pub mod cost;
 pub mod governance;
@@ -21,6 +22,7 @@ pub mod quota;
 pub mod redundant;
 pub mod registry;
 pub mod router;
+pub mod settlement;
 pub mod task_pool;
 pub mod task_types;
 pub mod training;
@@ -29,6 +31,7 @@ pub mod treasury;
 pub mod verification;
 
 pub use assignment::{MinerCapability, MinerRegistry};
+pub use chain_store::TrainingChainStore;
 pub use challenge::{
     ArbitrationManager, ArbitrationOutcome, ArbitrationPanel, ArbitrationVote, ChallengeGenerator,
     ChallengePenalty, ChallengeVerdict,
@@ -40,6 +43,10 @@ pub use param_governance::{
 };
 pub use proof_pool::ProofPool;
 pub use quota::{QuotaConfig, QuotaConfigError, QuotaError, TierQuota};
+pub use settlement::{
+    penalty_to_slash, records_root, settle_epoch, EpochSettlement, RewardCredit, SettlementError,
+    TrainingEpochCommit,
+};
 pub use task_pool::{AiQuotaMetrics, PublicTaskFilter, TaskPool};
 pub use task_types::estimate_base_fee;
 pub use training::{
