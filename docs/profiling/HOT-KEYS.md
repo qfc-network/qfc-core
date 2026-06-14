@@ -203,5 +203,18 @@ gauges read per-window. With a window set the gauges are a sawtooth; the
 dashboard's traffic panels already apply `deriv()`, so they read correctly
 either way.
 
-Still open: an RPC method to fetch the full ranked `hot_key_report` on demand
-(the windowed `qfc::hot_keys` log is the current record of ranked identities).
+**On-demand RPC — done.** `qfc_hotKeyReport` (optional `topN`, default 16,
+clamped to 1..=256) returns the full ranked report — per-CF traffic with the
+hottest keys, plus the hottest accounts and contract bytecode — as camelCase
+JSON. When sampling is off it returns `{samplingEnabled: false, storage: null,
+accounts: null}`. This is the on-demand counterpart to the windowed
+`qfc::hot_keys` log; the ranked identities live here rather than in the
+Prometheus labels.
+
+```
+curl -s $RPC -X POST -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"qfc_hotKeyReport","params":[10],"id":1}'
+```
+
+T8 is complete: sampling library (#116) → exporter + flag (#117) → Grafana
+panel (#118) → window-reset scheduler (#119) → this RPC.

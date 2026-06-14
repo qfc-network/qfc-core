@@ -4,20 +4,21 @@ use crate::error::RpcError;
 use crate::eth::EthApiServer;
 use crate::qfc::{
     QfcApiServer, RpcAccountRentInfo, RpcAgentBalance, RpcAgentDetailView, RpcAgentInfo,
-    RpcAgentWriteResult, RpcBridgeDeposit, RpcBridgeStatus, RpcBridgeWithdrawal, RpcComputeInfo,
-    RpcEarningRecord, RpcEpoch, RpcEstimateInferenceFee, RpcFaucetResponse, RpcFreezeAgentParams,
-    RpcFundAgentRequest, RpcInferenceFeeEstimate, RpcInferenceProofSubmission, RpcInferenceStats,
-    RpcInferenceTask, RpcIssueSessionKeyParams, RpcListAgentsParams, RpcListAgentsResponse,
-    RpcListPublicTasksFilter, RpcMinerEarnings, RpcMinerEvent, RpcMinerStatusReport,
-    RpcMinerVesting, RpcModel, RpcModelProposal, RpcNodeInfo, RpcParameterOverride,
-    RpcParameterProposal, RpcProofResult, RpcProposeModelRequest, RpcProposeParameterRequest,
-    RpcProposeSpendRequest, RpcPublicTaskStatus, RpcQueryByCapabilityParams,
-    RpcRegisterAgentRequest, RpcRegisterMinerRequest, RpcRegisterMinerResult,
-    RpcRegisterWebhookRequest, RpcRegisteredMiner, RpcRemoveWebhookRequest, RpcRevokeAgentRequest,
-    RpcSessionKeyDetail, RpcSessionKeyInfo, RpcSpendProposal, RpcSubmitPublicTask, RpcTaskRequest,
-    RpcTreasuryInfo, RpcUndelegation, RpcUserOperation, RpcUserOperationStatus, RpcValidator,
-    RpcValidatorMetrics, RpcValidatorScoreBreakdown, RpcVoteModelRequest, RpcVoteParameterRequest,
-    RpcVoteSpendRequest, RpcWebhook,
+    RpcAgentWriteResult, RpcBridgeDeposit, RpcBridgeStatus, RpcBridgeWithdrawal, RpcCfHotKeys,
+    RpcComputeInfo, RpcEarningRecord, RpcEpoch, RpcEstimateInferenceFee, RpcFaucetResponse,
+    RpcFreezeAgentParams, RpcFundAgentRequest, RpcHotAccountEntry, RpcHotAccounts, RpcHotCodeEntry,
+    RpcHotKeyEntry, RpcHotKeyReport, RpcHotKeyStorage, RpcInferenceFeeEstimate,
+    RpcInferenceProofSubmission, RpcInferenceStats, RpcInferenceTask, RpcIssueSessionKeyParams,
+    RpcListAgentsParams, RpcListAgentsResponse, RpcListPublicTasksFilter, RpcMinerEarnings,
+    RpcMinerEvent, RpcMinerStatusReport, RpcMinerVesting, RpcModel, RpcModelProposal, RpcNodeInfo,
+    RpcParameterOverride, RpcParameterProposal, RpcProofResult, RpcProposeModelRequest,
+    RpcProposeParameterRequest, RpcProposeSpendRequest, RpcPublicTaskStatus,
+    RpcQueryByCapabilityParams, RpcRegisterAgentRequest, RpcRegisterMinerRequest,
+    RpcRegisterMinerResult, RpcRegisterWebhookRequest, RpcRegisteredMiner, RpcRemoveWebhookRequest,
+    RpcRevokeAgentRequest, RpcSessionKeyDetail, RpcSessionKeyInfo, RpcSpendProposal,
+    RpcSubmitPublicTask, RpcTaskRequest, RpcTreasuryInfo, RpcUndelegation, RpcUserOperation,
+    RpcUserOperationStatus, RpcValidator, RpcValidatorMetrics, RpcValidatorScoreBreakdown,
+    RpcVoteModelRequest, RpcVoteParameterRequest, RpcVoteSpendRequest, RpcWebhook,
 };
 use crate::txpool::{TxPoolApiServer, TxPoolContent, TxPoolStatus};
 use crate::types::{
@@ -4540,6 +4541,87 @@ impl QfcApiServer for RpcServer {
             stake_tier: tier.to_string(),
         })
     }
+
+    // ---- SRE T8: hot-key analytics ----
+
+    async fn hot_key_report(&self, top_n: Option<usize>) -> RpcResult<RpcHotKeyReport> {
+        let top_n = top_n.unwrap_or(16).clamp(1, 256);
+
+        // Per-CF storage-level report (sampler shared across all DB clones).
+        let storage = self
+            .chain
+            .db()
+            .hot_key_report(top_n)
+            .map(|r| RpcHotKeyStorage {
+                sampling_rate: r.sampling_rate,
+                sketch_capacity: r.sketch_capacity,
+                window_start_unix_ms: r.window_start_unix_ms,
+                cfs: r
+                    .cfs
+                    .into_iter()
+                    .map(|c| RpcCfHotKeys {
+                        cf: c.cf,
+                        reads_sampled: c.reads_sampled,
+                        writes_sampled: c.writes_sampled,
+                        estimated_reads: c.estimated_reads,
+                        estimated_writes: c.estimated_writes,
+                        top_keys: c
+                            .top_keys
+                            .into_iter()
+                            .map(|k| RpcHotKeyEntry {
+                                key_hex: k.key_hex,
+                                sampled_count: k.sampled_count,
+                                estimated_count: k.estimated_count,
+                                max_overestimate: k.max_overestimate,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            });
+
+        // Account/bytecode-level report (chain's persistent state handle).
+        let accounts = self
+            .chain
+            .state()
+            .hot_account_report(top_n)
+            .map(|a| RpcHotAccounts {
+                sampling_rate: a.sampling_rate,
+                sketch_capacity: a.sketch_capacity,
+                window_start_unix_ms: a.window_start_unix_ms,
+                estimated_account_reads: a.estimated_account_reads,
+                estimated_account_writes: a.estimated_account_writes,
+                estimated_code_reads: a.estimated_code_reads,
+                top_accounts: a
+                    .top_accounts
+                    .into_iter()
+                    .map(|e| RpcHotAccountEntry {
+                        address: e.address,
+                        sampled_count: e.sampled_count,
+                        estimated_count: e.estimated_count,
+                        max_overestimate: e.max_overestimate,
+                    })
+                    .collect(),
+                top_code: a
+                    .top_code
+                    .into_iter()
+                    .map(|e| RpcHotCodeEntry {
+                        code_hash: e.code_hash,
+                        sampled_count: e.sampled_count,
+                        estimated_count: e.estimated_count,
+                        max_overestimate: e.max_overestimate,
+                    })
+                    .collect(),
+            });
+
+        let sampling_rate = storage.as_ref().map(|s| s.sampling_rate).unwrap_or(0);
+        Ok(RpcHotKeyReport {
+            sampling_enabled: storage.is_some(),
+            sampling_rate,
+            top_n,
+            storage,
+            accounts,
+        })
+    }
 }
 
 /// ABI helper: encode registerAgent(string,uint8[],uint256,uint256) calldata.
@@ -5177,5 +5259,91 @@ mod tests_model_governance_rpcs {
             assembled_hash: qfc_crypto::blake3_hash(&data),
         };
         assert!(manifest.validate().is_err());
+    }
+}
+
+#[cfg(test)]
+mod tests_hot_key_rpc {
+    use crate::qfc::{
+        RpcCfHotKeys, RpcHotAccountEntry, RpcHotAccounts, RpcHotKeyEntry, RpcHotKeyReport,
+        RpcHotKeyStorage,
+    };
+
+    /// The combined report round-trips through JSON with camelCase keys (the
+    /// field names operators and the dashboard reference).
+    #[test]
+    fn test_hot_key_report_serde_camel_case() {
+        let report = RpcHotKeyReport {
+            sampling_enabled: true,
+            sampling_rate: 64,
+            top_n: 16,
+            storage: Some(RpcHotKeyStorage {
+                sampling_rate: 64,
+                sketch_capacity: 256,
+                window_start_unix_ms: 1_765_000_000_000,
+                cfs: vec![RpcCfHotKeys {
+                    cf: "state".into(),
+                    reads_sampled: 10,
+                    writes_sampled: 3,
+                    estimated_reads: 640,
+                    estimated_writes: 192,
+                    top_keys: vec![RpcHotKeyEntry {
+                        key_hex: "0xabcd".into(),
+                        sampled_count: 5,
+                        estimated_count: 320,
+                        max_overestimate: 64,
+                    }],
+                }],
+            }),
+            accounts: Some(RpcHotAccounts {
+                sampling_rate: 64,
+                sketch_capacity: 256,
+                window_start_unix_ms: 1_765_000_000_000,
+                estimated_account_reads: 1280,
+                estimated_account_writes: 0,
+                estimated_code_reads: 64,
+                top_accounts: vec![RpcHotAccountEntry {
+                    address: "0x0000000000000000000000000000000000000003".into(),
+                    sampled_count: 8,
+                    estimated_count: 512,
+                    max_overestimate: 64,
+                }],
+                top_code: vec![],
+            }),
+        };
+
+        let json = serde_json::to_string(&report).unwrap();
+        // camelCase field names on the wire.
+        assert!(json.contains("\"samplingEnabled\":true"));
+        assert!(json.contains("\"samplingRate\":64"));
+        assert!(json.contains("\"topN\":16"));
+        assert!(json.contains("\"keyHex\":\"0xabcd\""));
+        assert!(json.contains("\"maxOverestimate\":64"));
+        assert!(json.contains("\"estimatedAccountReads\":1280"));
+
+        let parsed: RpcHotKeyReport = serde_json::from_str(&json).unwrap();
+        assert!(parsed.sampling_enabled);
+        assert_eq!(parsed.sampling_rate, 64);
+        assert_eq!(parsed.storage.as_ref().unwrap().cfs[0].cf, "state");
+        assert_eq!(
+            parsed.accounts.as_ref().unwrap().top_accounts[0].estimated_count,
+            512
+        );
+    }
+
+    /// Sampling-off shape: detail fields are null, not omitted.
+    #[test]
+    fn test_hot_key_report_disabled_shape() {
+        let report = RpcHotKeyReport {
+            sampling_enabled: false,
+            sampling_rate: 0,
+            top_n: 16,
+            storage: None,
+            accounts: None,
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.contains("\"samplingEnabled\":false"));
+        assert!(json.contains("\"storage\":null"));
+        assert!(json.contains("\"accounts\":null"));
     }
 }
