@@ -209,7 +209,17 @@ impl ConsensusEngine {
     /// Advance epoch if the current one has expired, computing the correct
     /// epoch number from elapsed time so all nodes converge regardless of
     /// startup order.  Returns the (possibly updated) epoch number.
-    pub fn maybe_advance_epoch(&self, epoch_duration_ms: u64, head_hash: Hash) -> u64 {
+    ///
+    /// The epoch seed is a hash chain rooted at the genesis seed:
+    /// `seed_n = blake3(seed_{n-1} || n)`. Because every node shares the
+    /// genesis seed and derives the same epoch number from wall-clock time,
+    /// all nodes compute an IDENTICAL seed — independent of their chain head.
+    /// The previous implementation seeded from the local head hash, so once
+    /// two nodes briefly diverged they picked different producers forever and
+    /// the fork became permanent. Deterministic-from-genesis means the beacon
+    /// is predictable, which is an acceptable trade for leader election on
+    /// this chain and is precisely what keeps validators in agreement.
+    pub fn maybe_advance_epoch(&self, epoch_duration_ms: u64) -> u64 {
         let current = self.get_epoch();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -225,11 +235,13 @@ impl ConsensusEngine {
         let epochs_passed = elapsed / epoch_duration_ms;
         let next_number = current.number + epochs_passed;
 
-        let mut seed = [0u8; 32];
-        seed.copy_from_slice(head_hash.as_bytes());
-        let eb = next_number.to_le_bytes();
-        for i in 0..8 {
-            seed[i] ^= eb[i];
+        // Walk the hash chain from the current epoch up to the target so a
+        // node that jumps several epochs at once lands on the same seed as one
+        // that advanced them one at a time.
+        let mut seed = current.seed;
+        for n in (current.number + 1)..=next_number {
+            let h = blake3_hash(&[&seed[..], &n.to_le_bytes()[..]].concat());
+            seed.copy_from_slice(h.as_bytes());
         }
         self.start_epoch(next_number, seed);
         next_number
@@ -244,36 +256,46 @@ impl ConsensusEngine {
 
         let epoch = self.current_epoch.read();
 
-        // Compute slot-specific seed
+        // Active validators in a canonical (address-sorted) order. Selection
+        // MUST be a pure function of (validator set, epoch seed, slot) that is
+        // identical on every node — so we sort by address rather than trust
+        // the internal list order, which can differ between nodes and would
+        // otherwise hand different nodes different leaders (the original cause
+        // of the testnet's three-way fork).
+        let mut active: Vec<&ValidatorNode> = validators.iter().filter(|v| v.is_active()).collect();
+        if active.is_empty() {
+            return None;
+        }
+        active.sort_by_key(|v| v.address.0);
+
+        let total_score: u64 = active.iter().map(|v| v.contribution_score).sum();
+
+        // No contribution signal yet (all scores zero): deterministic
+        // round-robin by slot. Every node shares the same sorted set, so all
+        // agree on the same leader for each slot. Previously this returned
+        // `validators[0]`, whose identity depended on per-node list ordering —
+        // each node elected itself and forked from block #1.
+        if total_score == 0 {
+            return Some(active[(slot as usize) % active.len()].address);
+        }
+
+        // Weighted selection by contribution score, driven by the slot seed
+        // (derived from the shared epoch seed; see maybe_advance_epoch).
         let mut slot_seed = [0u8; 32];
         let hash = blake3_hash(&[&epoch.seed[..], &slot.to_le_bytes()[..]].concat());
         slot_seed.copy_from_slice(hash.as_bytes());
-
-        // Calculate total score
-        let total_score: u64 = validators.iter().map(|v| v.contribution_score).sum();
-        if total_score == 0 {
-            return Some(validators[0].address);
-        }
-
-        // Select based on VRF output and contribution scores
         let random_value = vrf_output_to_f64(&slot_seed);
+
         let mut cumulative = 0.0f64;
-
-        for validator in validators.iter() {
-            if !validator.is_active() {
-                continue;
-            }
-
-            let probability = validator.contribution_score as f64 / total_score as f64;
-            cumulative += probability;
-
+        for validator in &active {
+            cumulative += validator.contribution_score as f64 / total_score as f64;
             if random_value < cumulative {
                 return Some(validator.address);
             }
         }
 
-        // Fallback to first active validator
-        validators.iter().find(|v| v.is_active()).map(|v| v.address)
+        // Floating-point rounding fallback: last validator in canonical order.
+        active.last().map(|v| v.address)
     }
 
     /// Check if we should produce a block
@@ -1509,5 +1531,96 @@ mod tests {
         assert_eq!(restarted.get_epoch().seed, [0xcd; 32]);
         assert_eq!(restarted.finalized_height(), 125);
         assert_eq!(restarted.get_validators().len(), 3);
+    }
+
+    // ---- consensus convergence (testnet three-way-fork fix) ----
+
+    /// Two nodes holding the same validator set but in DIFFERENT internal
+    /// order must elect the SAME producer for every slot. This is the core
+    /// invariant the fork violated: selection is now a pure function of
+    /// (address-sorted set, seed, slot), independent of list order.
+    #[test]
+    fn test_producer_selection_is_order_independent() {
+        let mut a = create_test_validators(4); // scores = 1000 (weighted path)
+        let mut b = a.clone();
+        b.reverse(); // node B stores them in the opposite order
+        assert_ne!(a[0].address, b[0].address);
+
+        let ea = ConsensusEngine::new(ConsensusConfig::default());
+        let eb = ConsensusEngine::new(ConsensusConfig::default());
+        ea.update_validators(std::mem::take(&mut a));
+        eb.update_validators(std::mem::take(&mut b));
+        ea.start_epoch(7, [0x5a; 32]);
+        eb.start_epoch(7, [0x5a; 32]); // same shared epoch seed
+
+        for slot in 0..200u64 {
+            assert_eq!(
+                ea.select_producer(slot),
+                eb.select_producer(slot),
+                "nodes disagree on producer for slot {slot}"
+            );
+        }
+    }
+
+    /// With all contribution scores zero, selection must still be a
+    /// deterministic, order-independent round-robin that visits every
+    /// validator — not a fixed `validators[0]` that each node resolves to
+    /// itself (the original fork trigger).
+    #[test]
+    fn test_zero_score_round_robin() {
+        let mut a: Vec<ValidatorNode> = create_test_validators(4)
+            .into_iter()
+            .map(|mut v| {
+                v.contribution_score = 0;
+                v
+            })
+            .collect();
+        let mut b = a.clone();
+        b.reverse();
+
+        let ea = ConsensusEngine::new(ConsensusConfig::default());
+        let eb = ConsensusEngine::new(ConsensusConfig::default());
+        ea.update_validators(std::mem::take(&mut a));
+        eb.update_validators(std::mem::take(&mut b));
+        // Intentionally do NOT call start_epoch: it recomputes contribution
+        // scores from stake, which would leave the zero-score path untested.
+        // The round-robin branch ignores the epoch seed anyway.
+
+        let mut seen = std::collections::HashSet::new();
+        for slot in 0..8u64 {
+            let pa = ea.select_producer(slot);
+            assert_eq!(pa, eb.select_producer(slot), "disagree at slot {slot}");
+            seen.insert(pa.unwrap());
+        }
+        // 4 validators over 8 slots → round-robin covers all of them.
+        assert_eq!(seen.len(), 4, "round-robin did not cover every validator");
+    }
+
+    /// The epoch seed is a pure hash chain rooted at the genesis seed — a
+    /// function of (genesis seed, epoch number) ONLY, with no dependence on
+    /// the chain head. Two nodes on different chains therefore derive the same
+    /// seed and stay in agreement.
+    #[test]
+    fn test_epoch_seed_is_deterministic_hash_chain() {
+        const GENESIS: [u8; 32] = [0x07; 32];
+        let engine = ConsensusEngine::new(ConsensusConfig::default());
+        engine.start_epoch(1, GENESIS);
+
+        // Force at least one advance (epoch_duration 1ms, after a short wait).
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        let n = engine.maybe_advance_epoch(1);
+        assert!(n >= 2, "expected an epoch advance, got {n}");
+
+        // Recompute the expected seed independently via the same chain.
+        let mut expected = GENESIS;
+        for m in 2..=n {
+            let h = blake3_hash(&[&expected[..], &m.to_le_bytes()[..]].concat());
+            expected.copy_from_slice(h.as_bytes());
+        }
+        assert_eq!(
+            engine.get_epoch().seed,
+            expected,
+            "epoch seed is not the deterministic genesis-rooted hash chain"
+        );
     }
 }
