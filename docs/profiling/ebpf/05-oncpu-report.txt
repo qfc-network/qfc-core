@@ -1,0 +1,25 @@
+    46.97%  tokio-rt-worker  qfc-node             [.] blake3::portable::compress_in_place
+            |
+            ---blake3::portable::compress_in_place
+               |          
+                --46.43%--core::ops::function::FnOnce::call_once{{vtable.shim}}
+                          std::sys::thread::unix::Thread::new::thread_start
+                          0xe0a66a1e2030
+                          0xe0a66a24bf1c
+
+     4.35%  tokio-rt-worker  qfc-node             [.] blake3::ChunkState::update
+            |
+            ---blake3::ChunkState::update
+               std::sys::backtrace::__rust_begin_short_backtrace
+               core::ops::function::FnOnce::call_once{{vtable.shim}}
+               std::sys::thread::unix::Thread::new::thread_start
+               0xe0a66a1e2030
+               0xe0a66a24bf1c
+
+     4.06%  tokio-rt-worker  qfc-node             [.] std::sys::backtrace::__rust_begin_short_backtrace
+            |
+            ---std::sys::backtrace::__rust_begin_short_backtrace
+               core::ops::function::FnOnce::call_once{{vtable.shim}}
+               std::sys::thread::unix::Thread::new::thread_start
+               0xe0a66a1e2030
+               0xe0a66a24bf1c
