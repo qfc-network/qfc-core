@@ -12,6 +12,8 @@ qfc-types.workspace = true
 qfc-crypto.workspace = true
 qfc-inference.workspace = true
 qfc-ps.workspace = true
+qfc-storage.workspace = true
+blake3.workspace = true
 borsh.workspace = true
 hex.workspace = true
 serde.workspace = true
@@ -26,6 +28,7 @@ rand.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 parking_lot.workspace = true
 criterion.workspace = true
+tempfile.workspace = true
 
 [[bench]]
 name = "verification_bench"

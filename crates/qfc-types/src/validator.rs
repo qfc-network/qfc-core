@@ -398,6 +398,12 @@ pub enum SlashableOffense {
     FalseVote,
     /// Fraudulent inference proof (output hash mismatch on spot-check)
     InvalidInference,
+    /// Failed training-step verification (sampled re-execution mismatch,
+    /// ROADMAP-AI-V3 ADR-0008/ADR-0009). Unlike the percent-of-stake offenses
+    /// above, training slashing is an ABSOLUTE amount (`slash_multiple ×
+    /// per_step_reward`, ADR-0009 Decision 4) carried directly in
+    /// [`SlashResult::slashed_amount`] — it does NOT use the percent path.
+    InvalidTraining,
 }
 
 /// Slash result
