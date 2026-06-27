@@ -105,14 +105,32 @@ impl BlockProducer {
         let mut block_timer = interval(Duration::from_millis(self.config.block_interval_ms));
         let mut heartbeat_counter: u64 = 0;
         let heartbeat_interval = 3; // Send heartbeat every 3 slots
-        let mut slot: u64 = 0;
+        let mut last_slot: u64 = u64::MAX;
 
         loop {
             block_timer.tick().await;
-            slot += 1;
+
+            // Global wall-clock slot: now_ms / block_interval. Every node
+            // computes the same slot at the same instant (clocks are
+            // NTP-synced), so exactly one validator is elected network-wide per
+            // slot. A local per-tick counter — the previous approach — drifted
+            // with each node's start time and let several nodes produce the
+            // same height, which is what forked the testnet.
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let slot = now_ms / self.config.block_interval_ms;
+
+            // Process each slot at most once (guards against timer jitter
+            // firing twice within one slot window).
+            if slot == last_slot {
+                continue;
+            }
+            last_slot = slot;
             heartbeat_counter += 1;
 
-            // Advance epoch if enough time has passed
+            // Advance epoch (also wall-clock anchored) so selection agrees.
             self.consensus.maybe_advance_epoch(EPOCH_DURATION_MS);
 
             // Send periodic heartbeat

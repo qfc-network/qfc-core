@@ -79,6 +79,10 @@ pub struct ConsensusEngine {
     max_blocks_per_height: usize,
     /// Cache depth (how many heights to keep)
     cache_depth: u64,
+    /// Genesis epoch seed, captured on the first `start_epoch`. Anchors the
+    /// deterministic per-epoch seed derivation so every node computes the same
+    /// seed for a given (wall-clock) epoch number.
+    genesis_seed: RwLock<Option<[u8; 32]>>,
 }
 
 impl ConsensusEngine {
@@ -96,6 +100,7 @@ impl ConsensusEngine {
             block_cache: RwLock::new(HashMap::new()),
             max_blocks_per_height: 10,
             cache_depth: 100,
+            genesis_seed: RwLock::new(None),
         }
     }
 
@@ -113,6 +118,7 @@ impl ConsensusEngine {
             block_cache: RwLock::new(HashMap::new()),
             max_blocks_per_height: 10,
             cache_depth: 100,
+            genesis_seed: RwLock::new(None),
         }
     }
 
@@ -192,6 +198,16 @@ impl ConsensusEngine {
 
     /// Start a new epoch
     pub fn start_epoch(&self, epoch_number: u64, seed: [u8; 32]) {
+        // Capture the genesis seed the first time an epoch is started (the
+        // producer's `start_epoch(1, genesis_hash)` at init). It anchors the
+        // per-epoch seed derivation in `maybe_advance_epoch`.
+        {
+            let mut gs = self.genesis_seed.write();
+            if gs.is_none() {
+                *gs = Some(seed);
+            }
+        }
+
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -206,45 +222,48 @@ impl ConsensusEngine {
         info!("Started epoch {} with seed {:?}", epoch_number, &seed[..8]);
     }
 
-    /// Advance epoch if the current one has expired, computing the correct
-    /// epoch number from elapsed time so all nodes converge regardless of
-    /// startup order.  Returns the (possibly updated) epoch number.
+    /// Deterministic epoch seed: `blake3(genesis_seed || epoch_number)`.
+    /// O(1) and identical on every node (all share the genesis seed), so a
+    /// wall-clock epoch number — which can be very large — maps to a shared
+    /// seed without walking a hash chain.
+    fn derive_epoch_seed(&self, epoch_number: u64) -> [u8; 32] {
+        let genesis = self.genesis_seed.read().unwrap_or_default();
+        let h = blake3_hash(&[&genesis[..], &epoch_number.to_le_bytes()[..]].concat());
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(h.as_bytes());
+        seed
+    }
+
+    /// Advance to the epoch implied by the current wall-clock time, if it has
+    /// changed. Returns the (possibly updated) epoch number.
     ///
-    /// The epoch seed is a hash chain rooted at the genesis seed:
-    /// `seed_n = blake3(seed_{n-1} || n)`. Because every node shares the
-    /// genesis seed and derives the same epoch number from wall-clock time,
-    /// all nodes compute an IDENTICAL seed — independent of their chain head.
-    /// The previous implementation seeded from the local head hash, so once
-    /// two nodes briefly diverged they picked different producers forever and
-    /// the fork became permanent. Deterministic-from-genesis means the beacon
-    /// is predictable, which is an acceptable trade for leader election on
-    /// this chain and is precisely what keeps validators in agreement.
+    /// The epoch number is `now_ms / epoch_duration_ms` — a global function of
+    /// wall-clock time (NTP-synced across nodes), NOT of when this node
+    /// started. The previous implementation accumulated epochs from each
+    /// node's local `start_time`, so a node that booted earlier ran ahead onto
+    /// a different epoch number, derived a different seed, elected a different
+    /// producer, and forked. Anchoring to wall-clock makes every node agree on
+    /// the current epoch — and therefore on the seed and the elected producer.
+    /// The seed is derived directly from the genesis seed (see
+    /// `derive_epoch_seed`), which is shared by all nodes.
     pub fn maybe_advance_epoch(&self, epoch_duration_ms: u64) -> u64 {
-        let current = self.get_epoch();
+        if epoch_duration_ms == 0 {
+            return self.get_epoch().number;
+        }
+
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64;
+        let target = now / epoch_duration_ms;
 
-        if epoch_duration_ms == 0 || now < current.start_time + epoch_duration_ms {
-            return current.number;
+        if target == self.get_epoch().number {
+            return target;
         }
 
-        // Compute how many epochs have elapsed since this epoch started
-        let elapsed = now - current.start_time;
-        let epochs_passed = elapsed / epoch_duration_ms;
-        let next_number = current.number + epochs_passed;
-
-        // Walk the hash chain from the current epoch up to the target so a
-        // node that jumps several epochs at once lands on the same seed as one
-        // that advanced them one at a time.
-        let mut seed = current.seed;
-        for n in (current.number + 1)..=next_number {
-            let h = blake3_hash(&[&seed[..], &n.to_le_bytes()[..]].concat());
-            seed.copy_from_slice(h.as_bytes());
-        }
-        self.start_epoch(next_number, seed);
-        next_number
+        let seed = self.derive_epoch_seed(target);
+        self.start_epoch(target, seed);
+        target
     }
 
     /// Select block producer for current epoch slot
@@ -1596,31 +1615,66 @@ mod tests {
         assert_eq!(seen.len(), 4, "round-robin did not cover every validator");
     }
 
-    /// The epoch seed is a pure hash chain rooted at the genesis seed — a
-    /// function of (genesis seed, epoch number) ONLY, with no dependence on
-    /// the chain head. Two nodes on different chains therefore derive the same
-    /// seed and stay in agreement.
+    /// The epoch seed is `blake3(genesis_seed || epoch_number)` — a pure
+    /// function of (genesis seed, epoch number), derived directly (O(1)) with
+    /// no dependence on chain head or node start time.
     #[test]
-    fn test_epoch_seed_is_deterministic_hash_chain() {
+    fn test_epoch_seed_is_deterministic() {
         const GENESIS: [u8; 32] = [0x07; 32];
         let engine = ConsensusEngine::new(ConsensusConfig::default());
-        engine.start_epoch(1, GENESIS);
+        engine.start_epoch(1, GENESIS); // captures genesis_seed = GENESIS
 
-        // Force at least one advance (epoch_duration 1ms, after a short wait).
-        std::thread::sleep(std::time::Duration::from_millis(15));
-        let n = engine.maybe_advance_epoch(1);
-        assert!(n >= 2, "expected an epoch advance, got {n}");
+        // Advance to the wall-clock epoch (now_ms / 10_000 ≫ 1).
+        let n = engine.maybe_advance_epoch(10_000);
+        assert!(n > 1, "expected a wall-clock epoch advance, got {n}");
 
-        // Recompute the expected seed independently via the same chain.
-        let mut expected = GENESIS;
-        for m in 2..=n {
-            let h = blake3_hash(&[&expected[..], &m.to_le_bytes()[..]].concat());
-            expected.copy_from_slice(h.as_bytes());
-        }
+        // Recompute independently: blake3(genesis || n).
+        let h = blake3_hash(&[&GENESIS[..], &n.to_le_bytes()[..]].concat());
+        let mut expected = [0u8; 32];
+        expected.copy_from_slice(h.as_bytes());
         assert_eq!(
             engine.get_epoch().seed,
             expected,
-            "epoch seed is not the deterministic genesis-rooted hash chain"
+            "epoch seed must be blake3(genesis_seed || epoch_number)"
         );
+    }
+
+    /// The fix for the testnet fork: two nodes that start at DIFFERENT
+    /// wall-clock times must still agree on the current epoch, seed, and
+    /// elected producer — because scheduling is anchored to wall-clock, not to
+    /// each node's local start time.
+    #[test]
+    fn test_nodes_agree_despite_different_start_times() {
+        const GENESIS: [u8; 32] = [0x07; 32];
+        let validators = create_test_validators(4);
+
+        let a = ConsensusEngine::new(ConsensusConfig::default());
+        a.update_validators(validators.clone());
+        a.start_epoch(1, GENESIS);
+
+        // Node B boots later and stores its validators in the opposite order.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let mut vb = validators;
+        vb.reverse();
+        let b = ConsensusEngine::new(ConsensusConfig::default());
+        b.update_validators(vb);
+        b.start_epoch(1, GENESIS);
+
+        // Both advance to the wall-clock epoch.
+        let ea = a.maybe_advance_epoch(10_000);
+        let eb = b.maybe_advance_epoch(10_000);
+        assert_eq!(ea, eb, "nodes disagree on the current epoch number");
+        assert_eq!(
+            a.get_epoch().seed,
+            b.get_epoch().seed,
+            "nodes derived different epoch seeds"
+        );
+        for slot in 0..200u64 {
+            assert_eq!(
+                a.select_producer(slot),
+                b.select_producer(slot),
+                "nodes elect different producers for slot {slot}"
+            );
+        }
     }
 }
