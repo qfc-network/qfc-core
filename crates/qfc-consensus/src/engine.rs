@@ -88,6 +88,11 @@ pub struct ConsensusEngine {
     /// never adopted from the network and survives checkpoint restore
     /// (restore does not touch it).
     genesis_seed: RwLock<Option<[u8; 32]>>,
+    /// Heights WE have already voted at (height -> voted block hash).
+    /// A validator must never emit two votes for the same block or two
+    /// votes at the same height (review fix 2a) — receiving votes used to
+    /// echo a fresh vote per incoming vote, storming the vote topic.
+    own_votes: RwLock<HashMap<u64, Hash>>,
 }
 
 impl ConsensusEngine {
@@ -106,6 +111,7 @@ impl ConsensusEngine {
             max_blocks_per_height: 10,
             cache_depth: 100,
             genesis_seed: RwLock::new(None),
+            own_votes: RwLock::new(HashMap::new()),
         }
     }
 
@@ -124,6 +130,7 @@ impl ConsensusEngine {
             max_blocks_per_height: 10,
             cache_depth: 100,
             genesis_seed: RwLock::new(None),
+            own_votes: RwLock::new(HashMap::new()),
         }
     }
 
@@ -303,20 +310,23 @@ impl ConsensusEngine {
         }
     }
 
-    /// The election set: genesis-registered validators with `stake > 0`, in
-    /// canonical (address-sorted) order.
+    /// The election set: the REGISTERED validator set (genesis-registered,
+    /// checkpoint-restored) in canonical (address-sorted) order.
     ///
-    /// Deliberately deterministic-only inputs (§3 of ADR-0012):
-    /// - NO jail flags — local jailing comes from gossip evidence without
-    ///   in-block proof and diverges between nodes; it must not affect
-    ///   consensus. Slashing moves on-chain later.
+    /// Membership is FROZEN at registration (§3 of ADR-0012, review fix 4):
+    /// - NO stake filter — gossip-driven slashing mutates stake locally
+    ///   without in-block proof, so a `stake > 0` filter let node-local
+    ///   slashing silently change who is in the rotation (a schedule fork).
+    ///   Runtime slashing keeps mutating stake for economics/metrics, but
+    ///   never election membership.
+    /// - NO jail flags — same reason: local jailing comes from gossip
+    ///   evidence and diverges between nodes. Slashing moves on-chain later.
     /// - NO contribution scores — latency EMAs, votes, hashrate etc. are
     ///   node-local observations. Scores remain for metrics/observability.
     fn election_set(&self) -> Vec<(Address, qfc_types::PublicKey)> {
         let validators = self.validators.read();
         let mut set: Vec<(Address, qfc_types::PublicKey)> = validators
             .iter()
-            .filter(|v| v.stake > qfc_types::U256::ZERO)
             .map(|v| (v.address, v.public_key))
             .collect();
         set.sort_by_key(|(addr, _)| addr.0);
@@ -324,9 +334,9 @@ impl ConsensusEngine {
     }
 
     /// Deterministic leader for `slot` under `epoch_seed`: round-robin over
-    /// the address-sorted `stake > 0` set, rotated by a seed-derived offset.
-    /// A pure function of (validator set, epoch seed, slot) — identical on
-    /// every node.
+    /// the address-sorted registered set, rotated by a seed-derived offset.
+    /// A pure function of (registered validator set, epoch seed, slot) —
+    /// identical on every node.
     pub fn select_producer_with_seed(&self, slot: u64, epoch_seed: &[u8; 32]) -> Option<Address> {
         let set = self.election_set();
         if set.is_empty() {
@@ -498,8 +508,12 @@ impl ConsensusEngine {
 
         // 5. Enforce the deterministic schedule: the producer must be the
         // elected leader of the block's own slot (derived from its
-        // timestamp), with a one-slot tolerance ONLY when the timestamp sits
-        // within MAX_DRIFT of the slot boundary (clock skew at the edge).
+        // timestamp), with a `slot - 1` tolerance ONLY when the timestamp
+        // sits within MAX_DRIFT after the slot boundary (a late producer
+        // just past its own slot's end). NEVER `slot + 1` (review fix 13):
+        // producers fire at slot START, so accepting the next slot's leader
+        // for timestamps near the end of a slot would make a second
+        // producer valid for nearly every block — a standing double-leader.
         // The VRF proof is verified against the seed of the matched slot's
         // epoch — the same seed the producer used.
         let slot = Self::slot_of_timestamp(block.timestamp());
@@ -508,9 +522,6 @@ impl ConsensusEngine {
         let mut candidate_slots = vec![slot];
         if offset_in_slot < MAX_TIMESTAMP_DRIFT_MS && slot > 0 {
             candidate_slots.push(slot - 1);
-        }
-        if offset_in_slot > BLOCK_INTERVAL_MS - MAX_TIMESTAMP_DRIFT_MS {
-            candidate_slots.push(slot + 1);
         }
 
         let mut producer_matched = false;
@@ -599,13 +610,31 @@ impl ConsensusEngine {
         Ok(vote)
     }
 
-    /// Add a vote to pending votes
+    /// Add a vote to pending votes. Dedups by voter address (review fix
+    /// 2c): each validator contributes at most ONE vote per block — echoed
+    /// or replayed votes must not stack weight or re-trigger anything.
     pub fn add_vote(&self, vote: Vote) {
-        self.pending_votes
-            .write()
-            .entry(vote.block_hash)
-            .or_default()
-            .push(vote);
+        let mut pending = self.pending_votes.write();
+        let votes = pending.entry(vote.block_hash).or_default();
+        if votes.iter().any(|v| v.voter == vote.voter) {
+            return;
+        }
+        votes.push(vote);
+    }
+
+    /// Atomically record that we are voting on `(height, block_hash)`.
+    /// Returns `false` — and records nothing — when we already voted at
+    /// this height (for this or any other block): never emit a second vote
+    /// for the same block, never vote twice at one height (review fix 2a).
+    pub fn try_record_own_vote(&self, height: u64, block_hash: Hash) -> bool {
+        use std::collections::hash_map::Entry;
+        match self.own_votes.write().entry(height) {
+            Entry::Occupied(_) => false,
+            Entry::Vacant(v) => {
+                v.insert(block_hash);
+                true
+            }
+        }
     }
 
     /// Sign a message hash with our validator key
@@ -619,7 +648,14 @@ impl ConsensusEngine {
         Ok(Signature::new(signature))
     }
 
-    /// Check if a block has reached finality
+    /// Check if a block has reached finality.
+    ///
+    /// Deterministic weight (review fix 3d): equal weight per REGISTERED
+    /// validator, count-based ≥ threshold (2/3) of the registered set.
+    /// Contribution-score weighting made finality node-local — scores are
+    /// per-node observations, so two nodes could disagree on whether the
+    /// SAME votes finalize a block. Callers must not feed votes for blocks
+    /// they don't hold canonically (enforced at the sync layer).
     pub fn check_finality(&self, block_hash: &Hash) -> bool {
         let votes = self.pending_votes.read();
         let block_votes = match votes.get(block_hash) {
@@ -628,22 +664,20 @@ impl ConsensusEngine {
         };
 
         let validators = self.validators.read();
-
-        // Count accept votes weighted by contribution score
-        let accept_weight: u64 = block_votes
-            .iter()
-            .filter(|v| v.is_accept())
-            .filter_map(|v| validators.iter().find(|val| val.address == v.voter))
-            .map(|val| val.contribution_score)
-            .sum();
-
-        let total_weight: u64 = validators.iter().map(|v| v.contribution_score).sum();
-
-        if total_weight == 0 {
+        let total = validators.len() as u64;
+        if total == 0 {
             return false;
         }
 
-        let ratio = accept_weight as f64 / total_weight as f64;
+        // One vote per registered validator (add_vote dedups by voter; the
+        // registry lookup drops votes from unknown addresses).
+        let accept_count = block_votes
+            .iter()
+            .filter(|v| v.is_accept())
+            .filter(|v| validators.iter().any(|val| val.address == v.voter))
+            .count() as u64;
+
+        let ratio = accept_count as f64 / total as f64;
         ratio >= self.config.finality_threshold
     }
 
@@ -665,6 +699,9 @@ impl ConsensusEngine {
                 .map(|v| v.block_height > finalized_height)
                 .unwrap_or(false)
         });
+        self.own_votes
+            .write()
+            .retain(|height, _| *height > finalized_height);
     }
 
     /// Record that a validator produced a block successfully
@@ -1694,9 +1731,11 @@ mod tests {
         assert_eq!(seen.len(), 4, "round-robin did not cover every validator");
     }
 
-    /// REQUIRED TEST 4 (spec): two engines with wildly different local
-    /// scores and jail flags must elect the same leader for the same slot.
-    /// Contribution scores and local jailing are NOT consensus inputs.
+    /// REQUIRED TEST 4 (spec), extended by review fix 4: two engines with
+    /// wildly different local scores, jail flags AND runtime-mutated stake
+    /// must elect the same leader for the same slot. Contribution scores,
+    /// local jailing, and gossip-slashed stake are NOT consensus inputs —
+    /// election membership is frozen at registration.
     #[test]
     fn test_election_ignores_local_scores_and_jail_flags() {
         let base = create_test_validators(4);
@@ -1706,10 +1745,14 @@ mod tests {
         a.update_validators(base.clone());
 
         // Node B: wildly different local observations — inflated/zero scores,
-        // one validator locally jailed (gossip evidence, no in-block proof).
+        // one validator locally jailed (gossip evidence, no in-block proof),
+        // and divergent local stake mutations (gossip-driven slashing that
+        // node A never saw, including a full slash to zero).
         let mut vb = base;
         vb[0].contribution_score = 0;
+        vb[0].stake = qfc_types::U256::ZERO; // fully slashed locally
         vb[1].contribution_score = 1_000_000;
+        vb[1].stake = qfc_types::U256::from_u64(u64::MAX);
         vb[2].is_jailed = true;
         vb[2].jail_until = u64::MAX;
         vb[3].avg_latency_ms = 30_000;
@@ -1724,29 +1767,39 @@ mod tests {
             assert_eq!(
                 a.select_producer(slot),
                 b.select_producer(slot),
-                "local scores/jail flags leaked into election at slot {slot}"
+                "local scores/jail flags/stake mutations leaked into election at slot {slot}"
             );
         }
     }
 
-    /// Zero-stake validators are excluded from the election set.
+    /// Review fix 4: election membership is FROZEN at registration —
+    /// runtime slashing (a gossip-driven, node-local mutation) may zero a
+    /// validator's stake for economics/metrics, but must never change who
+    /// is in the rotation.
     #[test]
-    fn test_zero_stake_excluded_from_election() {
-        let mut validators = create_test_validators(3);
-        let excluded = validators[1].address;
-        validators[1].stake = qfc_types::U256::ZERO;
+    fn test_slashing_does_not_change_election_membership() {
+        let validators = create_test_validators(3);
+        let slashed = validators[1].address;
 
         let engine = ConsensusEngine::new(ConsensusConfig::default());
         engine.update_validators(validators);
         engine.set_genesis_seed([0x22; 32]);
 
-        for slot in 0..50u64 {
-            assert_ne!(
-                engine.select_producer(slot),
-                Some(excluded),
-                "zero-stake validator elected at slot {slot}"
-            );
-        }
+        let before: Vec<_> = (0..60u64).map(|s| engine.select_producer(s)).collect();
+
+        // 100% slash: stake goes to zero.
+        engine.slash_validator(&slashed, 100, 60_000);
+        assert!(engine
+            .get_validators()
+            .iter()
+            .any(|v| v.address == slashed && v.stake.is_zero()));
+
+        let after: Vec<_> = (0..60u64).map(|s| engine.select_producer(s)).collect();
+        assert_eq!(before, after, "slashing changed the election schedule");
+        assert!(
+            after.contains(&Some(slashed)),
+            "fully-slashed validator dropped out of the rotation"
+        );
     }
 
     /// The epoch seed is `blake3(genesis_seed || epoch_number)` — a pure
@@ -1834,5 +1887,163 @@ mod tests {
                 "nodes elect different producers for slot {slot}"
             );
         }
+    }
+
+    // ---- review fixes: vote dedup, one-vote-per-height, deterministic
+    //      finality, one-sided slot tolerance ----
+
+    /// Review fix 2c: `add_vote` dedups by voter address — an echoed or
+    /// replayed vote must not stack, and review fix 3d: finality is
+    /// count-based over the registered set (equal weight per validator),
+    /// never contribution-score weighted (scores are node-local).
+    #[test]
+    fn test_finality_is_count_based_and_dedups_votes() {
+        let engine = ConsensusEngine::new(ConsensusConfig::default());
+        let mut validators = create_test_validators(3);
+        // Wildly divergent local scores: under the old score weighting,
+        // voter 0 alone (score 1M of ~1M total) finalized instantly.
+        validators[0].contribution_score = 1_000_000;
+        validators[1].contribution_score = 0;
+        engine.update_validators(validators.clone());
+
+        let hash = Hash::new([0xfe; 32]);
+
+        // One validator echoing its vote three times: still 1/3 < 0.67.
+        for _ in 0..3 {
+            engine.add_vote(Vote::accept(hash, 1, validators[0].address, 1));
+        }
+        assert!(
+            !engine.check_finality(&hash),
+            "echoed votes stacked weight or score weighting leaked in"
+        );
+
+        // Second distinct voter: 2/3 ≈ 0.667, below the 0.67 threshold.
+        engine.add_vote(Vote::accept(hash, 1, validators[1].address, 2));
+        assert!(!engine.check_finality(&hash));
+
+        // Votes from unknown validators count for nothing.
+        engine.add_vote(Vote::accept(hash, 1, Address::new([0xdd; 20]), 3));
+        assert!(!engine.check_finality(&hash));
+
+        // Third registered voter: 3/3 finalizes, scores irrelevant.
+        engine.add_vote(Vote::accept(hash, 1, validators[2].address, 4));
+        assert!(engine.check_finality(&hash));
+    }
+
+    /// Review fix 2a: a validator votes at most once per height — never a
+    /// second vote for the same block, never a second vote for a different
+    /// block at the same height. Pruning frees heights at/below finality.
+    #[test]
+    fn test_own_vote_recorded_once_per_height() {
+        let engine = ConsensusEngine::new(ConsensusConfig::default());
+        let h1 = Hash::new([0x01; 32]);
+        let h2 = Hash::new([0x02; 32]);
+
+        assert!(engine.try_record_own_vote(7, h1));
+        assert!(!engine.try_record_own_vote(7, h1), "re-voted same block");
+        assert!(
+            !engine.try_record_own_vote(7, h2),
+            "voted twice at one height"
+        );
+        assert!(engine.try_record_own_vote(8, h2));
+
+        // Heights at/below the finalized height are pruned with the votes.
+        engine.prune_old_votes(8);
+        assert!(engine.try_record_own_vote(8, h2));
+    }
+
+    /// Review fix 13: the schedule tolerance is one-sided — {slot, slot-1}
+    /// only. A leader may land its timestamp just AFTER its slot ended
+    /// (late producer within drift of the boundary), but the NEXT slot's
+    /// leader is never valid for a timestamp inside the previous slot:
+    /// producers fire at slot start, so the old symmetric ±1 window made
+    /// the neighboring leader a standing second valid producer.
+    #[test]
+    fn test_slot_tolerance_is_one_sided() {
+        use qfc_crypto::address_from_public_key;
+
+        // Real keypairs so the VRF paths are exercised.
+        let secrets: Vec<[u8; 32]> = (1..=4u8).map(|i| [i * 0x1f; 32]).collect();
+        let validators: Vec<ValidatorNode> = secrets
+            .iter()
+            .map(|s| {
+                let k = VrfKeypair::from_secret_bytes(s).unwrap();
+                ValidatorNode {
+                    address: address_from_public_key(&k.public_key()),
+                    public_key: k.public_key(),
+                    stake: qfc_types::U256::from_u64(10_000),
+                    ..Default::default()
+                }
+            })
+            .collect();
+
+        let engines: Vec<ConsensusEngine> = secrets
+            .iter()
+            .map(|s| {
+                let k = VrfKeypair::from_secret_bytes(s).unwrap();
+                let addr = address_from_public_key(&k.public_key());
+                let e = ConsensusEngine::new_validator(ConsensusConfig::default(), k, addr);
+                e.update_validators(validators.clone());
+                e.set_genesis_seed([0x4d; 32]);
+                e
+            })
+            .collect();
+        let observer = &engines[0];
+
+        let engine_for = |addr: Address| -> &ConsensusEngine {
+            engines
+                .iter()
+                .find(|e| e.our_address() == Some(addr))
+                .unwrap()
+        };
+
+        // A past, EVEN slot: slot and slot+1 share an epoch (2 slots per
+        // epoch), so the producer's VRF seed matches either candidate and
+        // only the schedule check separates the two cases. Consecutive
+        // same-epoch slots always elect different leaders (round-robin).
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let slot = ((now - 6 * 3600 * 1000) / BLOCK_INTERVAL_MS) & !1;
+        let leader = observer.select_producer(slot).unwrap();
+        let next_leader = observer.select_producer(slot + 1).unwrap();
+        assert_ne!(leader, next_leader);
+
+        let parent = Block::default(); // number 0, timestamp 0
+
+        // REJECTED: the NEXT slot's leader stamping late inside `slot`
+        // (offset within drift of the end). The old slot+1 branch accepted
+        // this; now the only candidates are {slot, slot-1}.
+        let late_in_slot = (slot + 1) * BLOCK_INTERVAL_MS - 100;
+        let early_block = engine_for(next_leader)
+            .produce_block(&parent, vec![], vec![], Hash::ZERO, 0, vec![], late_in_slot)
+            .unwrap();
+        assert!(
+            matches!(
+                observer.validate_block(&early_block, &parent),
+                Err(ConsensusError::InvalidProducer)
+            ),
+            "next slot's leader accepted for a previous-slot timestamp"
+        );
+
+        // ACCEPTED: `slot`'s own leader landing just past its slot end
+        // (offset < MAX_TIMESTAMP_DRIFT_MS into slot+1) — the retained
+        // slot-1 tolerance for a late producer at the boundary.
+        let just_past_boundary = (slot + 1) * BLOCK_INTERVAL_MS + 100;
+        let late_block = engine_for(leader)
+            .produce_block(
+                &parent,
+                vec![],
+                vec![],
+                Hash::ZERO,
+                0,
+                vec![],
+                just_past_boundary,
+            )
+            .unwrap();
+        observer
+            .validate_block(&late_block, &parent)
+            .expect("late producer within drift of the boundary must validate");
     }
 }
