@@ -272,3 +272,94 @@ state-sync/snap-sync.
 the election/seed unit tests in `crates/qfc-consensus/src/engine.rs`
 (required test 4 + convergence property tests). Required test 8 (gate)
 lands with Phase B.
+
+## Review fixes
+
+Two independent adversarial reviews audited this branch before the testnet
+reset; the merged, deduped findings and their resolutions:
+
+### Reset-blocking
+
+1. **Undelegate read the wall clock inside the shared state transition.**
+   `execute_undelegate` derived `unlock_at` from `SystemTime::now()`, so any
+   import ≥ 1 s after production produced a different undelegation record
+   and a state-root mismatch. `Chain::execute_at` now builds a
+   per-execution `Executor` and calls the previously-unwired
+   `set_block_context(block_number, block_timestamp, gas_limit)` for
+   **every** execution (also fixing the EVM TIMESTAMP/NUMBER opcodes, which
+   saw 0). `unlock_at = block_timestamp_ms/1000 + UNSTAKE_DELAY_SECS`.
+   Convergence test: a block carrying Delegate + Undelegate imports
+   byte-identically on a second node and re-imports after a >1 s delay.
+2. **Vote echo storm.** Receiving a vote unconditionally triggered casting
+   one, and `add_vote` stacked duplicates. Now: the engine tracks own votes
+   per height (`try_record_own_vote` — never a second vote for the same
+   block, never two votes at one height; pruned with finality), receiving a
+   vote only leads to a vote if we have not voted at that height, and
+   `add_vote` dedups by voter address.
+3. **Finality wedge cluster.** (a) `reorg_to` refuses only reorgs whose
+   resulting chain would NOT contain the finalized (height, hash) — it
+   walks the new branch for the finalized hash instead of refusing on
+   ancestor height alone. (b) Accept votes are cast only for blocks that
+   are canonical at their height, never for side-branch stores.
+   (c) `record_finalized` ignores (height, hash) pairs that are not
+   canonical locally. (d) `check_finality` is deterministic:
+   equal-weight-per-registered-validator, count-based ≥ 2/3 of the
+   registered set (contribution-score weighting was node-local); the sync
+   layer runs the finality check only for blocks held canonically.
+4. **Election membership frozen at registration.** Gossip-driven slashing
+   mutates stake locally (no in-block proof), and the election set filtered
+   on `stake > 0` — so node-local slashing could silently change the
+   rotation and fork the schedule. The election set is now the
+   genesis/checkpoint-REGISTERED validator set, address-sorted, with **no**
+   stake filter. Runtime slashing keeps mutating stake for
+   economics/metrics but never changes who is in the rotation. (This
+   supersedes the `stake > 0` wording in §3 above.)
+5. **MAX_REORG_DEPTH wedge.** The unconditional 64-block cap permanently
+   wedged any node that needed a deeper reorg to rejoin the honest chain.
+   Reorgs deeper than 64 are now permitted — logged at WARN — when the new
+   chain retains the finalized (height, hash); branches that do not retain
+   it are refused at any depth (with fix 3 finality advances on the
+   canonical chain, so an honest majority branch always qualifies).
+6. **Backward-walk fork healing used `peers()[0]`.** Missing-parent
+   requests now go to the status-verified peer with the highest head via
+   the same `pick_sync_peer` rotation machinery as forward catch-up, never
+   arbitrary HashSet order.
+
+### Should-fix
+
+7. **Atomic reorg.** `reorg_to` re-executes the entire new branch on
+   scratch state first; only after full success does it write the
+   old-index cleanup + canonical rewrite + head repoint as ONE WriteBatch.
+   An `Err` mid-reorg now really does keep the current head intact.
+8. **Phantom RPC task-fee escrow removed.** `submitPublicTask` debited the
+   live StateDB outside the import lock — a write no block ever commits.
+   It now only checks the balance; **task fees are unenforced until
+   settlement moves on-chain** (consistent with §1's economics note).
+9. **eth_call simulates on scratch state.** `simulate_call` used
+   snapshot/revert on the shared live StateDB, racing concurrent imports;
+   it now runs on a throwaway `StateDB::with_root(state_root())`.
+10. **Full nodes advance epochs.** `Chain::get_epoch` calls
+    `maybe_advance_epoch` (guarded on the genesis seed), so
+    `qfc_getEpoch`/task submission/synthetic tasks work on non-validator
+    nodes after the epoch-announcement neutering.
+11. **qfc_getMinerVesting no longer fabricates earnings.** The block path
+    pays no miner rewards (see §1), so the endpoint returns zeros plus a
+    `note` field instead of recomputing hypothetical balances from
+    in-block proofs.
+12. **gameday.sh timing.** The dev node leads 1 in 4 slots at 5 s
+    (~20 s/block); MIN_BLOCKS default, deadlines, and the stale "3s
+    blocks" note were adjusted.
+13. **One-sided slot tolerance.** Validation accepts leaders of
+    {slot, slot−1} only (late producer within drift of the boundary) —
+    never slot+1: producers fire at slot start, so the symmetric window
+    made the neighboring leader a standing second valid producer.
+14. **Proof pool requeue.** Inference proofs drained for a block are
+    returned to the pool when sealing/storing fails (e.g. head moved).
+15. **Catch-up trigger hardened.** `highest_peer_block` (fed by
+    unauthenticated gossip/heartbeats) is observability-only; the catch-up
+    loop triggers exclusively on fresh verified peer statuses, and gossip
+    blocks update the counter only after a successful import.
+16. **Forced catch-up starvation fixed.** The gated-behind slot counter is
+    no longer reset on `AwaitingPeerStatus`, so status flapping
+    (Behind → AwaitingPeerStatus → Behind) still reaches the forced
+    catch-up threshold.
