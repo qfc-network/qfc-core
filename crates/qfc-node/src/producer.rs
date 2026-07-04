@@ -15,7 +15,6 @@ use qfc_consensus::ConsensusEngine;
 use qfc_crypto::blake3_hash;
 use qfc_mempool::Mempool;
 use qfc_network::NetworkService;
-use qfc_storage;
 use qfc_types::{
     Heartbeat, Transaction, ValidatorMessage, BLOCK_INTERVAL_MS, MAX_INFERENCE_PROOFS_PER_BLOCK,
 };

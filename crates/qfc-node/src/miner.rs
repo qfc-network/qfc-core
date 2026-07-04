@@ -160,10 +160,7 @@ impl MiningService {
                     mining_service.validator_address,
                     mining_service.config.threads,
                 );
-                miner.mine_for_duration(
-                    &task_clone,
-                    Duration::from_millis(EPOCH_DURATION_MS - 500),
-                )
+                miner.mine_for_duration(&task_clone, Duration::from_millis(EPOCH_DURATION_MS - 500))
             })
             .await;
 
@@ -222,9 +219,7 @@ impl MiningService {
             }
 
             // Advance consensus epoch if expired (needed when this node is not the block producer)
-            let current_epoch = self
-                .consensus
-                .maybe_advance_epoch();
+            let current_epoch = self.consensus.maybe_advance_epoch();
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()

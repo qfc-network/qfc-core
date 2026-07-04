@@ -24,3 +24,4 @@ hex.workspace = true
 
 [dev-dependencies]
 tempfile = "3.9"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

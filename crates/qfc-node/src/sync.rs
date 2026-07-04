@@ -714,7 +714,8 @@ impl SyncManager {
             if vote.block_height > current_finalized {
                 consensus.set_finalized_height(vote.block_height);
                 // Record (height, hash) on the chain — reorgs never cross it.
-                self.chain.record_finalized(vote.block_height, vote.block_hash);
+                self.chain
+                    .record_finalized(vote.block_height, vote.block_hash);
                 info!("Block #{} finalized!", vote.block_height);
 
                 // Prune old votes

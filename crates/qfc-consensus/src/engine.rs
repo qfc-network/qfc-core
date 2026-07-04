@@ -364,6 +364,7 @@ impl ConsensusEngine {
     /// timestamp-driven). The VRF proof is generated against the seed of the
     /// epoch containing the timestamp's slot, exactly mirroring what
     /// validation derives from the header (§2 of ADR-0012).
+    #[allow(clippy::too_many_arguments)]
     pub fn produce_block(
         &self,
         parent: &Block,

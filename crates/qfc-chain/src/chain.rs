@@ -528,7 +528,11 @@ impl Chain {
     }
 
     /// Execute `block` against `parent_state_root` (see [`Self::execute_at`]).
-    pub fn execute_block(&self, block: &Block, parent_state_root: Hash) -> Result<ExecutionOutcome> {
+    pub fn execute_block(
+        &self,
+        block: &Block,
+        parent_state_root: Hash,
+    ) -> Result<ExecutionOutcome> {
         self.execute_at(
             parent_state_root,
             block.number(),
@@ -542,7 +546,7 @@ impl Chain {
     fn total_fees(transactions: &[Transaction], receipts: &[Receipt]) -> U256 {
         let mut total = U256::ZERO;
         for (tx, receipt) in transactions.iter().zip(receipts.iter()) {
-            total = total + U256::from_u64(receipt.gas_used) * tx.gas_price;
+            total += U256::from_u64(receipt.gas_used) * tx.gas_price;
         }
         total
     }
@@ -684,7 +688,7 @@ impl Chain {
             .head
             .read()
             .clone()
-            .ok_or_else(|| ChainError::GenesisNotFound)?;
+            .ok_or(ChainError::GenesisNotFound)?;
 
         if block.parent_hash() == head.hash {
             // Fast path: extends the canonical head.
@@ -749,7 +753,7 @@ impl Chain {
             .head
             .read()
             .clone()
-            .ok_or_else(|| ChainError::GenesisNotFound)?;
+            .ok_or(ChainError::GenesisNotFound)?;
         let finalized_height = self
             .consensus
             .finalized_height()
@@ -770,12 +774,12 @@ impl Chain {
                 )));
             }
             let parent_hash = cursor.parent_hash();
-            cursor = self
-                .get_block_by_hash(&parent_hash)?
-                .ok_or_else(|| ChainError::InvalidParent {
-                    expected: "existing branch ancestor".to_string(),
-                    actual: parent_hash.to_string(),
-                })?;
+            cursor =
+                self.get_block_by_hash(&parent_hash)?
+                    .ok_or_else(|| ChainError::InvalidParent {
+                        expected: "existing branch ancestor".to_string(),
+                        actual: parent_hash.to_string(),
+                    })?;
             cursor_hash = parent_hash;
         }
         let ancestor = cursor;
@@ -823,7 +827,12 @@ impl Chain {
     /// Commit a block as the new canonical head: header/body/indexes/receipts
     /// and head metadata land in a single atomic batch, then the live state
     /// adopts the block's root and the in-memory head advances.
-    fn commit_canonical(&self, block: &Block, receipts: &[Receipt], state_root: &Hash) -> Result<Hash> {
+    fn commit_canonical(
+        &self,
+        block: &Block,
+        receipts: &[Receipt],
+        state_root: &Hash,
+    ) -> Result<Hash> {
         let block_hash = self.commit_block(block, receipts, state_root)?;
 
         // The live state view (RPC/mempool reads) adopts the committed root.
@@ -847,7 +856,8 @@ impl Chain {
         if height > fin.0 {
             *fin = (height, hash);
         }
-        self.consensus.set_finalized_height(height.max(self.consensus.finalized_height()));
+        self.consensus
+            .set_finalized_height(height.max(self.consensus.finalized_height()));
     }
 
     /// Last finalized (height, hash).
@@ -1059,7 +1069,7 @@ impl Chain {
             .head
             .read()
             .clone()
-            .ok_or_else(|| ChainError::GenesisNotFound)?;
+            .ok_or(ChainError::GenesisNotFound)?;
 
         // A produced block must extend the current canonical head — if the
         // head moved (a concurrent import won the lock first), drop it.
