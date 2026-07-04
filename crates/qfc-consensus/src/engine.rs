@@ -3,14 +3,14 @@
 use crate::error::{ConsensusError, Result};
 use crate::scoring::{calculate_contribution_score, NetworkState};
 use parking_lot::RwLock;
-use qfc_crypto::{blake3_hash, vrf_output_to_f64, vrf_verify_with_seed, VrfKeypair};
+use qfc_crypto::{blake3_hash, vrf_verify_with_seed, VrfKeypair};
 use qfc_pow::{calculate_hashrate, initial_difficulty, verify_proof};
 use qfc_storage;
 use qfc_types::{
     Address, Block, BlockHeader, DifficultyConfig, DoubleSignEvidence, Epoch, Hash, InferenceProof,
     MiningTask, Receipt, Signature, Transaction, ValidatorCheckpoint, ValidatorNode, Vote,
-    WorkProof, BLOCK_VERSION, DEFAULT_BLOCK_GAS_LIMIT, FINALITY_THRESHOLD,
-    SLASH_DOUBLE_SIGN_PERCENT,
+    WorkProof, BLOCK_INTERVAL_MS, BLOCK_VERSION, DEFAULT_BLOCK_GAS_LIMIT, EPOCH_DURATION_MS,
+    FINALITY_THRESHOLD, MAX_TIMESTAMP_DRIFT_MS, SLASH_DOUBLE_SIGN_PERCENT,
 };
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -24,10 +24,13 @@ use tracing::{debug, info, warn};
 pub const CHECKPOINT_RETENTION: usize = 64;
 
 /// Consensus engine configuration
+///
+/// NOTE: slot length and epoch duration are deliberately NOT configurable —
+/// they are chain constants ([`BLOCK_INTERVAL_MS`] / [`EPOCH_DURATION_MS`]).
+/// A per-node value for either is a silent consensus fork (§6 of
+/// docs/adr/0012-consensus-convergence-fixes.md).
 #[derive(Clone, Debug)]
 pub struct ConsensusConfig {
-    /// Epoch duration in milliseconds
-    pub epoch_duration_ms: u64,
     /// Blocks per epoch
     pub blocks_per_epoch: u64,
     /// Finality threshold (fraction of total weight needed)
@@ -39,7 +42,6 @@ pub struct ConsensusConfig {
 impl Default for ConsensusConfig {
     fn default() -> Self {
         Self {
-            epoch_duration_ms: 10_000, // 10 seconds
             blocks_per_epoch: 3,
             finality_threshold: FINALITY_THRESHOLD,
             vote_timeout: Duration::from_secs(5),
@@ -79,10 +81,18 @@ pub struct ConsensusEngine {
     max_blocks_per_height: usize,
     /// Cache depth (how many heights to keep)
     cache_depth: u64,
-    /// Genesis epoch seed, captured on the first `start_epoch`. Anchors the
-    /// deterministic per-epoch seed derivation so every node computes the same
-    /// seed for a given (wall-clock) epoch number.
+    /// Genesis epoch seed, set exactly once at chain initialization (from the
+    /// chain's genesis hash, before any producer/miner/sync task spawns).
+    /// Anchors the deterministic per-epoch seed derivation so every node
+    /// computes the same seed for a given (wall-clock) epoch number. It is
+    /// never adopted from the network and survives checkpoint restore
+    /// (restore does not touch it).
     genesis_seed: RwLock<Option<[u8; 32]>>,
+    /// Heights WE have already voted at (height -> voted block hash).
+    /// A validator must never emit two votes for the same block or two
+    /// votes at the same height (review fix 2a) — receiving votes used to
+    /// echo a fresh vote per incoming vote, storming the vote topic.
+    own_votes: RwLock<HashMap<u64, Hash>>,
 }
 
 impl ConsensusEngine {
@@ -101,6 +111,7 @@ impl ConsensusEngine {
             max_blocks_per_height: 10,
             cache_depth: 100,
             genesis_seed: RwLock::new(None),
+            own_votes: RwLock::new(HashMap::new()),
         }
     }
 
@@ -119,6 +130,7 @@ impl ConsensusEngine {
             max_blocks_per_height: 10,
             cache_depth: 100,
             genesis_seed: RwLock::new(None),
+            own_votes: RwLock::new(HashMap::new()),
         }
     }
 
@@ -196,18 +208,27 @@ impl ConsensusEngine {
         self.current_epoch.read().clone()
     }
 
+    /// Set the genesis seed exactly once, from the chain's genesis hash.
+    ///
+    /// Called by `Chain::new` during initialization — i.e. before any
+    /// producer/miner/sync task can run — so there is no capture race
+    /// (defect D11). Subsequent calls are ignored.
+    pub fn set_genesis_seed(&self, seed: [u8; 32]) {
+        let mut gs = self.genesis_seed.write();
+        if gs.is_none() {
+            *gs = Some(seed);
+        } else if *gs != Some(seed) {
+            warn!("Ignoring attempt to change the genesis seed");
+        }
+    }
+
+    /// Whether the genesis seed has been initialized.
+    pub fn has_genesis_seed(&self) -> bool {
+        self.genesis_seed.read().is_some()
+    }
+
     /// Start a new epoch
     pub fn start_epoch(&self, epoch_number: u64, seed: [u8; 32]) {
-        // Capture the genesis seed the first time an epoch is started (the
-        // producer's `start_epoch(1, genesis_hash)` at init). It anchors the
-        // per-epoch seed derivation in `maybe_advance_epoch`.
-        {
-            let mut gs = self.genesis_seed.write();
-            if gs.is_none() {
-                *gs = Some(seed);
-            }
-        }
-
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -226,95 +247,113 @@ impl ConsensusEngine {
     /// O(1) and identical on every node (all share the genesis seed), so a
     /// wall-clock epoch number — which can be very large — maps to a shared
     /// seed without walking a hash chain.
-    fn derive_epoch_seed(&self, epoch_number: u64) -> [u8; 32] {
-        let genesis = self.genesis_seed.read().unwrap_or_default();
+    ///
+    /// Errors with [`ConsensusError::GenesisSeedUnset`] if the genesis seed
+    /// has not been initialized — there is deliberately NO fallback to a
+    /// default seed (an all-zero anchor was one of the fork defects, D11).
+    pub fn derive_epoch_seed(&self, epoch_number: u64) -> Result<[u8; 32]> {
+        let genesis = self
+            .genesis_seed
+            .read()
+            .ok_or(ConsensusError::GenesisSeedUnset)?;
         let h = blake3_hash(&[&genesis[..], &epoch_number.to_le_bytes()[..]].concat());
         let mut seed = [0u8; 32];
         seed.copy_from_slice(h.as_bytes());
-        seed
+        Ok(seed)
+    }
+
+    /// The wall-clock slot containing `timestamp_ms`.
+    pub fn slot_of_timestamp(timestamp_ms: u64) -> u64 {
+        timestamp_ms / BLOCK_INTERVAL_MS
+    }
+
+    /// The epoch a slot belongs to. `EPOCH_DURATION_MS` is a multiple of
+    /// `BLOCK_INTERVAL_MS`, so a slot never straddles an epoch boundary and
+    /// this is exact.
+    pub fn epoch_of_slot(slot: u64) -> u64 {
+        slot / (EPOCH_DURATION_MS / BLOCK_INTERVAL_MS)
     }
 
     /// Advance to the epoch implied by the current wall-clock time, if it has
     /// changed. Returns the (possibly updated) epoch number.
     ///
-    /// The epoch number is `now_ms / epoch_duration_ms` — a global function of
+    /// The epoch number is `now_ms / EPOCH_DURATION_MS` — a global function of
     /// wall-clock time (NTP-synced across nodes), NOT of when this node
-    /// started. The previous implementation accumulated epochs from each
-    /// node's local `start_time`, so a node that booted earlier ran ahead onto
-    /// a different epoch number, derived a different seed, elected a different
-    /// producer, and forked. Anchoring to wall-clock makes every node agree on
-    /// the current epoch — and therefore on the seed and the elected producer.
-    /// The seed is derived directly from the genesis seed (see
-    /// `derive_epoch_seed`), which is shared by all nodes.
-    pub fn maybe_advance_epoch(&self, epoch_duration_ms: u64) -> u64 {
-        if epoch_duration_ms == 0 {
-            return self.get_epoch().number;
-        }
-
+    /// started. Anchoring to wall-clock makes every node agree on the current
+    /// epoch — and therefore on the seed and the elected producer. The seed is
+    /// derived directly from the genesis seed (see `derive_epoch_seed`).
+    ///
+    /// The tracked `current_epoch` is observability/mining state only —
+    /// block validation never reads it (validation derives everything from
+    /// the block's own timestamp; §2 of ADR-0012).
+    pub fn maybe_advance_epoch(&self) -> u64 {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64;
-        let target = now / epoch_duration_ms;
+        let target = now / EPOCH_DURATION_MS;
 
         if target == self.get_epoch().number {
             return target;
         }
 
-        let seed = self.derive_epoch_seed(target);
-        self.start_epoch(target, seed);
-        target
-    }
-
-    /// Select block producer for current epoch slot
-    pub fn select_producer(&self, slot: u64) -> Option<Address> {
-        let validators = self.validators.read();
-        if validators.is_empty() {
-            return None;
-        }
-
-        let epoch = self.current_epoch.read();
-
-        // Active validators in a canonical (address-sorted) order. Selection
-        // MUST be a pure function of (validator set, epoch seed, slot) that is
-        // identical on every node — so we sort by address rather than trust
-        // the internal list order, which can differ between nodes and would
-        // otherwise hand different nodes different leaders (the original cause
-        // of the testnet's three-way fork).
-        let mut active: Vec<&ValidatorNode> = validators.iter().filter(|v| v.is_active()).collect();
-        if active.is_empty() {
-            return None;
-        }
-        active.sort_by_key(|v| v.address.0);
-
-        let total_score: u64 = active.iter().map(|v| v.contribution_score).sum();
-
-        // No contribution signal yet (all scores zero): deterministic
-        // round-robin by slot. Every node shares the same sorted set, so all
-        // agree on the same leader for each slot. Previously this returned
-        // `validators[0]`, whose identity depended on per-node list ordering —
-        // each node elected itself and forked from block #1.
-        if total_score == 0 {
-            return Some(active[(slot as usize) % active.len()].address);
-        }
-
-        // Weighted selection by contribution score, driven by the slot seed
-        // (derived from the shared epoch seed; see maybe_advance_epoch).
-        let mut slot_seed = [0u8; 32];
-        let hash = blake3_hash(&[&epoch.seed[..], &slot.to_le_bytes()[..]].concat());
-        slot_seed.copy_from_slice(hash.as_bytes());
-        let random_value = vrf_output_to_f64(&slot_seed);
-
-        let mut cumulative = 0.0f64;
-        for validator in &active {
-            cumulative += validator.contribution_score as f64 / total_score as f64;
-            if random_value < cumulative {
-                return Some(validator.address);
+        match self.derive_epoch_seed(target) {
+            Ok(seed) => {
+                self.start_epoch(target, seed);
+                target
+            }
+            Err(_) => {
+                // Genesis seed not initialized yet — do not anchor an epoch
+                // to a bogus seed; keep the current epoch until it is.
+                self.get_epoch().number
             }
         }
+    }
 
-        // Floating-point rounding fallback: last validator in canonical order.
-        active.last().map(|v| v.address)
+    /// The election set: the REGISTERED validator set (genesis-registered,
+    /// checkpoint-restored) in canonical (address-sorted) order.
+    ///
+    /// Membership is FROZEN at registration (§3 of ADR-0012, review fix 4):
+    /// - NO stake filter — gossip-driven slashing mutates stake locally
+    ///   without in-block proof, so a `stake > 0` filter let node-local
+    ///   slashing silently change who is in the rotation (a schedule fork).
+    ///   Runtime slashing keeps mutating stake for economics/metrics, but
+    ///   never election membership.
+    /// - NO jail flags — same reason: local jailing comes from gossip
+    ///   evidence and diverges between nodes. Slashing moves on-chain later.
+    /// - NO contribution scores — latency EMAs, votes, hashrate etc. are
+    ///   node-local observations. Scores remain for metrics/observability.
+    fn election_set(&self) -> Vec<(Address, qfc_types::PublicKey)> {
+        let validators = self.validators.read();
+        let mut set: Vec<(Address, qfc_types::PublicKey)> = validators
+            .iter()
+            .map(|v| (v.address, v.public_key))
+            .collect();
+        set.sort_by_key(|(addr, _)| addr.0);
+        set
+    }
+
+    /// Deterministic leader for `slot` under `epoch_seed`: round-robin over
+    /// the address-sorted registered set, rotated by a seed-derived offset.
+    /// A pure function of (registered validator set, epoch seed, slot) —
+    /// identical on every node.
+    pub fn select_producer_with_seed(&self, slot: u64, epoch_seed: &[u8; 32]) -> Option<Address> {
+        let set = self.election_set();
+        if set.is_empty() {
+            return None;
+        }
+        let offset = u64::from_le_bytes(epoch_seed[..8].try_into().unwrap());
+        let idx = (slot.wrapping_add(offset) % set.len() as u64) as usize;
+        Some(set[idx].0)
+    }
+
+    /// Select the block producer for a wall-clock slot. The epoch seed is
+    /// derived from the slot itself (genesis-anchored), never from
+    /// `current_epoch`. Returns `None` when the genesis seed is unset or the
+    /// election set is empty.
+    pub fn select_producer(&self, slot: u64) -> Option<Address> {
+        let seed = self.derive_epoch_seed(Self::epoch_of_slot(slot)).ok()?;
+        self.select_producer_with_seed(slot, &seed)
     }
 
     /// Check if we should produce a block
@@ -327,7 +366,15 @@ impl ConsensusEngine {
         false
     }
 
-    /// Produce a block
+    /// Produce a block with the given header timestamp (milliseconds).
+    ///
+    /// The timestamp is a parameter — not read here — because the caller must
+    /// execute the block body against the parent state with the SAME
+    /// timestamp that lands in the header (undelegation maturity is
+    /// timestamp-driven). The VRF proof is generated against the seed of the
+    /// epoch containing the timestamp's slot, exactly mirroring what
+    /// validation derives from the header (§2 of ADR-0012).
+    #[allow(clippy::too_many_arguments)]
     pub fn produce_block(
         &self,
         parent: &Block,
@@ -336,21 +383,20 @@ impl ConsensusEngine {
         state_root: Hash,
         gas_used: u64,
         inference_proofs: Vec<InferenceProof>,
+        timestamp_ms: u64,
     ) -> Result<Block> {
         let validator_key = self
             .validator_key
             .as_ref()
             .ok_or(ConsensusError::NotValidator)?;
 
-        let epoch = self.current_epoch.read();
+        // Generate the VRF proof against the block-derived epoch seed — the
+        // same derivation every validator applies when importing this block.
+        let slot = Self::slot_of_timestamp(timestamp_ms);
+        let seed = self.derive_epoch_seed(Self::epoch_of_slot(slot))?;
+        let vrf_proof = validator_key.prove_with_seed(&seed);
 
-        // Generate VRF proof
-        let vrf_proof = validator_key.prove_with_seed(&epoch.seed);
-
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
+        let now = timestamp_ms;
 
         // Compute transaction and receipts roots
         let tx_hashes: Vec<Hash> = transactions
@@ -411,7 +457,15 @@ impl ConsensusEngine {
         Ok(block)
     }
 
-    /// Validate a block
+    /// Validate a block — SELF-CONTAINED (§2 of ADR-0012).
+    ///
+    /// Everything is derived from the block itself + chain constants:
+    /// slot/epoch come from the block's timestamp, the epoch seed from the
+    /// genesis-anchored derivation, and the expected producer from the
+    /// deterministic election. `current_epoch` is never consulted, so blocks
+    /// from any past epoch validate identically on every node at any time
+    /// (fixes D8: historical imports used to fail `InvalidVrfProof` because
+    /// they were checked against the receiver's *current* rotating seed).
     pub fn validate_block(&self, block: &Block, parent: &Block) -> Result<()> {
         // 1. Check block number
         if block.number() != parent.number() + 1 {
@@ -424,14 +478,14 @@ impl ConsensusEngine {
             return Err(ConsensusError::InvalidStateTransition);
         }
 
-        // 3. Check timestamp
+        // 3. Check timestamp: strictly increasing, and at most MAX_DRIFT into
+        // our future (trivially true for historical imports).
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64;
 
-        if block.timestamp() > now + 30_000 {
-            // Allow 30 seconds future tolerance
+        if block.timestamp() > now + MAX_TIMESTAMP_DRIFT_MS {
             return Err(ConsensusError::InvalidTimestamp);
         }
 
@@ -439,23 +493,61 @@ impl ConsensusEngine {
             return Err(ConsensusError::InvalidTimestamp);
         }
 
-        // 4. Check producer is valid
-        let validators = self.validators.read();
-        let producer = validators
-            .iter()
-            .find(|v| v.address == block.producer())
-            .ok_or(ConsensusError::InvalidProducer)?;
+        // 4. Producer must exist in the election set's validator registry.
+        // Local jail flags deliberately do NOT gate validation (§3): jailing
+        // is driven by gossip evidence without in-block proof, so it is
+        // node-local and cannot be a consensus input.
+        let producer_key = {
+            let validators = self.validators.read();
+            validators
+                .iter()
+                .find(|v| v.address == block.producer())
+                .map(|v| v.public_key)
+                .ok_or(ConsensusError::InvalidProducer)?
+        };
 
-        if !producer.is_active() {
-            return Err(ConsensusError::ValidatorJailed);
+        // 5. Enforce the deterministic schedule: the producer must be the
+        // elected leader of the block's own slot (derived from its
+        // timestamp), with a `slot - 1` tolerance ONLY when the timestamp
+        // sits within MAX_DRIFT after the slot boundary (a late producer
+        // just past its own slot's end). NEVER `slot + 1` (review fix 13):
+        // producers fire at slot START, so accepting the next slot's leader
+        // for timestamps near the end of a slot would make a second
+        // producer valid for nearly every block — a standing double-leader.
+        // The VRF proof is verified against the seed of the matched slot's
+        // epoch — the same seed the producer used.
+        let slot = Self::slot_of_timestamp(block.timestamp());
+        let offset_in_slot = block.timestamp() % BLOCK_INTERVAL_MS;
+
+        let mut candidate_slots = vec![slot];
+        if offset_in_slot < MAX_TIMESTAMP_DRIFT_MS && slot > 0 {
+            candidate_slots.push(slot - 1);
         }
 
-        // 5. Verify VRF proof against epoch seed
-        let epoch = self.current_epoch.read();
-        if producer.public_key != qfc_types::PublicKey::ZERO {
-            // Only verify if producer has a public key set
-            vrf_verify_with_seed(&producer.public_key, &epoch.seed, block.vrf_proof())
-                .map_err(|_| ConsensusError::InvalidVrfProof)?;
+        let mut producer_matched = false;
+        let mut vrf_ok = false;
+        for candidate in candidate_slots {
+            let seed = self.derive_epoch_seed(Self::epoch_of_slot(candidate))?;
+            if self.select_producer_with_seed(candidate, &seed) != Some(block.producer()) {
+                continue;
+            }
+            producer_matched = true;
+            // Producer is the leader of this candidate slot; the VRF proof
+            // must verify against that slot's epoch seed. (Zero public key
+            // means "unknown key" — only possible for hand-built test sets;
+            // genesis validators always carry a real key.)
+            if producer_key == qfc_types::PublicKey::ZERO
+                || vrf_verify_with_seed(&producer_key, &seed, block.vrf_proof()).is_ok()
+            {
+                vrf_ok = true;
+                break;
+            }
+        }
+        if !producer_matched {
+            return Err(ConsensusError::InvalidProducer);
+        }
+        if !vrf_ok {
+            return Err(ConsensusError::InvalidVrfProof);
         }
 
         // 6. Check block size
@@ -518,13 +610,31 @@ impl ConsensusEngine {
         Ok(vote)
     }
 
-    /// Add a vote to pending votes
+    /// Add a vote to pending votes. Dedups by voter address (review fix
+    /// 2c): each validator contributes at most ONE vote per block — echoed
+    /// or replayed votes must not stack weight or re-trigger anything.
     pub fn add_vote(&self, vote: Vote) {
-        self.pending_votes
-            .write()
-            .entry(vote.block_hash)
-            .or_default()
-            .push(vote);
+        let mut pending = self.pending_votes.write();
+        let votes = pending.entry(vote.block_hash).or_default();
+        if votes.iter().any(|v| v.voter == vote.voter) {
+            return;
+        }
+        votes.push(vote);
+    }
+
+    /// Atomically record that we are voting on `(height, block_hash)`.
+    /// Returns `false` — and records nothing — when we already voted at
+    /// this height (for this or any other block): never emit a second vote
+    /// for the same block, never vote twice at one height (review fix 2a).
+    pub fn try_record_own_vote(&self, height: u64, block_hash: Hash) -> bool {
+        use std::collections::hash_map::Entry;
+        match self.own_votes.write().entry(height) {
+            Entry::Occupied(_) => false,
+            Entry::Vacant(v) => {
+                v.insert(block_hash);
+                true
+            }
+        }
     }
 
     /// Sign a message hash with our validator key
@@ -538,7 +648,14 @@ impl ConsensusEngine {
         Ok(Signature::new(signature))
     }
 
-    /// Check if a block has reached finality
+    /// Check if a block has reached finality.
+    ///
+    /// Deterministic weight (review fix 3d): equal weight per REGISTERED
+    /// validator, count-based ≥ threshold (2/3) of the registered set.
+    /// Contribution-score weighting made finality node-local — scores are
+    /// per-node observations, so two nodes could disagree on whether the
+    /// SAME votes finalize a block. Callers must not feed votes for blocks
+    /// they don't hold canonically (enforced at the sync layer).
     pub fn check_finality(&self, block_hash: &Hash) -> bool {
         let votes = self.pending_votes.read();
         let block_votes = match votes.get(block_hash) {
@@ -547,22 +664,20 @@ impl ConsensusEngine {
         };
 
         let validators = self.validators.read();
-
-        // Count accept votes weighted by contribution score
-        let accept_weight: u64 = block_votes
-            .iter()
-            .filter(|v| v.is_accept())
-            .filter_map(|v| validators.iter().find(|val| val.address == v.voter))
-            .map(|val| val.contribution_score)
-            .sum();
-
-        let total_weight: u64 = validators.iter().map(|v| v.contribution_score).sum();
-
-        if total_weight == 0 {
+        let total = validators.len() as u64;
+        if total == 0 {
             return false;
         }
 
-        let ratio = accept_weight as f64 / total_weight as f64;
+        // One vote per registered validator (add_vote dedups by voter; the
+        // registry lookup drops votes from unknown addresses).
+        let accept_count = block_votes
+            .iter()
+            .filter(|v| v.is_accept())
+            .filter(|v| validators.iter().any(|val| val.address == v.voter))
+            .count() as u64;
+
+        let ratio = accept_count as f64 / total as f64;
         ratio >= self.config.finality_threshold
     }
 
@@ -584,6 +699,9 @@ impl ConsensusEngine {
                 .map(|v| v.block_height > finalized_height)
                 .unwrap_or(false)
         });
+        self.own_votes
+            .write()
+            .retain(|height, _| *height > finalized_height);
     }
 
     /// Record that a validator produced a block successfully
@@ -1219,7 +1337,7 @@ impl ConsensusEngine {
             epoch.seed,
             difficulty,
             now,
-            now + self.config.epoch_duration_ms,
+            now + EPOCH_DURATION_MS,
         )
     }
 }
@@ -1265,11 +1383,22 @@ mod tests {
         let validators = create_test_validators(3);
 
         engine.update_validators(validators);
-        engine.start_epoch(1, [0xab; 32]);
+        engine.set_genesis_seed([0xab; 32]);
 
         // Should select a producer
         let producer = engine.select_producer(0);
         assert!(producer.is_some());
+    }
+
+    #[test]
+    fn test_producer_selection_requires_genesis_seed() {
+        let engine = ConsensusEngine::new(ConsensusConfig::default());
+        engine.update_validators(create_test_validators(3));
+
+        // No genesis seed -> no election, no bogus default anchor (D11).
+        assert!(engine.derive_epoch_seed(1).is_err());
+        assert_eq!(engine.select_producer(0), None);
+        assert!(!engine.should_produce(0));
     }
 
     #[test]
@@ -1557,10 +1686,11 @@ mod tests {
     /// Two nodes holding the same validator set but in DIFFERENT internal
     /// order must elect the SAME producer for every slot. This is the core
     /// invariant the fork violated: selection is now a pure function of
-    /// (address-sorted set, seed, slot), independent of list order.
+    /// (address-sorted stake>0 set, epoch seed, slot), independent of list
+    /// order.
     #[test]
     fn test_producer_selection_is_order_independent() {
-        let mut a = create_test_validators(4); // scores = 1000 (weighted path)
+        let mut a = create_test_validators(4);
         let mut b = a.clone();
         b.reverse(); // node B stores them in the opposite order
         assert_ne!(a[0].address, b[0].address);
@@ -1569,8 +1699,8 @@ mod tests {
         let eb = ConsensusEngine::new(ConsensusConfig::default());
         ea.update_validators(std::mem::take(&mut a));
         eb.update_validators(std::mem::take(&mut b));
-        ea.start_epoch(7, [0x5a; 32]);
-        eb.start_epoch(7, [0x5a; 32]); // same shared epoch seed
+        ea.set_genesis_seed([0x5a; 32]);
+        eb.set_genesis_seed([0x5a; 32]); // same shared genesis anchor
 
         for slot in 0..200u64 {
             assert_eq!(
@@ -1581,38 +1711,95 @@ mod tests {
         }
     }
 
-    /// With all contribution scores zero, selection must still be a
-    /// deterministic, order-independent round-robin that visits every
-    /// validator — not a fixed `validators[0]` that each node resolves to
-    /// itself (the original fork trigger).
+    /// Round-robin must visit every stake>0 validator over `len` consecutive
+    /// slots within an epoch — not a fixed `validators[0]` that each node
+    /// resolves to itself (the original fork trigger).
     #[test]
-    fn test_zero_score_round_robin() {
-        let mut a: Vec<ValidatorNode> = create_test_validators(4)
-            .into_iter()
-            .map(|mut v| {
-                v.contribution_score = 0;
-                v
-            })
-            .collect();
-        let mut b = a.clone();
-        b.reverse();
+    fn test_round_robin_covers_all_validators() {
+        let engine = ConsensusEngine::new(ConsensusConfig::default());
+        engine.update_validators(create_test_validators(4));
+        engine.set_genesis_seed([0x11; 32]);
 
-        let ea = ConsensusEngine::new(ConsensusConfig::default());
-        let eb = ConsensusEngine::new(ConsensusConfig::default());
-        ea.update_validators(std::mem::take(&mut a));
-        eb.update_validators(std::mem::take(&mut b));
-        // Intentionally do NOT call start_epoch: it recomputes contribution
-        // scores from stake, which would leave the zero-score path untested.
-        // The round-robin branch ignores the epoch seed anyway.
-
+        // Use a fixed epoch seed so all 4 consecutive slots share the seed
+        // (in production 4 slots span 2 epochs; coverage per epoch-window is
+        // what matters for the rotation property).
+        let seed = engine.derive_epoch_seed(9).unwrap();
         let mut seen = std::collections::HashSet::new();
-        for slot in 0..8u64 {
-            let pa = ea.select_producer(slot);
-            assert_eq!(pa, eb.select_producer(slot), "disagree at slot {slot}");
-            seen.insert(pa.unwrap());
+        for slot in 100..104u64 {
+            seen.insert(engine.select_producer_with_seed(slot, &seed).unwrap());
         }
-        // 4 validators over 8 slots → round-robin covers all of them.
         assert_eq!(seen.len(), 4, "round-robin did not cover every validator");
+    }
+
+    /// REQUIRED TEST 4 (spec), extended by review fix 4: two engines with
+    /// wildly different local scores, jail flags AND runtime-mutated stake
+    /// must elect the same leader for the same slot. Contribution scores,
+    /// local jailing, and gossip-slashed stake are NOT consensus inputs —
+    /// election membership is frozen at registration.
+    #[test]
+    fn test_election_ignores_local_scores_and_jail_flags() {
+        let base = create_test_validators(4);
+
+        // Node A: pristine view.
+        let a = ConsensusEngine::new(ConsensusConfig::default());
+        a.update_validators(base.clone());
+
+        // Node B: wildly different local observations — inflated/zero scores,
+        // one validator locally jailed (gossip evidence, no in-block proof),
+        // and divergent local stake mutations (gossip-driven slashing that
+        // node A never saw, including a full slash to zero).
+        let mut vb = base;
+        vb[0].contribution_score = 0;
+        vb[0].stake = qfc_types::U256::ZERO; // fully slashed locally
+        vb[1].contribution_score = 1_000_000;
+        vb[1].stake = qfc_types::U256::from_u64(u64::MAX);
+        vb[2].is_jailed = true;
+        vb[2].jail_until = u64::MAX;
+        vb[3].avg_latency_ms = 30_000;
+        vb.reverse();
+        let b = ConsensusEngine::new(ConsensusConfig::default());
+        b.update_validators(vb);
+
+        a.set_genesis_seed([0x07; 32]);
+        b.set_genesis_seed([0x07; 32]);
+
+        for slot in 0..200u64 {
+            assert_eq!(
+                a.select_producer(slot),
+                b.select_producer(slot),
+                "local scores/jail flags/stake mutations leaked into election at slot {slot}"
+            );
+        }
+    }
+
+    /// Review fix 4: election membership is FROZEN at registration —
+    /// runtime slashing (a gossip-driven, node-local mutation) may zero a
+    /// validator's stake for economics/metrics, but must never change who
+    /// is in the rotation.
+    #[test]
+    fn test_slashing_does_not_change_election_membership() {
+        let validators = create_test_validators(3);
+        let slashed = validators[1].address;
+
+        let engine = ConsensusEngine::new(ConsensusConfig::default());
+        engine.update_validators(validators);
+        engine.set_genesis_seed([0x22; 32]);
+
+        let before: Vec<_> = (0..60u64).map(|s| engine.select_producer(s)).collect();
+
+        // 100% slash: stake goes to zero.
+        engine.slash_validator(&slashed, 100, 60_000);
+        assert!(engine
+            .get_validators()
+            .iter()
+            .any(|v| v.address == slashed && v.stake.is_zero()));
+
+        let after: Vec<_> = (0..60u64).map(|s| engine.select_producer(s)).collect();
+        assert_eq!(before, after, "slashing changed the election schedule");
+        assert!(
+            after.contains(&Some(slashed)),
+            "fully-slashed validator dropped out of the rotation"
+        );
     }
 
     /// The epoch seed is `blake3(genesis_seed || epoch_number)` — a pure
@@ -1622,10 +1809,10 @@ mod tests {
     fn test_epoch_seed_is_deterministic() {
         const GENESIS: [u8; 32] = [0x07; 32];
         let engine = ConsensusEngine::new(ConsensusConfig::default());
-        engine.start_epoch(1, GENESIS); // captures genesis_seed = GENESIS
+        engine.set_genesis_seed(GENESIS);
 
-        // Advance to the wall-clock epoch (now_ms / 10_000 ≫ 1).
-        let n = engine.maybe_advance_epoch(10_000);
+        // Advance to the wall-clock epoch (now_ms / EPOCH_DURATION_MS ≫ 1).
+        let n = engine.maybe_advance_epoch();
         assert!(n > 1, "expected a wall-clock epoch advance, got {n}");
 
         // Recompute independently: blake3(genesis || n).
@@ -1639,6 +1826,30 @@ mod tests {
         );
     }
 
+    /// The genesis seed is set-once: later attempts (e.g. a malicious or
+    /// buggy epoch announcement) cannot re-anchor the derivation.
+    #[test]
+    fn test_genesis_seed_is_set_once() {
+        let engine = ConsensusEngine::new(ConsensusConfig::default());
+        engine.set_genesis_seed([0x01; 32]);
+        let s1 = engine.derive_epoch_seed(42).unwrap();
+        engine.set_genesis_seed([0x02; 32]); // ignored
+        assert_eq!(engine.derive_epoch_seed(42).unwrap(), s1);
+    }
+
+    /// Without a genesis seed, maybe_advance_epoch must NOT anchor an epoch
+    /// to a bogus default seed — it stays put until the seed is set.
+    #[test]
+    fn test_maybe_advance_epoch_requires_genesis_seed() {
+        let engine = ConsensusEngine::new(ConsensusConfig::default());
+        let before = engine.get_epoch().number;
+        assert_eq!(engine.maybe_advance_epoch(), before);
+        assert_eq!(engine.get_epoch().number, before);
+
+        engine.set_genesis_seed([0x03; 32]);
+        assert!(engine.maybe_advance_epoch() > before);
+    }
+
     /// The fix for the testnet fork: two nodes that start at DIFFERENT
     /// wall-clock times must still agree on the current epoch, seed, and
     /// elected producer — because scheduling is anchored to wall-clock, not to
@@ -1650,7 +1861,7 @@ mod tests {
 
         let a = ConsensusEngine::new(ConsensusConfig::default());
         a.update_validators(validators.clone());
-        a.start_epoch(1, GENESIS);
+        a.set_genesis_seed(GENESIS);
 
         // Node B boots later and stores its validators in the opposite order.
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -1658,11 +1869,11 @@ mod tests {
         vb.reverse();
         let b = ConsensusEngine::new(ConsensusConfig::default());
         b.update_validators(vb);
-        b.start_epoch(1, GENESIS);
+        b.set_genesis_seed(GENESIS);
 
         // Both advance to the wall-clock epoch.
-        let ea = a.maybe_advance_epoch(10_000);
-        let eb = b.maybe_advance_epoch(10_000);
+        let ea = a.maybe_advance_epoch();
+        let eb = b.maybe_advance_epoch();
         assert_eq!(ea, eb, "nodes disagree on the current epoch number");
         assert_eq!(
             a.get_epoch().seed,
@@ -1676,5 +1887,163 @@ mod tests {
                 "nodes elect different producers for slot {slot}"
             );
         }
+    }
+
+    // ---- review fixes: vote dedup, one-vote-per-height, deterministic
+    //      finality, one-sided slot tolerance ----
+
+    /// Review fix 2c: `add_vote` dedups by voter address — an echoed or
+    /// replayed vote must not stack, and review fix 3d: finality is
+    /// count-based over the registered set (equal weight per validator),
+    /// never contribution-score weighted (scores are node-local).
+    #[test]
+    fn test_finality_is_count_based_and_dedups_votes() {
+        let engine = ConsensusEngine::new(ConsensusConfig::default());
+        let mut validators = create_test_validators(3);
+        // Wildly divergent local scores: under the old score weighting,
+        // voter 0 alone (score 1M of ~1M total) finalized instantly.
+        validators[0].contribution_score = 1_000_000;
+        validators[1].contribution_score = 0;
+        engine.update_validators(validators.clone());
+
+        let hash = Hash::new([0xfe; 32]);
+
+        // One validator echoing its vote three times: still 1/3 < 0.67.
+        for _ in 0..3 {
+            engine.add_vote(Vote::accept(hash, 1, validators[0].address, 1));
+        }
+        assert!(
+            !engine.check_finality(&hash),
+            "echoed votes stacked weight or score weighting leaked in"
+        );
+
+        // Second distinct voter: 2/3 ≈ 0.667, below the 0.67 threshold.
+        engine.add_vote(Vote::accept(hash, 1, validators[1].address, 2));
+        assert!(!engine.check_finality(&hash));
+
+        // Votes from unknown validators count for nothing.
+        engine.add_vote(Vote::accept(hash, 1, Address::new([0xdd; 20]), 3));
+        assert!(!engine.check_finality(&hash));
+
+        // Third registered voter: 3/3 finalizes, scores irrelevant.
+        engine.add_vote(Vote::accept(hash, 1, validators[2].address, 4));
+        assert!(engine.check_finality(&hash));
+    }
+
+    /// Review fix 2a: a validator votes at most once per height — never a
+    /// second vote for the same block, never a second vote for a different
+    /// block at the same height. Pruning frees heights at/below finality.
+    #[test]
+    fn test_own_vote_recorded_once_per_height() {
+        let engine = ConsensusEngine::new(ConsensusConfig::default());
+        let h1 = Hash::new([0x01; 32]);
+        let h2 = Hash::new([0x02; 32]);
+
+        assert!(engine.try_record_own_vote(7, h1));
+        assert!(!engine.try_record_own_vote(7, h1), "re-voted same block");
+        assert!(
+            !engine.try_record_own_vote(7, h2),
+            "voted twice at one height"
+        );
+        assert!(engine.try_record_own_vote(8, h2));
+
+        // Heights at/below the finalized height are pruned with the votes.
+        engine.prune_old_votes(8);
+        assert!(engine.try_record_own_vote(8, h2));
+    }
+
+    /// Review fix 13: the schedule tolerance is one-sided — {slot, slot-1}
+    /// only. A leader may land its timestamp just AFTER its slot ended
+    /// (late producer within drift of the boundary), but the NEXT slot's
+    /// leader is never valid for a timestamp inside the previous slot:
+    /// producers fire at slot start, so the old symmetric ±1 window made
+    /// the neighboring leader a standing second valid producer.
+    #[test]
+    fn test_slot_tolerance_is_one_sided() {
+        use qfc_crypto::address_from_public_key;
+
+        // Real keypairs so the VRF paths are exercised.
+        let secrets: Vec<[u8; 32]> = (1..=4u8).map(|i| [i * 0x1f; 32]).collect();
+        let validators: Vec<ValidatorNode> = secrets
+            .iter()
+            .map(|s| {
+                let k = VrfKeypair::from_secret_bytes(s).unwrap();
+                ValidatorNode {
+                    address: address_from_public_key(&k.public_key()),
+                    public_key: k.public_key(),
+                    stake: qfc_types::U256::from_u64(10_000),
+                    ..Default::default()
+                }
+            })
+            .collect();
+
+        let engines: Vec<ConsensusEngine> = secrets
+            .iter()
+            .map(|s| {
+                let k = VrfKeypair::from_secret_bytes(s).unwrap();
+                let addr = address_from_public_key(&k.public_key());
+                let e = ConsensusEngine::new_validator(ConsensusConfig::default(), k, addr);
+                e.update_validators(validators.clone());
+                e.set_genesis_seed([0x4d; 32]);
+                e
+            })
+            .collect();
+        let observer = &engines[0];
+
+        let engine_for = |addr: Address| -> &ConsensusEngine {
+            engines
+                .iter()
+                .find(|e| e.our_address() == Some(addr))
+                .unwrap()
+        };
+
+        // A past, EVEN slot: slot and slot+1 share an epoch (2 slots per
+        // epoch), so the producer's VRF seed matches either candidate and
+        // only the schedule check separates the two cases. Consecutive
+        // same-epoch slots always elect different leaders (round-robin).
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let slot = ((now - 6 * 3600 * 1000) / BLOCK_INTERVAL_MS) & !1;
+        let leader = observer.select_producer(slot).unwrap();
+        let next_leader = observer.select_producer(slot + 1).unwrap();
+        assert_ne!(leader, next_leader);
+
+        let parent = Block::default(); // number 0, timestamp 0
+
+        // REJECTED: the NEXT slot's leader stamping late inside `slot`
+        // (offset within drift of the end). The old slot+1 branch accepted
+        // this; now the only candidates are {slot, slot-1}.
+        let late_in_slot = (slot + 1) * BLOCK_INTERVAL_MS - 100;
+        let early_block = engine_for(next_leader)
+            .produce_block(&parent, vec![], vec![], Hash::ZERO, 0, vec![], late_in_slot)
+            .unwrap();
+        assert!(
+            matches!(
+                observer.validate_block(&early_block, &parent),
+                Err(ConsensusError::InvalidProducer)
+            ),
+            "next slot's leader accepted for a previous-slot timestamp"
+        );
+
+        // ACCEPTED: `slot`'s own leader landing just past its slot end
+        // (offset < MAX_TIMESTAMP_DRIFT_MS into slot+1) — the retained
+        // slot-1 tolerance for a late producer at the boundary.
+        let just_past_boundary = (slot + 1) * BLOCK_INTERVAL_MS + 100;
+        let late_block = engine_for(leader)
+            .produce_block(
+                &parent,
+                vec![],
+                vec![],
+                Hash::ZERO,
+                0,
+                vec![],
+                just_past_boundary,
+            )
+            .unwrap();
+        observer
+            .validate_block(&late_block, &parent)
+            .expect("late producer within drift of the boundary must validate");
     }
 }

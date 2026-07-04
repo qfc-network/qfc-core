@@ -1,48 +1,119 @@
 //! Block producer - handles block production loop
+//!
+//! State-transition note (ADR-0012 / spec §1): the producer performs NO
+//! direct state mutation. The whole transition — undelegations, transactions,
+//! rewards — lives in `Chain::execute_at`, shared byte-identically with block
+//! import, and the produced block is committed through
+//! `Chain::store_produced_block`, which self-validates exactly like an
+//! importer. Voter splits and inference-fee settlement were REMOVED from the
+//! block path (they consumed node-local inputs and forked every import).
 
+use crate::sync::SyncManager;
 use parking_lot::RwLock;
 use qfc_ai_coordinator::{ProofPool, TaskPool};
 use qfc_chain::Chain;
 use qfc_consensus::ConsensusEngine;
 use qfc_crypto::blake3_hash;
-use qfc_executor::Executor;
 use qfc_mempool::Mempool;
 use qfc_network::NetworkService;
-use qfc_storage;
 use qfc_types::{
-    block_reward_for_year, DoubleSignEvidence, Heartbeat, InferenceProof, RewardDistribution,
-    Transaction, ValidatorMessage, BLOCK_TIME_MS, FEE_BURN_PERCENT, FEE_PRODUCER_PERCENT,
-    FEE_TREASURY_PERCENT, FEE_VOTERS_PERCENT, INFERENCE_FEE_MINER_PERCENT,
-    INFERENCE_FEE_VALIDATORS_PERCENT, MAX_INFERENCE_PROOFS_PER_BLOCK, PRODUCER_REWARD_PERCENT,
-    U256, VOTERS_REWARD_PERCENT,
+    Heartbeat, Transaction, ValidatorMessage, BLOCK_INTERVAL_MS, MAX_INFERENCE_PROOFS_PER_BLOCK,
 };
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::{interval, Instant};
+use tokio::time::Instant;
 use tracing::{debug, error, info, warn};
 
-/// Epoch duration in milliseconds (matches EPOCH_DURATION_SECS)
-const EPOCH_DURATION_MS: u64 = qfc_types::EPOCH_DURATION_SECS * 1000;
+/// Boot-relative grace period before the first block may be produced
+/// (spec §5). Gives libp2p time to form the mesh and the status poller time
+/// to learn peer heads, so a restarting node never races its own peers.
+pub(crate) const PRODUCE_BOOT_GRACE_MS: u64 = 10_000;
+
+/// When the gate has held us back as strictly-behind for more than this many
+/// consecutive slots, force a catch-up attempt even below the catch-up lag
+/// threshold (the lag 1–2 dead zone; spec §5).
+const FORCE_SYNC_AFTER_GATED_SLOTS: u32 = 2;
 
 /// Block producer configuration
 #[derive(Clone, Debug)]
 pub struct ProducerConfig {
-    /// Block interval in milliseconds
-    pub block_interval_ms: u64,
     /// Maximum transactions per block
     pub max_txs_per_block: usize,
     /// Whether to produce empty blocks
     pub produce_empty_blocks: bool,
+    /// Whether the gate may produce with zero connected peers
+    /// (QFC_PRODUCE_WHEN_ALONE / --produce-when-alone; ADR-0012 §Phase B).
+    pub produce_when_alone: bool,
 }
 
 impl Default for ProducerConfig {
     fn default() -> Self {
         Self {
-            block_interval_ms: 3000, // 3 seconds
             max_txs_per_block: 1000,
             produce_empty_blocks: true, // For dev mode, produce even if no txs
+            produce_when_alone: false,
         }
     }
+}
+
+/// Outcome of the sync-before-produce gate for one slot (spec §5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GateDecision {
+    /// Safe to run leader election / block production this slot.
+    Produce,
+    /// A fresh verified peer head is strictly above ours — sync first.
+    Behind { our: u64, peer: u64 },
+    /// Still inside the boot grace period.
+    BootGrace,
+    /// Zero connected peers and `produce_when_alone` is off.
+    Alone,
+    /// Peers are connected but none has delivered a fresh verified status
+    /// yet — data before liveness (the 2s status poll guarantees progress).
+    AwaitingPeerStatus,
+}
+
+/// The sync-before-produce gate (spec §5 pseudocode, verbatim semantics).
+///
+/// Decision order is load-bearing:
+/// 1. strictly behind a fresh verified peer head → gate (STRICT `>` so a
+///    simultaneous cold start — all heads 0 — passes);
+/// 2. boot grace (10s, boot-relative) → gate;
+/// 3. zero peers → produce only with the explicit `produce_when_alone`;
+/// 4. peers but no fresh verified status yet → gate;
+/// 5. otherwise produce.
+///
+/// `max_fresh_peer_head` must come from ACTIVE GetStatus polling of
+/// genesis-matching peers (never passive gossip/heartbeat heights — those
+/// are unauthenticated and absent exactly when everyone is gated). Pure;
+/// unit-tested with injected clock/peer views.
+pub fn gate_decision(
+    our_height: u64,
+    max_fresh_peer_head: Option<u64>,
+    connected_peers: usize,
+    ms_since_boot: u64,
+    produce_when_alone: bool,
+) -> GateDecision {
+    let max_head = max_fresh_peer_head.unwrap_or(0);
+    if max_head > our_height {
+        return GateDecision::Behind {
+            our: our_height,
+            peer: max_head,
+        };
+    }
+    if ms_since_boot < PRODUCE_BOOT_GRACE_MS {
+        return GateDecision::BootGrace;
+    }
+    if connected_peers == 0 {
+        return if produce_when_alone {
+            GateDecision::Produce
+        } else {
+            GateDecision::Alone
+        };
+    }
+    if max_fresh_peer_head.is_none() {
+        return GateDecision::AwaitingPeerStatus;
+    }
+    GateDecision::Produce
 }
 
 /// Block producer
@@ -51,12 +122,15 @@ pub struct BlockProducer {
     consensus: Arc<ConsensusEngine>,
     mempool: Arc<RwLock<Mempool>>,
     network: Option<Arc<NetworkService>>,
-    executor: Executor,
     config: ProducerConfig,
     /// v2.0: Pool of verified inference proofs awaiting block inclusion
     proof_pool: Arc<RwLock<ProofPool>>,
-    /// v2.0: Shared task pool for fee settlement
+    /// v2.0: Shared task pool (housekeeping only — no fee settlement in the
+    /// block path)
     task_pool: Arc<RwLock<TaskPool>>,
+    /// Gate input source (verified peer statuses) + forced catch-up target.
+    /// None only when networking is disabled (`--no-network`).
+    sync_manager: Option<Arc<SyncManager>>,
 }
 
 impl BlockProducer {
@@ -67,7 +141,6 @@ impl BlockProducer {
         mempool: Arc<RwLock<Mempool>>,
         network: Option<Arc<NetworkService>>,
         config: ProducerConfig,
-        chain_id: u64,
         proof_pool: Arc<RwLock<ProofPool>>,
         task_pool: Arc<RwLock<TaskPool>>,
     ) -> Self {
@@ -76,10 +149,28 @@ impl BlockProducer {
             consensus,
             mempool,
             network,
-            executor: Executor::new(chain_id),
             config,
             proof_pool,
             task_pool,
+            sync_manager: None,
+        }
+    }
+
+    /// Attach the sync manager (gate peer view + forced catch-up).
+    pub fn with_sync_manager(mut self, sync_manager: Arc<SyncManager>) -> Self {
+        self.sync_manager = Some(sync_manager);
+        self
+    }
+
+    /// Gate inputs for the current slot: connected peer count and the
+    /// highest fresh verified (genesis-matching) peer head.
+    fn gate_peer_view(&self) -> (usize, Option<u64>) {
+        match (&self.sync_manager, &self.network) {
+            (Some(sm), _) => sm.gate_peer_view(),
+            // Network without sync manager (not wired in practice): count
+            // peers but treat all statuses as unknown — fail gated, not open.
+            (None, Some(net)) => (net.peer_count(), None),
+            (None, None) => (0, None),
         }
     }
 
@@ -93,34 +184,31 @@ impl BlockProducer {
         let our_address = self.consensus.our_address().unwrap();
         info!("Starting block producer for validator {}", our_address);
 
-        // Initialize epoch with a deterministic seed based on genesis
-        let genesis_hash = self.chain.genesis_hash().unwrap_or_default();
-        let mut epoch_seed = [0u8; 32];
-        epoch_seed.copy_from_slice(genesis_hash.as_bytes());
-        self.consensus.start_epoch(1, epoch_seed);
+        // NOTE: no start_epoch here. The genesis seed is anchored once in
+        // Chain::new (before this task spawns); epochs advance from wall
+        // clock via maybe_advance_epoch. This removes the D11 capture race.
 
-        // Validators are already loaded from genesis in chain.rs
-        // No need to override here
-
-        let mut block_timer = interval(Duration::from_millis(self.config.block_interval_ms));
+        // Slot length is the chain constant — never a per-node setting
+        // (a per-node slot length is a silent consensus fork, spec §6).
+        let boot = Instant::now();
         let mut heartbeat_counter: u64 = 0;
         let heartbeat_interval = 3; // Send heartbeat every 3 slots
         let mut last_slot: u64 = u64::MAX;
+        let mut gated_behind_slots: u32 = 0;
 
         loop {
-            block_timer.tick().await;
+            // Slot-aligned tick (spec §5): sleep until the next wall-clock
+            // multiple of BLOCK_INTERVAL_MS instead of a boot-phase-locked
+            // interval, so the elected leader produces at the START of its
+            // slot and the block timestamp lands inside the elected epoch.
+            sleep_until_next_slot_boundary().await;
 
-            // Global wall-clock slot: now_ms / block_interval. Every node
+            // Global wall-clock slot: now_ms / BLOCK_INTERVAL_MS. Every node
             // computes the same slot at the same instant (clocks are
-            // NTP-synced), so exactly one validator is elected network-wide per
-            // slot. A local per-tick counter — the previous approach — drifted
-            // with each node's start time and let several nodes produce the
-            // same height, which is what forked the testnet.
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
-            let slot = now_ms / self.config.block_interval_ms;
+            // NTP-synced), so exactly one validator is elected network-wide
+            // per slot.
+            let now_ms = now_ms();
+            let slot = now_ms / BLOCK_INTERVAL_MS;
 
             // Process each slot at most once (guards against timer jitter
             // firing twice within one slot window).
@@ -130,13 +218,73 @@ impl BlockProducer {
             last_slot = slot;
             heartbeat_counter += 1;
 
-            // Advance epoch (also wall-clock anchored) so selection agrees.
-            self.consensus.maybe_advance_epoch(EPOCH_DURATION_MS);
+            // Advance the observability epoch (wall-clock anchored).
+            self.consensus.maybe_advance_epoch();
 
-            // Send periodic heartbeat
+            // Send periodic heartbeat — heartbeats keep flowing while gated
+            // (the gate below skips ONLY the produce step).
             if heartbeat_counter >= heartbeat_interval {
                 heartbeat_counter = 0;
                 self.send_heartbeat().await;
+            }
+
+            // Sync-before-produce gate (spec §5).
+            let (connected_peers, max_fresh_peer_head) = self.gate_peer_view();
+            let decision = gate_decision(
+                self.chain.block_number(),
+                max_fresh_peer_head,
+                connected_peers,
+                boot.elapsed().as_millis() as u64,
+                self.config.produce_when_alone,
+            );
+            match decision {
+                GateDecision::Produce => {
+                    gated_behind_slots = 0;
+                }
+                GateDecision::Behind { our, peer } => {
+                    gated_behind_slots += 1;
+                    info!(
+                        "Slot {}: gated — behind verified peer head ({} < {}), {} gated slot(s)",
+                        slot, our, peer, gated_behind_slots
+                    );
+                    // Dead-zone escape: CATCH_UP_LAG_THRESHOLD only triggers
+                    // the periodic catch-up at lag > 2, but the gate holds at
+                    // lag ≥ 1 — force a sync so a 1–2 block lag can't gate us
+                    // forever.
+                    if gated_behind_slots > FORCE_SYNC_AFTER_GATED_SLOTS {
+                        if let Some(sm) = &self.sync_manager {
+                            sm.spawn_forced_catch_up();
+                        }
+                        gated_behind_slots = 0;
+                    }
+                    continue;
+                }
+                GateDecision::BootGrace => {
+                    debug!("Slot {}: gated — inside boot grace period", slot);
+                    gated_behind_slots = 0;
+                    continue;
+                }
+                GateDecision::Alone => {
+                    info!(
+                        "Slot {}: gated — no connected peers (set QFC_PRODUCE_WHEN_ALONE=1 \
+                         to bootstrap a network from this node)",
+                        slot
+                    );
+                    gated_behind_slots = 0;
+                    continue;
+                }
+                GateDecision::AwaitingPeerStatus => {
+                    info!(
+                        "Slot {}: gated — {} peer(s) connected but no fresh verified status yet",
+                        slot, connected_peers
+                    );
+                    // Deliberately NOT resetting gated_behind_slots (review
+                    // fix 16): a peer whose status flaps between fresh and
+                    // stale produces Behind → AwaitingPeerStatus → Behind
+                    // cycles that would otherwise never reach the forced
+                    // catch-up threshold, starving the node forever.
+                    continue;
+                }
             }
 
             // Check if we should produce
@@ -174,10 +322,7 @@ impl BlockProducer {
             None => return,
         };
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
+        let now = now_ms();
 
         // Create heartbeat
         let mut heartbeat = Heartbeat::new(our_address, head.block.number(), head.hash, now);
@@ -219,83 +364,65 @@ impl BlockProducer {
             return Err(anyhow::anyhow!("No transactions"));
         }
 
-        // Drain inference proofs from pool (v2.0)
+        // Drain inference proofs from pool (v2.0). From here until the
+        // block is durably stored, any failure must REQUEUE the drained
+        // proofs (review fix 14) — e.g. a head that moved under a
+        // concurrent import would otherwise silently discard them.
         let inference_proofs = self
             .proof_pool
             .write()
             .drain(MAX_INFERENCE_PROOFS_PER_BLOCK);
 
-        // Execute transactions
-        let state = self.chain.state();
-
-        // Take snapshot before execution (for potential rollback)
-        let _snapshot = state.snapshot();
-
-        // Process mature undelegations before executing transactions
-        self.executor.process_mature_undelegations(&state);
-
-        let (receipts, gas_used) =
-            self.executor
-                .execute_transactions(&transactions, &state, &our_address);
-
-        // Settle inference fees for proofs matched to public tasks (v2.0)
-        self.settle_inference_fees(&inference_proofs, &our_address);
-
-        // Calculate fees from receipts (needed for reward distribution)
-        let total_fees = self.calculate_total_fees(&transactions, &receipts);
-
-        // Get voters for reward distribution (empty for newly produced block)
-        let voters = self.get_block_voters(&qfc_types::Hash::ZERO);
-
-        // Distribute ALL rewards BEFORE committing state so they are included
-        // in the block's state root. Previously rewards were distributed after
-        // commit, causing miner/voter/producer rewards to be lost.
+        // Fix the header timestamp BEFORE executing: undelegation maturity is
+        // timestamp-driven, so the execution and the header must agree.
+        let timestamp = now_ms();
         let block_number = parent_block.number() + 1;
-        match self.distribute_rewards(
+
+        // Deterministic shared state transition against the parent state
+        // root (same code path import runs — D7). No live-state mutation.
+        let outcome = match self.chain.execute_at(
+            parent_block.state_root(),
             block_number,
+            timestamp,
             &our_address,
-            total_fees,
-            &voters,
-            &inference_proofs,
+            &transactions,
         ) {
-            Ok(distribution) => {
-                debug!(
-                    "Pre-commit rewards for block #{}: producer={}, voters={}, burned={}",
-                    block_number,
-                    distribution.producer_reward,
-                    distribution.voter_reward,
-                    distribution.fee_burned
-                );
-            }
+            Ok(o) => o,
             Err(e) => {
-                warn!(
-                    "Failed to distribute rewards for block #{}: {}",
-                    block_number, e
-                );
+                self.requeue_proofs(&inference_proofs);
+                return Err(e.into());
             }
-        }
+        };
 
-        // Commit state to get new state root (now includes all rewards)
-        let state_root = state.commit()?;
-
-        // Produce the block
-        let block = self
-            .consensus
-            .produce_block(
-                &parent_block,
-                transactions.clone(),
-                receipts.clone(),
-                state_root,
-                gas_used,
-                inference_proofs,
-            )
-            .map_err(|e| anyhow::anyhow!("Consensus error: {}", e))?;
+        // Seal the block (VRF proved against the block-derived epoch seed).
+        let block = match self.consensus.produce_block(
+            &parent_block,
+            transactions.clone(),
+            outcome.receipts.clone(),
+            outcome.state_root,
+            outcome.gas_used,
+            inference_proofs.clone(),
+            timestamp,
+        ) {
+            Ok(b) => b,
+            Err(e) => {
+                self.requeue_proofs(&inference_proofs);
+                return Err(anyhow::anyhow!("Consensus error: {}", e));
+            }
+        };
 
         let block_hash = blake3_hash(&block.header_bytes());
         let block_number = block.number();
 
-        // Store the block
-        self.chain.store_produced_block(&block, &receipts)?;
+        // Store the block: self-validates + re-executes exactly like an
+        // importer, under the chain-wide import lock.
+        if let Err(e) = self.chain.store_produced_block(&block).await {
+            self.requeue_proofs(&inference_proofs);
+            return Err(e.into());
+        }
+
+        // Node-local task-pool housekeeping (no chain-state writes).
+        self.maintain_task_pool();
 
         // Broadcast to network
         if let Some(network) = &self.network {
@@ -306,16 +433,21 @@ impl BlockProducer {
                 debug!("Broadcasted block #{} to network", block_number);
             }
 
-            // Cast and broadcast our own vote for the block we produced
-            if let Ok(vote) = self.consensus.vote(&block, true) {
-                let vote_data = vote.to_bytes();
-                if let Err(e) = network.broadcast_vote(vote_data).await {
-                    warn!("Failed to broadcast vote: {}", e);
-                } else {
-                    debug!("Broadcasted accept vote for block #{}", block_number);
+            // Cast and broadcast our own vote for the block we produced.
+            // try_record_own_vote keeps the one-vote-per-height invariant
+            // (review fix 2a) so incoming votes for this block cannot make
+            // us vote a second time.
+            if self.consensus.try_record_own_vote(block_number, block_hash) {
+                if let Ok(vote) = self.consensus.vote(&block, true) {
+                    let vote_data = vote.to_bytes();
+                    if let Err(e) = network.broadcast_vote(vote_data).await {
+                        warn!("Failed to broadcast vote: {}", e);
+                    } else {
+                        debug!("Broadcasted accept vote for block #{}", block_number);
+                    }
+                    // Add our vote to pending votes
+                    self.consensus.add_vote(vote);
                 }
-                // Add our vote to pending votes
-                self.consensus.add_vote(vote);
             }
         }
 
@@ -327,88 +459,47 @@ impl BlockProducer {
 
         info!(
             "Block #{} produced: {} txs, {} gas used",
-            block_number, tx_count, gas_used
+            block_number, tx_count, outcome.gas_used
         );
 
         Ok(block_hash)
     }
 
-    /// Settle inference fees for proofs matched to public tasks (v2.0)
-    /// 70% miner, 10% validators, 20% burn
-    fn settle_inference_fees(&self, proofs: &[InferenceProof], _producer: &qfc_types::Address) {
-        let state = self.chain.state();
-        let voters = self.get_block_voters(&qfc_types::Hash::ZERO);
+    /// Return drained-but-unused inference proofs to the pool (review fix
+    /// 14): a failed seal/store must not silently discard verified proofs.
+    fn requeue_proofs(&self, proofs: &[qfc_types::InferenceProof]) {
+        if proofs.is_empty() {
+            return;
+        }
+        let mut pool = self.proof_pool.write();
+        for proof in proofs {
+            pool.add(proof.clone());
+        }
+        debug!(
+            "Requeued {} inference proof(s) after failed block production",
+            proofs.len()
+        );
+    }
+
+    /// Node-local task-pool housekeeping (v2.0).
+    ///
+    /// IMPORTANT: this must never touch chain state. Fee settlement and
+    /// expired-task refunds were removed from the block path (ADR-0012):
+    /// the TaskPool is node-local, so paying/refunding from it during block
+    /// production produced state roots no importer could reproduce.
+    /// Settlement moves on-chain later; until then completed/expired tasks
+    /// are only tracked and persisted for querying.
+    fn maintain_task_pool(&self) {
         let mut task_pool = self.task_pool.write();
 
-        for proof in proofs {
-            // Check if this proof completes a public task (match by input_hash)
-            if let Some(public_task) = task_pool.get_public_task_by_input_hash(&proof.input_hash) {
-                if matches!(
-                    public_task.status,
-                    qfc_ai_coordinator::task_pool::PublicTaskStatus::Pending
-                        | qfc_ai_coordinator::task_pool::PublicTaskStatus::Assigned
-                ) {
-                    let fee = U256::from_u128(public_task.max_fee);
-
-                    // 70% to miner (proof submitter)
-                    let miner_share =
-                        fee * U256::from_u64(INFERENCE_FEE_MINER_PERCENT) / U256::from_u64(100);
-                    if let Err(e) = state.add_balance(&proof.validator, miner_share) {
-                        warn!("Failed to pay miner inference fee: {}", e);
-                    }
-
-                    // 10% to validators
-                    let validator_share = fee * U256::from_u64(INFERENCE_FEE_VALIDATORS_PERCENT)
-                        / U256::from_u64(100);
-                    if let Err(e) = self.distribute_voter_rewards(&validator_share, &voters) {
-                        warn!("Failed to distribute inference validator fees: {}", e);
-                    }
-
-                    // 20% burned (not distributed)
-
-                    // Mark task completed
-                    task_pool.complete_public_task_by_input_hash(
-                        &proof.input_hash,
-                        qfc_ai_coordinator::task_pool::ResultStorage::Inline(
-                            proof.output_hash.as_bytes().to_vec(),
-                        ),
-                        proof.validator,
-                        proof.execution_time_ms,
-                    );
-
-                    info!(
-                        "Settled inference fee for task {}: {} to miner {}",
-                        hex::encode(&proof.input_hash.as_bytes()[..8]),
-                        miner_share,
-                        proof.validator
-                    );
-                }
-            }
-        }
-
-        // C2: Re-queue tasks assigned to miners that timed out
+        // Re-queue tasks assigned to miners that timed out
         let reassigned = task_pool.reassign_stale_tasks();
         if reassigned > 0 {
             info!("Reassigned {} stale inference tasks", reassigned);
         }
 
-        // Prune expired tasks and refund submitters
+        // Prune expired tasks (no on-chain refund — see above)
         let expired = task_pool.prune_expired_public(now_ms());
-        for task in &expired {
-            if task.submitter != qfc_types::Address::ZERO {
-                let refund = U256::from_u128(task.max_fee);
-                if let Err(e) = state.add_balance(&task.submitter, refund) {
-                    warn!("Failed to refund expired task: {}", e);
-                } else {
-                    info!(
-                        "Refunded {} for expired task {} to {}",
-                        refund,
-                        hex::encode(&task.task_id.as_bytes()[..8]),
-                        task.submitter
-                    );
-                }
-            }
-        }
 
         // Persist expired tasks to RocksDB for long-term querying
         let db = self.chain.db();
@@ -446,312 +537,6 @@ impl BlockProducer {
             Some(state.as_ref()),
         )
     }
-
-    /// Calculate the current year based on block height for reward halving
-    fn calculate_year(&self, block_height: u64) -> u64 {
-        // Estimate blocks per year based on block time
-        // BLOCK_TIME_MS = 3333ms => ~262,800 blocks per year (365 * 24 * 60 * 60 * 1000 / 3333)
-        let blocks_per_year = 365 * 24 * 60 * 60 * 1000 / BLOCK_TIME_MS;
-        block_height / blocks_per_year
-    }
-
-    /// Distribute block rewards and fees after block production
-    ///
-    /// Block rewards: 60% producer, 25% voters, 15% inference miners (dynamically adjusted)
-    /// If no inference proofs, the miner share goes back to producer+voters (70/30).
-    /// Transaction fees: 47% producer, 28% voters, 20% burned, 5% treasury
-    /// Dynamic adjustments: burn rate scales with congestion, rewards scale with stake ratio,
-    /// inference pool scales with miner participation.
-    pub fn distribute_rewards(
-        &self,
-        block_height: u64,
-        producer: &qfc_types::Address,
-        total_fees: U256,
-        voters: &[(qfc_types::Address, u64)], // (voter_address, contribution_score)
-        inference_proofs: &[InferenceProof],
-    ) -> anyhow::Result<RewardDistribution> {
-        let state = self.chain.state();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-
-        // Compute dynamic reward adjustments
-        let consensus = self.chain.consensus();
-        let network_state = consensus.get_network_state();
-        let validators = consensus.get_validators();
-        let total_staked: u128 = validators.iter().map(|v| v.total_stake().low_u128()).sum();
-        let circulating_supply = qfc_types::INITIAL_SUPPLY; // approximate
-        let active_miner_count = inference_proofs
-            .iter()
-            .map(|p| p.validator)
-            .collect::<std::collections::HashSet<_>>()
-            .len() as u64;
-        let total_validator_count = validators.len() as u64;
-
-        let adjustments = crate::dynamic_rewards::compute_adjustments(
-            network_state,
-            total_staked,
-            circulating_supply,
-            active_miner_count,
-            total_validator_count,
-        );
-
-        // Calculate block reward with halving + dynamic multiplier
-        let year = self.calculate_year(block_height);
-        let base_reward = block_reward_for_year(year);
-        let block_reward = U256::from_u128(
-            (base_reward.low_u128() as f64 * adjustments.reward_multiplier) as u128,
-        );
-
-        // Inference miner reward pool (dynamically adjusted %)
-        let miner_pool = block_reward * U256::from_u64(adjustments.inference_miner_percent)
-            / U256::from_u64(100);
-
-        // Distribute to inference miners proportional to FLOPS, or redistribute if none
-        let miner_reward = if !inference_proofs.is_empty() {
-            self.distribute_miner_rewards(&miner_pool, inference_proofs, block_height, now)?
-        } else {
-            U256::ZERO
-        };
-        let undistributed_miner = miner_pool - miner_reward;
-
-        // Producer block reward (60% + undistributed miner share * 70%)
-        let producer_block_reward =
-            block_reward * U256::from_u64(PRODUCER_REWARD_PERCENT) / U256::from_u64(100);
-        let producer_extra = undistributed_miner * U256::from_u64(70) / U256::from_u64(100);
-
-        // Producer fee share (50%)
-        let producer_fee_share =
-            total_fees * U256::from_u64(FEE_PRODUCER_PERCENT) / U256::from_u64(100);
-
-        // Total producer reward
-        let producer_reward = producer_block_reward + producer_extra + producer_fee_share;
-
-        // Add producer reward to balance
-        state.add_balance(producer, producer_reward)?;
-
-        // Voter block reward pool (25% + undistributed miner share * 30%)
-        let voters_block_reward =
-            block_reward * U256::from_u64(VOTERS_REWARD_PERCENT) / U256::from_u64(100);
-        let voters_extra = undistributed_miner * U256::from_u64(30) / U256::from_u64(100);
-
-        // Voter fee pool (30%)
-        let voters_fee_share =
-            total_fees * U256::from_u64(FEE_VOTERS_PERCENT) / U256::from_u64(100);
-
-        // Total voter reward pool
-        let voters_reward_pool = voters_block_reward + voters_extra + voters_fee_share;
-
-        // Distribute voter rewards proportionally by contribution score
-        let voter_reward = self.distribute_voter_rewards(&voters_reward_pool, voters)?;
-
-        // Fee burned (20% base, scaled by congestion multiplier)
-        let base_burn = total_fees * U256::from_u64(FEE_BURN_PERCENT) / U256::from_u64(100);
-        let fee_burned = U256::from_u128(
-            (base_burn.low_u128() as f64 * adjustments.burn_rate_multiplier) as u128,
-        );
-
-        // Treasury fee (5%)
-        let treasury_fee = total_fees * U256::from_u64(FEE_TREASURY_PERCENT) / U256::from_u64(100);
-        if !treasury_fee.is_zero() {
-            let treasury_addr = qfc_types::Address::new(qfc_types::TREASURY_ADDRESS_BYTES);
-            state.add_balance(&treasury_addr, treasury_fee)?;
-        }
-
-        debug!(
-            "Block #{} rewards: producer={}, voters={}, miners={}, treasury={}, burned={}",
-            block_height, producer_reward, voter_reward, miner_reward, treasury_fee, fee_burned
-        );
-
-        // Create reward distribution record
-        let distribution =
-            RewardDistribution::new(block_height, producer_reward, voter_reward, fee_burned, now);
-
-        // Store the distribution record
-        self.store_reward_distribution(&distribution)?;
-
-        Ok(distribution)
-    }
-
-    /// Distribute voter rewards proportionally by contribution score
-    fn distribute_voter_rewards(
-        &self,
-        total_reward: &U256,
-        voters: &[(qfc_types::Address, u64)], // (voter_address, contribution_score)
-    ) -> anyhow::Result<U256> {
-        if voters.is_empty() || total_reward.is_zero() {
-            return Ok(U256::ZERO);
-        }
-
-        let state = self.chain.state();
-
-        // Calculate total contribution score
-        let total_score: u64 = voters.iter().map(|(_, score)| score).sum();
-        if total_score == 0 {
-            return Ok(U256::ZERO);
-        }
-
-        let mut distributed = U256::ZERO;
-
-        // Distribute proportionally
-        for (voter_address, score) in voters {
-            if *score == 0 {
-                continue;
-            }
-
-            // reward = total_reward * score / total_score
-            let voter_reward = *total_reward * U256::from_u64(*score) / U256::from_u64(total_score);
-
-            if !voter_reward.is_zero() {
-                state.add_balance(voter_address, voter_reward)?;
-                distributed = distributed + voter_reward;
-
-                debug!(
-                    "Voter {} reward: {} (score: {}/{})",
-                    voter_address, voter_reward, score, total_score
-                );
-            }
-        }
-
-        Ok(distributed)
-    }
-
-    /// Distribute inference miner rewards proportionally by FLOPS contributed
-    fn distribute_miner_rewards(
-        &self,
-        total_reward: &U256,
-        proofs: &[InferenceProof],
-        block_height: u64,
-        timestamp: u64,
-    ) -> anyhow::Result<U256> {
-        if proofs.is_empty() || total_reward.is_zero() {
-            return Ok(U256::ZERO);
-        }
-
-        let state = self.chain.state();
-        let total_flops: u64 = proofs.iter().map(|p| p.flops_estimated).sum();
-        if total_flops == 0 {
-            return Ok(U256::ZERO);
-        }
-
-        let mut distributed = U256::ZERO;
-
-        // Aggregate FLOPS and task count per miner (a miner may have multiple proofs)
-        let mut miner_flops: std::collections::HashMap<qfc_types::Address, u64> =
-            std::collections::HashMap::new();
-        let mut miner_task_count: std::collections::HashMap<qfc_types::Address, u32> =
-            std::collections::HashMap::new();
-        for proof in proofs {
-            *miner_flops.entry(proof.validator).or_default() += proof.flops_estimated;
-            *miner_task_count.entry(proof.validator).or_default() += 1;
-        }
-
-        let db = self.chain.db();
-
-        for (miner, flops) in &miner_flops {
-            let reward = *total_reward * U256::from_u64(*flops) / U256::from_u64(total_flops);
-            if !reward.is_zero() {
-                state.add_balance(miner, reward)?;
-                distributed = distributed + reward;
-
-                // Store per-miner earning record
-                let task_count = miner_task_count.get(miner).copied().unwrap_or(1);
-                let earning = qfc_types::MinerEarning::new(
-                    *miner,
-                    block_height,
-                    reward,
-                    *flops,
-                    task_count,
-                    timestamp,
-                );
-                let key = qfc_types::encode_miner_earning_key(miner, block_height);
-                if let Err(e) = db.put(qfc_storage::cf::MINER_EARNINGS, &key, &earning.to_bytes()) {
-                    tracing::warn!("Failed to store miner earning record: {}", e);
-                }
-
-                debug!(
-                    "Miner {} inference reward: {} ({} FLOPS / {} total, {} tasks)",
-                    miner, reward, flops, total_flops, task_count
-                );
-            }
-        }
-
-        Ok(distributed)
-    }
-
-    /// Store reward distribution record to database
-    fn store_reward_distribution(&self, distribution: &RewardDistribution) -> anyhow::Result<()> {
-        let db = self.chain.db();
-        let key = distribution.block_height.to_be_bytes();
-        db.put(qfc_storage::cf::REWARDS, &key, &distribution.to_bytes())?;
-        Ok(())
-    }
-
-    /// Broadcast double-sign evidence to the network
-    #[allow(dead_code)]
-    pub async fn broadcast_double_sign_evidence(&self, evidence: &DoubleSignEvidence) {
-        let Some(network) = &self.network else {
-            return;
-        };
-
-        let our_address = match self.consensus.our_address() {
-            Some(addr) => addr,
-            None => return,
-        };
-
-        // Convert to slashing evidence for network broadcast
-        let mut slashing = evidence.to_slashing_evidence(our_address);
-
-        // Sign the evidence
-        let evidence_hash = blake3_hash(&slashing.to_bytes_without_signature());
-        match self.consensus.sign_hash(&evidence_hash) {
-            Ok(sig) => slashing.set_signature(sig),
-            Err(_) => return,
-        }
-
-        // Broadcast
-        let msg = ValidatorMessage::SlashingEvidence(slashing);
-        if let Err(e) = network.broadcast_validator_msg(msg.to_bytes()).await {
-            warn!("Failed to broadcast double-sign evidence: {}", e);
-        } else {
-            info!(
-                "Broadcasted double-sign evidence for validator {} at height {}",
-                evidence.validator, evidence.height
-            );
-        }
-    }
-
-    /// Get voters who accepted a block with their contribution scores
-    fn get_block_voters(&self, _block_hash: &qfc_types::Hash) -> Vec<(qfc_types::Address, u64)> {
-        let validators = self.consensus.get_validators();
-
-        // Get pending votes for this block (accept votes only)
-        // Note: In a full implementation, we'd have access to the votes from consensus
-        // For now, we return all active validators as potential voters
-        validators
-            .iter()
-            .filter(|v| v.is_active())
-            .map(|v| (v.address, v.contribution_score))
-            .collect()
-    }
-
-    /// Calculate total fees from executed transactions
-    fn calculate_total_fees(
-        &self,
-        transactions: &[Transaction],
-        receipts: &[qfc_types::Receipt],
-    ) -> U256 {
-        let mut total = U256::ZERO;
-
-        for (tx, receipt) in transactions.iter().zip(receipts.iter()) {
-            // Fee = gas_used * gas_price
-            let fee = U256::from_u64(receipt.gas_used) * tx.gas_price;
-            total = total + fee;
-        }
-
-        total
-    }
 }
 
 fn now_ms() -> u64 {
@@ -759,4 +544,110 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64
+}
+
+/// Sleep until the next wall-clock multiple of [`BLOCK_INTERVAL_MS`].
+///
+/// Recomputed from the wall clock every call (self-correcting): however long
+/// the previous produce/heartbeat step took, the next wake lands on a slot
+/// boundary, not on `boot_phase + n * interval` like `tokio::time::interval`
+/// did — that phase lock made late-in-slot booters produce with timestamps
+/// that could cross into the next slot/epoch.
+async fn sleep_until_next_slot_boundary() {
+    let now = now_ms();
+    let next_boundary = (now / BLOCK_INTERVAL_MS + 1) * BLOCK_INTERVAL_MS;
+    tokio::time::sleep(Duration::from_millis(next_boundary.saturating_sub(now))).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{gate_decision, GateDecision, PRODUCE_BOOT_GRACE_MS};
+
+    const AFTER_GRACE: u64 = PRODUCE_BOOT_GRACE_MS; // exactly the boundary is "past grace"
+    const IN_GRACE: u64 = PRODUCE_BOOT_GRACE_MS - 1;
+
+    /// Spec required-test 8a: simultaneous cold start — every node is at
+    /// height 0 and every fresh verified peer status reports head 0. The
+    /// STRICT `>` comparison must let production start once the grace period
+    /// has elapsed (a `>=` here would deadlock the whole network forever).
+    #[test]
+    fn cold_start_all_heads_zero_produces_after_grace() {
+        // Before grace: gated regardless of statuses.
+        assert_eq!(
+            gate_decision(0, Some(0), 2, IN_GRACE, false),
+            GateDecision::BootGrace
+        );
+        // After grace: peers verified at the same height → produce.
+        assert_eq!(
+            gate_decision(0, Some(0), 2, AFTER_GRACE, false),
+            GateDecision::Produce
+        );
+        // Also when we are level with a non-zero network.
+        assert_eq!(
+            gate_decision(7, Some(7), 3, AFTER_GRACE, false),
+            GateDecision::Produce
+        );
+        // And when we are AHEAD of every verified peer.
+        assert_eq!(
+            gate_decision(9, Some(7), 3, AFTER_GRACE, false),
+            GateDecision::Produce
+        );
+    }
+
+    /// Spec required-test 8b: a node strictly behind a fresh verified peer
+    /// head stays gated — even after grace, even by a single block (the
+    /// lag-1 dead zone is escaped by the forced catch-up, not by producing).
+    #[test]
+    fn strictly_behind_node_stays_gated() {
+        assert_eq!(
+            gate_decision(3, Some(5), 2, AFTER_GRACE, false),
+            GateDecision::Behind { our: 3, peer: 5 }
+        );
+        // One block behind is still behind.
+        assert_eq!(
+            gate_decision(4, Some(5), 2, AFTER_GRACE, true),
+            GateDecision::Behind { our: 4, peer: 5 }
+        );
+        // Behind wins over the grace period (checked first).
+        assert_eq!(
+            gate_decision(0, Some(10), 1, IN_GRACE, true),
+            GateDecision::Behind { our: 0, peer: 10 }
+        );
+    }
+
+    /// Spec required-test 8c: a zero-peer node produces only with the
+    /// explicit produce_when_alone opt-in — and even then only after grace.
+    #[test]
+    fn zero_peer_node_produces_only_when_alone_flag_set() {
+        assert_eq!(
+            gate_decision(0, None, 0, AFTER_GRACE, false),
+            GateDecision::Alone
+        );
+        assert_eq!(
+            gate_decision(0, None, 0, AFTER_GRACE, true),
+            GateDecision::Produce
+        );
+        // Grace applies to the alone branch too (spec order: grace first).
+        assert_eq!(
+            gate_decision(0, None, 0, IN_GRACE, true),
+            GateDecision::BootGrace
+        );
+    }
+
+    /// "Peers but no status yet → wait": data before liveness. Connected
+    /// peers whose statuses are missing or stale must gate production; the
+    /// 2s status poll loop guarantees this state resolves.
+    #[test]
+    fn peers_without_fresh_status_gate_production() {
+        assert_eq!(
+            gate_decision(5, None, 2, AFTER_GRACE, false),
+            GateDecision::AwaitingPeerStatus
+        );
+        // produce_when_alone does NOT bypass this branch — it is strictly
+        // for the zero-peer case.
+        assert_eq!(
+            gate_decision(5, None, 2, AFTER_GRACE, true),
+            GateDecision::AwaitingPeerStatus
+        );
+    }
 }

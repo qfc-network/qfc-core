@@ -35,16 +35,18 @@ OPTIONS:
   --no-build             Fail instead of building when the binary is missing.
   --snapshot-interval S  --snapshot-interval-secs for the drill node (default 15).
   --min-snapshots N      Archives required before pulling the plug (default 2).
-  --min-blocks N         Chain height required before pulling the plug (default 12).
+  --min-blocks N         Chain height required before pulling the plug (default 6).
   --rpc-port P           Drill node RPC port (default 18545).
   --metrics-port P       Drill node metrics port (default 16060).
   --keep                 Keep the workdir (logs, archives) after the drill.
   -h, --help             This help.
 
-The drill needs ~1-2 minutes and exclusive use of the two ports.
+The dev node leads 1 in 4 slots at 5s per slot, so it produces roughly one
+block every 20s. The drill needs ~3-6 minutes and exclusive use of the two
+ports.
 
 EXAMPLE:
-  scripts/gameday.sh --snapshot-interval 15 --min-blocks 12
+  scripts/gameday.sh --snapshot-interval 15 --min-blocks 6
 EOF
 }
 
@@ -55,7 +57,7 @@ NODE_BIN="$REPO_ROOT/target/release/qfc-node"
 NO_BUILD=0
 SNAP_INTERVAL=15
 MIN_SNAPSHOTS=2
-MIN_BLOCKS=12
+MIN_BLOCKS=6   # ~20s/block: dev node leads 1 in 4 slots at 5s per slot
 RPC_PORT=18545
 METRICS_PORT=16060
 KEEP=0
@@ -213,10 +215,13 @@ log "PATH A — snapshot restore drill"
 log "Starting dev node (snapshots every ${SNAP_INTERVAL}s into $BACKUPS)..."
 start_node "$WORKDIR/node-initial.log"
 
-wait_advancing 60 >/dev/null || fail "node never started producing blocks (see $WORKDIR/node-initial.log)"
+# Two blocks at ~20s each (plus the 10s boot grace) must fit in the window.
+wait_advancing 120 >/dev/null || fail "node never started producing blocks (see $WORKDIR/node-initial.log)"
 log "Node up and producing blocks (pid $NODE_PID)"
 
-deadline=$(( $(date +%s) + MIN_SNAPSHOTS * SNAP_INTERVAL + 120 ))
+# Budget ~25s per required block (dev leads 1 in 4 slots of 5s) on top of
+# the snapshot cadence.
+deadline=$(( $(date +%s) + MIN_SNAPSHOTS * SNAP_INTERVAL + MIN_BLOCKS * 25 + 120 ))
 while :; do
   count="$(archive_count)"
   bn="$(rpc_bn)"
@@ -250,7 +255,7 @@ log "Restoring via scripts/restore.sh from $BACKUPS ..."
   --datadir "$DATADIR" \
   --rpc-url "$RPC_URL" \
   --start-cmd "$WORKDIR/start-node.sh" \
-  --validate-timeout 120 \
+  --validate-timeout 180 \
   "$BACKUPS" \
   || fail "restore.sh failed — drill aborted (workdir: $WORKDIR; rerun with --keep to inspect)"
 T_RECOVERED_MS="$(now_ms)"
@@ -278,7 +283,7 @@ NODE_PID=""
 
 T_RESTART_MS="$(now_ms)"
 start_node "$WORKDIR/node-fastrestart.log"
-H_AFTER_RESTART="$(wait_advancing 120)" || fail "node did not serve advancing blocks after clean restart (see $WORKDIR/node-fastrestart.log)"
+H_AFTER_RESTART="$(wait_advancing 180)" || fail "node did not serve advancing blocks after clean restart (see $WORKDIR/node-fastrestart.log)"
 T_SERVING_MS="$(now_ms)"
 RTO_B_MS=$(( T_SERVING_MS - T_RESTART_MS ))
 
@@ -296,7 +301,7 @@ fmt_s() { printf '%d.%01ds' $(($1 / 1000)) $((($1 % 1000) / 100)); }
 cat <<EOF
 
 ================================ GAME DAY SUMMARY ================================
-  Drill node : --dev --no-network, ${SNAP_INTERVAL}s snapshot interval, 3s blocks
+  Drill node : --dev --no-network, ${SNAP_INTERVAL}s snapshot interval, ~20s blocks (1-in-4 slots x 5s)
   H_snap=$H_SNAP  H_kill=$H_KILL  (archive: $(basename "$ARCHIVE"))
 
   Recovery path                       RPO (blocks)   RTO (wall)   Notes

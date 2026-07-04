@@ -31,7 +31,15 @@ pub enum NetworkCommand {
         request: SyncRequest,
         response_tx: oneshot::Sender<Result<SyncResponse>>,
     },
+    /// Re-dial the configured bootnodes and re-trigger the Kademlia
+    /// bootstrap (issued by the redial loop while we have zero peers).
+    RedialBootnodes,
 }
+
+/// Base delay between bootnode redial attempts while we have zero peers.
+const BOOTNODE_REDIAL_BASE: Duration = Duration::from_secs(5);
+/// Cap for the exponential redial backoff.
+const BOOTNODE_REDIAL_MAX: Duration = Duration::from_secs(60);
 
 /// Sync event for the node to handle
 #[derive(Debug)]
@@ -213,6 +221,40 @@ impl NetworkService {
         let peers_clone = Arc::clone(&peers);
         let pending_clone = Arc::clone(&pending_requests);
         let swarm_response_tx_clone = swarm_response_tx.clone();
+        let bootnodes_for_swarm = config.bootnodes.clone();
+
+        // Bootnode redial loop: the initial dial above happens exactly once,
+        // so a node that boots before its bootnode (or hits a transient DNS/
+        // TCP failure) would otherwise stay isolated forever. While we have
+        // zero connected peers, re-dial every bootnode with exponential
+        // backoff (5s → 60s cap) and re-trigger the Kademlia bootstrap. The
+        // backoff resets to the base whenever at least one peer is held.
+        if !config.bootnodes.is_empty() {
+            let peers_for_redial = Arc::clone(&peers);
+            let command_tx_for_redial = command_tx.clone();
+            tokio::spawn(async move {
+                let mut backoff = BOOTNODE_REDIAL_BASE;
+                loop {
+                    tokio::time::sleep(backoff).await;
+                    if !peers_for_redial.read().is_empty() {
+                        backoff = BOOTNODE_REDIAL_BASE;
+                        continue;
+                    }
+                    info!(
+                        "No peers connected; re-dialing bootnodes (next retry in {:?})",
+                        backoff
+                    );
+                    if command_tx_for_redial
+                        .send(NetworkCommand::RedialBootnodes)
+                        .await
+                        .is_err()
+                    {
+                        return; // service dropped
+                    }
+                    backoff = (backoff * 2).min(BOOTNODE_REDIAL_MAX);
+                }
+            });
+        }
 
         // Spawn the swarm event loop
         tokio::spawn(async move {
@@ -326,6 +368,21 @@ impl NetworkService {
                             NetworkCommand::SyncRequest { peer_id, request, response_tx } => {
                                 let request_id = swarm.behaviour_mut().sync.send_request(&peer_id, request);
                                 pending_clone.write().insert(request_id, response_tx);
+                            }
+                            NetworkCommand::RedialBootnodes => {
+                                for bootnode in &bootnodes_for_swarm {
+                                    if let Some(libp2p::multiaddr::Protocol::P2p(peer_id)) = bootnode.iter().last() {
+                                        let mut addr = bootnode.clone();
+                                        addr.pop(); // strip /p2p/<peer_id>
+                                        swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
+                                    }
+                                    if let Err(e) = swarm.dial(bootnode.clone()) {
+                                        debug!("Bootnode redial {} failed: {}", bootnode, e);
+                                    }
+                                }
+                                if let Err(e) = swarm.behaviour_mut().kademlia.bootstrap() {
+                                    debug!("Kademlia re-bootstrap failed: {:?}", e);
+                                }
                             }
                         }
                     }

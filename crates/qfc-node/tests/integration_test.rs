@@ -148,8 +148,9 @@ fn test_single_node_block_production() {
     let _node = TestNode::new(19545, "/tmp/qfc_integ_blocks");
     assert!(wait_for_rpc(19545, 10), "Node RPC did not become ready");
 
-    // Dev mode has 4 genesis validators but only 1 is active, so it may take
-    // several slots (3s each) before it's our turn. Wait up to 45s.
+    // Dev mode has 4 genesis validators but only 1 runs locally, and leader
+    // election is round-robin over all 4, so the local validator leads about
+    // one slot in four (slots are BLOCK_INTERVAL_MS = 5s). Wait up to 45s.
     assert!(
         wait_for_block(19545, 45),
         "No block produced within 45 seconds"

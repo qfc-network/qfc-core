@@ -9,10 +9,12 @@ use qfc_network::{NetworkMessage, NetworkService, SyncEvent, SyncRequest, SyncRe
 use qfc_rpc::SyncStatusProvider;
 use qfc_types::{
     Block, Hash, Heartbeat, InferenceProof, SlashingEvidence, ValidatorMessage, Vote, VoteDecision,
-    WorkProof,
+    WorkProof, BLOCK_INTERVAL_MS,
 };
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use tracing::{debug, error, info, warn};
 
 /// Maximum number of blocks to request at once
@@ -30,6 +32,36 @@ const CATCH_UP_INTERVAL_SECS: u64 = 5;
 /// Begin a forward catch-up once we are more than this many blocks behind the
 /// highest block height seen from peers.
 const CATCH_UP_LAG_THRESHOLD: u64 = 2;
+
+/// How often the active peer-status poll loop ticks. Each connected peer
+/// without a recent status is polled every tick, so a freshly connected peer
+/// has a verified status within ~2s (spec §5: poll at connect + every ~2s
+/// until fresh).
+const STATUS_POLL_INTERVAL_MS: u64 = 2_000;
+
+/// Re-poll a peer whose status is older than this (one slot), keeping the
+/// gate's view continuously fresh.
+const STATUS_REFRESH_MS: u64 = BLOCK_INTERVAL_MS;
+
+/// A peer status older than this (~3 slots) is stale: the produce gate and
+/// `is_syncing` ignore it entirely. Combined with the 2s poll cadence a
+/// status only ever goes stale when the peer stops answering GetStatus.
+pub(crate) const STATUS_STALE_MS: u64 = 3 * BLOCK_INTERVAL_MS;
+
+/// A peer's last actively-polled `GetStatus` result (spec §5). This map —
+/// NOT passive gossip/heartbeat heights — is the produce gate's input:
+/// request/response works on silent peers, and gossip heights are both
+/// unauthenticated and absent exactly when every validator is gated.
+#[derive(Clone, Debug)]
+struct PeerStatusEntry {
+    /// The peer's reported canonical head height.
+    head: u64,
+    /// The peer's genesis hash (entries with a foreign genesis are kept for
+    /// diagnostics but never feed the gate or peer selection).
+    genesis_hash: Hash,
+    /// When the status response was received.
+    last_seen: Instant,
+}
 
 /// Sync state information
 #[derive(Clone, Debug, Default)]
@@ -56,6 +88,17 @@ pub struct SyncManager {
     requested_hashes: Arc<RwLock<HashSet<Hash>>>,
     /// Highest known block from peers
     highest_peer_block: Arc<RwLock<u64>>,
+    /// Per-peer verified statuses from ACTIVE GetStatus polling (gate input).
+    peer_statuses: Arc<RwLock<HashMap<PeerId, PeerStatusEntry>>>,
+    /// Peers with a GetStatus request currently in flight (prevents the 2s
+    /// poll loop from stacking requests behind a slow/dead peer's timeout).
+    status_inflight: Arc<RwLock<HashSet<PeerId>>>,
+    /// True while `sync_with_peer` is running (forward catch-up). Part of
+    /// `is_syncing()` — forward catch-up was previously invisible to it.
+    catching_up: Arc<AtomicBool>,
+    /// Rotation cursor for catch-up peer selection: 0 = the peer with the
+    /// highest verified head; bumped on a failed sync to try the next-best.
+    sync_peer_cursor: Arc<AtomicUsize>,
     /// Inference engine for spot-check re-execution (v2.0)
     inference_engine: Option<Arc<tokio::sync::RwLock<Box<dyn qfc_inference::InferenceEngine>>>>,
     /// Approved model registry for proof validation (v2.0)
@@ -84,6 +127,10 @@ impl SyncManager {
             pending_blocks: Arc::new(RwLock::new(VecDeque::new())),
             requested_hashes: Arc::new(RwLock::new(HashSet::new())),
             highest_peer_block: Arc::new(RwLock::new(0)),
+            peer_statuses: Arc::new(RwLock::new(HashMap::new())),
+            status_inflight: Arc::new(RwLock::new(HashSet::new())),
+            catching_up: Arc::new(AtomicBool::new(false)),
+            sync_peer_cursor: Arc::new(AtomicUsize::new(0)),
             inference_engine: None,
             model_registry: Arc::new(qfc_inference::model::ModelRegistry::default_v2()),
             proof_pool: None,
@@ -128,20 +175,31 @@ impl SyncManager {
         self
     }
 
-    /// Get the current sync state
+    /// Get the current sync state.
+    ///
+    /// `is_syncing` (spec §5) = active forward catch-up (`catching_up`) OR
+    /// pending/backward-walk activity OR a verified (status-confirmed,
+    /// genesis-matching, fresh) peer head more than the lag threshold ahead
+    /// of us. The old definition required pending-queue activity, so the
+    /// forward range catch-up — the main sync path — reported "not syncing".
     pub fn sync_state(&self) -> SyncState {
         let highest_peer = *self.highest_peer_block.read();
         let our_height = self.chain.block_number();
         let pending_count = self.pending_blocks.read().len();
 
-        // We're syncing if we're more than 2 blocks behind the highest known peer
-        // and we have pending blocks or requested hashes
-        let is_syncing = highest_peer > 0
-            && our_height + 2 < highest_peer
-            && (pending_count > 0 || !self.requested_hashes.read().is_empty());
+        let verified_highest = self
+            .fresh_verified_peer_heads()
+            .into_iter()
+            .map(|(_, head)| head)
+            .max();
+
+        let is_syncing = self.catching_up.load(Ordering::Relaxed)
+            || pending_count > 0
+            || !self.requested_hashes.read().is_empty()
+            || verified_highest.is_some_and(|h| h > our_height + CATCH_UP_LAG_THRESHOLD);
 
         SyncState {
-            highest_peer_block: highest_peer,
+            highest_peer_block: highest_peer.max(verified_highest.unwrap_or(0)),
             is_syncing,
             pending_count,
         }
@@ -167,6 +225,172 @@ impl SyncManager {
         highest_peer > our_height + CATCH_UP_LAG_THRESHOLD
     }
 
+    /// Record an actively-polled peer status. Genesis-matching heads also
+    /// feed `highest_peer_block` (they are the *authenticated* height signal).
+    fn record_peer_status(&self, peer: PeerId, head: u64, genesis_hash: Hash) {
+        let ours = self.chain.genesis_hash().unwrap_or_default();
+        self.peer_statuses.write().insert(
+            peer,
+            PeerStatusEntry {
+                head,
+                genesis_hash,
+                last_seen: Instant::now(),
+            },
+        );
+        if genesis_hash == ours {
+            self.update_peer_height(head);
+        } else {
+            warn!(
+                "Peer {} reports a different genesis hash — excluded from gate/sync",
+                peer
+            );
+        }
+    }
+
+    /// Connected peers with a fresh, genesis-matching status: `(peer, head)`.
+    fn fresh_verified_peer_heads(&self) -> Vec<(PeerId, u64)> {
+        let connected: HashSet<PeerId> = self.network.peers().into_iter().collect();
+        let ours = self.chain.genesis_hash().unwrap_or_default();
+        self.peer_statuses
+            .read()
+            .iter()
+            .filter(|(peer, entry)| {
+                connected.contains(peer)
+                    && entry.genesis_hash == ours
+                    && (entry.last_seen.elapsed().as_millis() as u64) <= STATUS_STALE_MS
+            })
+            .map(|(peer, entry)| (*peer, entry.head))
+            .collect()
+    }
+
+    /// The produce gate's view of the network (spec §5):
+    /// `(connected_peer_count, max fresh genesis-matching verified head)`.
+    /// `None` means "peers may exist but none has a fresh verified status".
+    pub fn gate_peer_view(&self) -> (usize, Option<u64>) {
+        let connected = self.network.peer_count();
+        let max_head = self
+            .fresh_verified_peer_heads()
+            .into_iter()
+            .map(|(_, head)| head)
+            .max();
+        (connected, max_head)
+    }
+
+    /// Active peer-status poll loop (spec §5). Every ~2s:
+    /// - drop statuses of disconnected peers (expire on disconnect);
+    /// - poll every connected peer that has no status yet (new connection)
+    ///   or whose status is older than one slot.
+    ///
+    /// Each GetStatus is spawned so one dead peer's 30s request timeout can
+    /// never stall polling of the others; `status_inflight` prevents
+    /// stacking duplicate requests on the same peer. Spawn once at startup.
+    pub async fn run_status_poll_loop(self: Arc<Self>) {
+        let mut ticker =
+            tokio::time::interval(std::time::Duration::from_millis(STATUS_POLL_INTERVAL_MS));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+
+            let connected: HashSet<PeerId> = self.network.peers().into_iter().collect();
+
+            // Expire entries for peers that disconnected.
+            self.peer_statuses
+                .write()
+                .retain(|peer, _| connected.contains(peer));
+
+            for peer in connected {
+                let needs_poll = match self.peer_statuses.read().get(&peer) {
+                    None => true,
+                    Some(entry) => {
+                        (entry.last_seen.elapsed().as_millis() as u64) >= STATUS_REFRESH_MS
+                    }
+                };
+                if !needs_poll || !self.status_inflight.write().insert(peer) {
+                    continue;
+                }
+                let sm = self.clone();
+                tokio::spawn(async move {
+                    sm.poll_peer_status(peer).await;
+                    sm.status_inflight.write().remove(&peer);
+                });
+            }
+        }
+    }
+
+    /// Send one GetStatus to `peer` and record the result.
+    async fn poll_peer_status(&self, peer: PeerId) {
+        match self.network.request_status(peer).await {
+            Ok(SyncResponse::Status {
+                block_number,
+                block_hash: _,
+                genesis_hash,
+            }) => {
+                debug!("Status from {}: head #{}", peer, block_number);
+                self.record_peer_status(peer, block_number, genesis_hash);
+            }
+            Ok(other) => {
+                debug!("Unexpected status response from {}: {:?}", peer, other);
+            }
+            Err(e) => {
+                debug!("Status poll of {} failed: {}", peer, e);
+            }
+        }
+    }
+
+    /// Pick the sync peer: the `cursor`-th candidate of the list ordered by
+    /// verified head (desc), tie-broken by peer id for determinism. Pure;
+    /// split out for testing. `cursor` rotates on failed syncs so a stuck
+    /// best-head peer cannot monopolize catch-up.
+    fn pick_sync_peer(mut candidates: Vec<(PeerId, u64)>, cursor: usize) -> Option<PeerId> {
+        if candidates.is_empty() {
+            return None;
+        }
+        candidates.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        Some(candidates[cursor % candidates.len()].0)
+    }
+
+    /// The peer to catch up from: highest verified (status-confirmed,
+    /// genesis-matching) head, rotated on failure. Never `peers().first()` —
+    /// that picked an arbitrary peer, including genesis-foreign ones.
+    fn best_sync_peer(&self) -> Option<PeerId> {
+        Self::pick_sync_peer(
+            self.fresh_verified_peer_heads(),
+            self.sync_peer_cursor.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Run one sync attempt against the best verified peer, advancing the
+    /// rotation cursor on failure. Returns false when no verified peer is
+    /// available or the sync failed.
+    pub async fn catch_up_with_best_peer(&self) -> bool {
+        let Some(peer) = self.best_sync_peer() else {
+            debug!("Catch-up requested but no verified peer available yet");
+            return false;
+        };
+        let ok = self.sync_with_peer(peer).await;
+        if ok {
+            self.sync_peer_cursor.store(0, Ordering::Relaxed);
+        } else {
+            self.sync_peer_cursor.fetch_add(1, Ordering::Relaxed);
+        }
+        ok
+    }
+
+    /// Forced catch-up for the produce gate (spec §5): when a validator has
+    /// been gated strictly-behind for more than 2 slots, it must sync even
+    /// inside the lag 1–2 "dead zone" below `CATCH_UP_LAG_THRESHOLD`, or a
+    /// 1-block lag would gate it forever. No-op while a sync is running.
+    pub fn spawn_forced_catch_up(self: &Arc<Self>) {
+        if self.catching_up.load(Ordering::Relaxed) {
+            return;
+        }
+        let sm = self.clone();
+        tokio::spawn(async move {
+            info!("Producer gated while behind — forcing a catch-up attempt");
+            sm.catch_up_with_best_peer().await;
+        });
+    }
+
     /// Periodic forward catch-up loop.
     ///
     /// When we fall behind the highest known peer, download the missing blocks
@@ -187,25 +411,30 @@ impl SyncManager {
             ticker.tick().await;
 
             let our_height = self.chain.block_number();
-            let highest_peer = *self.highest_peer_block.read();
+            // Trigger ONLY on fresh verified (status-confirmed,
+            // genesis-matching) peer heads — never `highest_peer_block`,
+            // which gossip/heartbeats feed and which a single bogus claim
+            // could ratchet to keep this loop spinning forever (review fix
+            // 15). `highest_peer_block` remains observability-only.
+            let highest_peer = self
+                .fresh_verified_peer_heads()
+                .into_iter()
+                .map(|(_, head)| head)
+                .max()
+                .unwrap_or(0);
             if !Self::should_catch_up(our_height, highest_peer) {
                 continue;
             }
 
-            let Some(peer) = self.network.peers().first().copied() else {
-                continue;
-            };
-
             info!(
-                "Catch-up: {} blocks behind (us {}, peer head {}), syncing forward from {}",
+                "Catch-up: {} blocks behind (us {}, best peer head {})",
                 highest_peer.saturating_sub(our_height),
                 our_height,
                 highest_peer,
-                peer
             );
-            // sync_with_peer verifies the peer's genesis, then range-syncs
-            // forward in order via sync_blocks_from_peer.
-            self.sync_with_peer(peer).await;
+            // sync_with_peer re-verifies the peer's status/genesis, then
+            // range-syncs forward in order via sync_blocks_from_peer.
+            self.catch_up_with_best_peer().await;
         }
     }
 
@@ -360,20 +589,34 @@ impl SyncManager {
             hex::encode(&block_hash.as_bytes()[..8])
         );
 
-        // Update highest known peer block
-        self.update_peer_height(block_number);
-
         // Try to import the block
-        match self.chain.import_block(block.clone()) {
+        match self.chain.import_block(block.clone()).await {
             Ok(_) => {
                 info!("Imported block #{} from network", block_number);
+                // Only a VALIDATED height may ratchet highest_peer_block
+                // (review fix 15): pre-validation gossip heights let a bogus
+                // claim drive the catch-up loop forever.
+                self.update_peer_height(block_number);
                 // Process any pending blocks that might now be importable
                 self.process_pending_blocks().await;
 
-                // If we're a validator, cast our vote for this block
-                if self.chain.consensus().is_validator() {
+                // If we're a validator, cast our vote — but ONLY for a block
+                // that became canonical at its height (review fix 3b):
+                // side-branch stores must never attract accept votes, or
+                // finality can wedge on a hash the canonical chain lacks.
+                if self.chain.consensus().is_validator()
+                    && self
+                        .chain
+                        .is_canonical(&block_hash, block_number)
+                        .unwrap_or(false)
+                {
                     self.cast_vote_for_block(&block).await;
                 }
+
+                // Votes may have arrived BEFORE the block (stored in
+                // pending_votes); now that the block is imported, re-check
+                // finality so an early quorum is not missed at this height.
+                self.try_finalize(&block_hash, block_number);
             }
             Err(qfc_chain::ChainError::BlockAlreadyKnown) => {
                 debug!("Block #{} already known", block_number);
@@ -401,10 +644,45 @@ impl SyncManager {
         }
     }
 
+    /// Single writer for the finalized pointer (review-fix hardening).
+    ///
+    /// Finality moves only for a block we hold CANONICALLY at that height
+    /// (review fixes 3c/3d): votes for unknown or side-branch blocks are
+    /// stored but must never move the finalized pointer, or every future
+    /// reorg wedges on a hash the canonical chain cannot contain.
+    /// `Chain::record_finalized` re-checks canonicity and is the ONLY
+    /// place that raises the engine's finalized height, so a height is
+    /// never recorded without its hash.
+    fn try_finalize(&self, block_hash: &Hash, height: u64) {
+        let consensus = self.chain.consensus();
+        let before = self.chain.finalized().0;
+        if height <= before {
+            return;
+        }
+        if !self.chain.is_canonical(block_hash, height).unwrap_or(false) {
+            return;
+        }
+        if !consensus.check_finality(block_hash) {
+            return;
+        }
+        self.chain.record_finalized(height, *block_hash);
+        if self.chain.finalized().0 > before {
+            info!("Block #{} finalized!", height);
+            consensus.prune_old_votes(height);
+        }
+    }
+
     /// Cast a vote for a successfully imported block
     async fn cast_vote_for_block(&self, block: &Block) {
         let consensus = self.chain.consensus();
         let block_number = block.number();
+        let block_hash = blake3_hash(&block.header_bytes());
+
+        // Never vote twice at a height / for a block (review fix 2a).
+        if !consensus.try_record_own_vote(block_number, block_hash) {
+            debug!("Already voted at height {}, not voting again", block_number);
+            return;
+        }
 
         // Create an accept vote (we validated the block during import)
         let vote = match consensus.vote(block, true) {
@@ -445,16 +723,15 @@ impl SyncManager {
             requested.insert(missing_parent);
         }
 
-        // Get a peer to request from
-        let peers = self.network.peers();
-        if peers.is_empty() {
-            warn!("No peers available to request blocks from");
+        // Request from the status-verified peer with the highest head
+        // (same rotation machinery as the forward catch-up) — never an
+        // arbitrary HashSet-ordered peer, which could be genesis-foreign or
+        // permanently behind (review fix 6).
+        let Some(peer) = self.best_sync_peer() else {
+            warn!("No status-verified peer available to request blocks from");
             self.requested_hashes.write().remove(&missing_parent);
             return;
-        }
-
-        // Try to request from the first peer
-        let peer = peers[0];
+        };
         let self_clone = self.clone();
 
         info!(
@@ -488,11 +765,11 @@ impl SyncManager {
                                 hex::encode(&block_parent.as_bytes()[..8])
                             );
 
-                            match self_clone.chain.import_block(block.clone()) {
+                            match self_clone.chain.import_block(block.clone()).await {
                                 Ok(_) => {
                                     info!("Imported fetched block #{}", block_number);
                                     // Try to process pending blocks
-                                    self_clone.process_pending_blocks_sync();
+                                    self_clone.process_pending_blocks().await;
                                 }
                                 Err(qfc_chain::ChainError::InvalidParent { .. }) => {
                                     // Need to request even earlier blocks
@@ -538,26 +815,33 @@ impl SyncManager {
         });
     }
 
-    /// Try to import pending blocks (async version)
+    /// Try to import pending blocks. Drains the queue, imports what it can
+    /// (each import serializes on the chain-wide import lock), and requeues
+    /// blocks still missing a parent. The queue lock is never held across an
+    /// await.
     async fn process_pending_blocks(&self) {
-        self.process_pending_blocks_sync();
-    }
+        loop {
+            let drained: Vec<Block> = {
+                let mut pending = self.pending_blocks.write();
+                pending.drain(..).collect()
+            };
+            if drained.is_empty() {
+                return;
+            }
 
-    /// Try to import pending blocks (sync version for use in spawned tasks)
-    fn process_pending_blocks_sync(&self) {
-        let mut imported = true;
+            let mut imported = false;
+            let mut to_retry: VecDeque<Block> = VecDeque::new();
 
-        while imported {
-            imported = false;
-            let mut pending = self.pending_blocks.write();
-            let mut to_retry = VecDeque::new();
-
-            while let Some(block) = pending.pop_front() {
+            for block in drained {
                 let block_number = block.number();
-                match self.chain.import_block(block.clone()) {
+                match self.chain.import_block(block.clone()).await {
                     Ok(_) => {
                         info!("Imported pending block #{}", block_number);
                         imported = true;
+                        // Early-stored votes for this block may already form
+                        // a quorum — re-check now that it is importable.
+                        let hash = blake3_hash(&block.header_bytes());
+                        self.try_finalize(&hash, block_number);
                     }
                     Err(qfc_chain::ChainError::BlockAlreadyKnown) => {
                         // Already imported, skip
@@ -572,7 +856,19 @@ impl SyncManager {
                 }
             }
 
-            *pending = to_retry;
+            let done = to_retry.is_empty();
+            {
+                // Prepend the retries; new arrivals may have queued meanwhile.
+                let mut pending = self.pending_blocks.write();
+                while let Some(block) = to_retry.pop_back() {
+                    pending.push_front(block);
+                }
+            }
+
+            // Nothing imported this pass -> another pass cannot make progress.
+            if !imported || done {
+                return;
+            }
         }
     }
 
@@ -648,11 +944,11 @@ impl SyncManager {
             }
         };
 
-        // 4. Check if voter is active
-        if !voter_validator.is_active() {
-            warn!("Vote from inactive/jailed validator: {}", vote.voter);
-            return;
-        }
+        // 4. NOTE: no is_active() gate here. Jail status is node-local
+        // (gossip-driven) state; filtering a consensus input (finality votes)
+        // by it would let nodes disagree on which votes count — the same
+        // class of divergence review fix 4 removed from the election.
+        // Registry membership + signature verification suffice.
 
         // 5. Verify the vote signature
         let vote_hash = blake3_hash(&vote.to_bytes_without_signature());
@@ -683,7 +979,7 @@ impl SyncManager {
         let is_accept = vote.decision == VoteDecision::Accept;
         consensus.record_vote(&vote.voter, true);
 
-        // 8. Add vote to pending votes
+        // 8. Add vote to pending votes (dedups by voter address)
         consensus.add_vote(vote.clone());
 
         info!(
@@ -693,35 +989,46 @@ impl SyncManager {
             vote.block_height
         );
 
-        // 9. Check if block has reached finality
-        if consensus.check_finality(&vote.block_hash) {
-            let current_finalized = consensus.finalized_height();
-            if vote.block_height > current_finalized {
-                consensus.set_finalized_height(vote.block_height);
-                info!("Block #{} finalized!", vote.block_height);
-
-                // Prune old votes
-                consensus.prune_old_votes(vote.block_height);
-            }
+        // 9. Check if the block has reached finality (see try_finalize for
+        // the canonicality rules).
+        if block_exists {
+            self.try_finalize(&vote.block_hash, vote.block_height);
         }
 
-        // 10. If we're a validator and haven't voted yet, cast our vote
+        // 10. If we're a validator and haven't voted at this height yet,
+        // cast our vote. Receiving a vote must never unconditionally emit a
+        // new one (review fix 2b) — maybe_cast_vote is a no-op once we have
+        // voted at the height, so vote traffic converges instead of echoing.
         if consensus.is_validator() {
             self.maybe_cast_vote(&vote.block_hash, vote.block_height)
                 .await;
         }
     }
 
-    /// Cast our own vote for a block if we haven't already
+    /// Cast our own vote for a block if we haven't already voted at its
+    /// height and the block is canonical locally (review fixes 2a/3b).
     async fn maybe_cast_vote(&self, block_hash: &Hash, block_height: u64) {
         let consensus = self.chain.consensus();
 
-        // Check if we've already voted for this block
-        // (A more robust implementation would track our own votes)
         let our_address = match consensus.our_address() {
             Some(addr) => addr,
             None => return,
         };
+
+        // Only vote for blocks that are canonical at their height —
+        // side-branch blocks must not attract votes (review fix 3b).
+        if !self
+            .chain
+            .is_canonical(block_hash, block_height)
+            .unwrap_or(false)
+        {
+            debug!(
+                "Not voting: block {} is not canonical at height {}",
+                hex::encode(&block_hash.as_bytes()[..8]),
+                block_height
+            );
+            return;
+        }
 
         // Get the block to validate
         let block = match self.chain.get_block_by_hash(block_hash) {
@@ -740,6 +1047,12 @@ impl SyncManager {
                 return;
             }
         };
+
+        // Never vote twice at a height / for a block (review fix 2a).
+        if !consensus.try_record_own_vote(block_height, *block_hash) {
+            debug!("Already voted at height {}, not voting again", block_height);
+            return;
+        }
 
         // Validate the block and decide our vote
         let accept = consensus.validate_block(&block, &parent).is_ok();
@@ -884,22 +1197,34 @@ impl SyncManager {
             return;
         }
 
-        // Check if this is a new epoch
-        let current_epoch = consensus.get_epoch();
-        if announcement.epoch_number <= current_epoch.number {
-            debug!(
-                "Ignoring old epoch announcement: {} (current: {})",
-                announcement.epoch_number, current_epoch.number
-            );
-            return;
+        // VERIFY-OR-IGNORE ONLY (ADR-0012, D11): epochs are a pure function
+        // of wall-clock time and the genesis-anchored seed derivation, so a
+        // received announcement can never change our epoch state. Adopting
+        // (epoch, seed) pairs from a single validator signature let any peer
+        // re-anchor a node's schedule and fork it. We verify the announced
+        // seed against our own derivation purely as a health signal.
+        match consensus.derive_epoch_seed(announcement.epoch_number) {
+            Ok(expected_seed) if expected_seed == announcement.seed => {
+                debug!(
+                    "Epoch {} announcement from {} matches our derivation (ignored)",
+                    announcement.epoch_number, announcement.announcer
+                );
+            }
+            Ok(_) => {
+                warn!(
+                    "Epoch {} announcement from {} carries a seed that does NOT match \
+                     our genesis-anchored derivation — ignoring (possible fork or \
+                     misconfigured peer)",
+                    announcement.epoch_number, announcement.announcer
+                );
+            }
+            Err(_) => {
+                debug!(
+                    "Ignoring epoch {} announcement from {}: our genesis seed is unset",
+                    announcement.epoch_number, announcement.announcer
+                );
+            }
         }
-
-        // Start the new epoch
-        info!(
-            "Received epoch {} announcement from {}",
-            announcement.epoch_number, announcement.announcer
-        );
-        consensus.start_epoch(announcement.epoch_number, announcement.seed);
     }
 
     /// Handle slashing evidence
@@ -1325,8 +1650,20 @@ impl SyncManager {
 
     /// Initiate sync with a peer: check its status, and if it is ahead,
     /// range-sync the missing blocks forward in order. Driven by
-    /// [`run_catch_up_loop`].
-    pub async fn sync_with_peer(&self, peer_id: PeerId) {
+    /// [`run_catch_up_loop`] and the gate's forced catch-up.
+    ///
+    /// Sets `catching_up` for the duration (feeds `is_syncing()`). Returns
+    /// false when the peer was unusable (status failure, foreign genesis) or
+    /// the range sync stopped on a hard failure — callers rotate to the
+    /// next-best peer on false.
+    pub async fn sync_with_peer(&self, peer_id: PeerId) -> bool {
+        self.catching_up.store(true, Ordering::Relaxed);
+        let result = self.sync_with_peer_inner(peer_id).await;
+        self.catching_up.store(false, Ordering::Relaxed);
+        result
+    }
+
+    async fn sync_with_peer_inner(&self, peer_id: PeerId) -> bool {
         info!("Starting sync with peer {}", peer_id);
 
         // First, get peer's status
@@ -1336,10 +1673,13 @@ impl SyncManager {
                 block_hash: _,
                 genesis_hash,
             }) => {
+                // Keep the gate's status map fresh with this response too.
+                self.record_peer_status(peer_id, block_number, genesis_hash);
+
                 let our_genesis = self.chain.genesis_hash().unwrap_or_default();
                 if genesis_hash != our_genesis {
                     warn!("Peer {} has different genesis hash!", peer_id);
-                    return;
+                    return false;
                 }
 
                 let our_block_number = self.chain.block_number();
@@ -1350,23 +1690,28 @@ impl SyncManager {
                     );
                     // Request blocks we're missing
                     self.sync_blocks_from_peer(peer_id, our_block_number + 1, block_number)
-                        .await;
+                        .await
                 } else {
                     debug!("We're up to date with peer {}", peer_id);
+                    true
                 }
             }
             Ok(other) => {
                 warn!("Unexpected status response from peer: {:?}", other);
+                false
             }
             Err(e) => {
                 error!("Failed to get status from peer {}: {}", peer_id, e);
+                false
             }
         }
     }
 
-    /// Sync blocks from a peer
-    async fn sync_blocks_from_peer(&self, peer_id: PeerId, start: u64, end: u64) {
+    /// Sync blocks from a peer. Returns true when the whole `start..=end`
+    /// range was walked without a hard failure.
+    async fn sync_blocks_from_peer(&self, peer_id: PeerId, start: u64, end: u64) -> bool {
         let mut current = start;
+        let mut clean = true;
 
         while current <= end {
             let request_end = (current + MAX_BLOCKS_PER_REQUEST - 1).min(end);
@@ -1382,38 +1727,75 @@ impl SyncManager {
                 .await
             {
                 Ok(SyncResponse::Blocks(blocks)) => {
+                    let mut hard_failure = false;
                     for block_data in blocks {
                         if let Ok(block) = borsh::from_slice::<Block>(&block_data) {
                             let block_number = block.number();
-                            match self.chain.import_block(block) {
+                            let parent_hash = block.parent_hash();
+                            match self.chain.import_block(block.clone()).await {
                                 Ok(_) => {
                                     info!("Synced block #{}", block_number);
                                 }
                                 Err(qfc_chain::ChainError::BlockAlreadyKnown) => {
                                     debug!("Block #{} already known", block_number);
                                 }
+                                Err(qfc_chain::ChainError::InvalidParent { .. }) => {
+                                    // Fork healing: the peer's branch diverges
+                                    // below this range. Queue the block and walk
+                                    // backwards by hash to the common ancestor;
+                                    // the fork-choice import will reorg once the
+                                    // branch connects. Stop hammering the rest of
+                                    // the batch — it all descends from this block.
+                                    info!(
+                                        "Synced block #{} does not connect; walking back to common ancestor",
+                                        block_number
+                                    );
+                                    {
+                                        let mut pending = self.pending_blocks.write();
+                                        if pending.len() < MAX_PENDING_BLOCKS {
+                                            pending.push_back(block);
+                                        }
+                                    }
+                                    self.request_missing_blocks(parent_hash);
+                                    hard_failure = true;
+                                    break;
+                                }
                                 Err(e) => {
+                                    // Hard failure (validation/execution): the
+                                    // rest of the batch builds on this block, so
+                                    // importing it would fail identically —
+                                    // break instead of hammering.
                                     warn!("Failed to import synced block #{}: {}", block_number, e);
+                                    hard_failure = true;
+                                    break;
                                 }
                             }
                         }
+                    }
+                    if hard_failure {
+                        clean = false;
+                        break;
                     }
                     current = request_end + 1;
                 }
                 Ok(SyncResponse::NotFound) => {
                     debug!("No more blocks available from peer");
+                    clean = false;
                     break;
                 }
                 Ok(other) => {
                     warn!("Unexpected response: {:?}", other);
+                    clean = false;
                     break;
                 }
                 Err(e) => {
                     error!("Sync failed: {}", e);
+                    clean = false;
                     break;
                 }
             }
         }
+        clean
     }
 }
 
@@ -1434,6 +1816,36 @@ impl SyncStatusProvider for SyncManager {
 #[cfg(test)]
 mod tests {
     use super::SyncManager;
+    use libp2p::PeerId;
+
+    /// Peer selection prefers the highest verified head; the cursor rotates
+    /// through candidates (next-best first) on failed syncs; empty candidate
+    /// lists select nobody (never an arbitrary `peers().first()`).
+    #[test]
+    fn pick_sync_peer_prefers_highest_head_and_rotates() {
+        let a = PeerId::random();
+        let b = PeerId::random();
+        let c = PeerId::random();
+        let candidates = vec![(a, 5), (b, 9), (c, 7)];
+
+        assert_eq!(SyncManager::pick_sync_peer(candidates.clone(), 0), Some(b));
+        assert_eq!(SyncManager::pick_sync_peer(candidates.clone(), 1), Some(c));
+        assert_eq!(SyncManager::pick_sync_peer(candidates.clone(), 2), Some(a));
+        // Cursor wraps.
+        assert_eq!(SyncManager::pick_sync_peer(candidates, 3), Some(b));
+        // No verified candidates -> no sync target.
+        assert_eq!(SyncManager::pick_sync_peer(Vec::new(), 0), None);
+        assert_eq!(SyncManager::pick_sync_peer(Vec::new(), 5), None);
+    }
+
+    /// Equal heads tie-break deterministically by peer id.
+    #[test]
+    fn pick_sync_peer_tie_breaks_by_peer_id() {
+        let mut ids = [PeerId::random(), PeerId::random()];
+        ids.sort();
+        let candidates = vec![(ids[1], 4), (ids[0], 4)];
+        assert_eq!(SyncManager::pick_sync_peer(candidates, 0), Some(ids[0]));
+    }
 
     /// Catch-up triggers only once we are more than the lag threshold (2)
     /// behind the highest known peer — never when level or only marginally
