@@ -2813,9 +2813,9 @@ impl QfcApiServer for RpcServer {
 
         // Scan blocks for this miner's inference proofs to build vesting tranches.
         // In production this would read from MINER_EARNINGS CF; for now we scan
-        // recent blocks (last 30 days worth ≈ 777,600 blocks at 3.3s/block).
+        // recent blocks (last 30 days worth at BLOCK_INTERVAL_MS per block).
         let current_height = self.chain.block_number();
-        let blocks_per_day = 24 * 3600 * 1000 / qfc_types::BLOCK_TIME_MS;
+        let blocks_per_day = 24 * 3600 * 1000 / qfc_types::BLOCK_INTERVAL_MS;
         let scan_start = current_height.saturating_sub(blocks_per_day * 31);
 
         let mut total_earned = U256::zero();

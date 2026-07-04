@@ -8,8 +8,16 @@ pub mod cf {
     /// Block bodies: height (u64 BE) -> BlockBody
     pub const BLOCK_BODIES: &str = "block_bodies";
 
-    /// Block hash index: hash -> height (u64 BE)
+    /// Block hash index: hash -> height (u64 BE).
+    /// Membership in this CF means the block is part of the CANONICAL chain;
+    /// it is rewritten on reorg together with the number-keyed CFs.
     pub const BLOCK_HASH_INDEX: &str = "block_hash_index";
+
+    /// All blocks ever imported or produced, keyed by header hash:
+    /// hash -> Block (borsh). This is the branch store for fork choice —
+    /// side-chain blocks live only here until (unless) a reorg makes them
+    /// canonical. The number-keyed CFs above remain the canonical index.
+    pub const BLOCKS_BY_HASH: &str = "blocks_by_hash";
 
     /// Transactions: hash -> Transaction
     pub const TRANSACTIONS: &str = "transactions";
@@ -71,6 +79,7 @@ pub mod cf {
         BLOCK_HEADERS,
         BLOCK_BODIES,
         BLOCK_HASH_INDEX,
+        BLOCKS_BY_HASH,
         TRANSACTIONS,
         TX_INDEX,
         RECEIPTS,
