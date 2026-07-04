@@ -2,7 +2,6 @@
 //!
 //! Main entry point for running a QFC node.
 
-mod dynamic_rewards;
 mod metrics;
 mod miner;
 mod producer;
@@ -492,11 +491,14 @@ async fn main() -> Result<()> {
     let _network_service = network_service;
     let _sync_manager = sync_manager;
 
-    // Start block producer if we're a validator or in dev mode
+    // Start block producer if we're a validator or in dev mode.
+    // NOTE: the slot length is the chain constant BLOCK_INTERVAL_MS — there
+    // is deliberately no per-mode override (--dev used to shorten the slot to
+    // 3000ms, which silently forked dev nodes off the shared schedule; §6 of
+    // ADR-0012).
     let is_validator = consensus.is_validator();
     if is_validator {
         let producer_config = ProducerConfig {
-            block_interval_ms: if args.dev { 3000 } else { 5000 },
             produce_empty_blocks: true, // Always produce empty blocks for testing
             ..Default::default()
         };
@@ -509,7 +511,6 @@ async fn main() -> Result<()> {
             mempool.clone(),
             network_for_producer,
             producer_config,
-            args.chain_id,
             proof_pool.clone(),
             task_pool.clone(),
         );

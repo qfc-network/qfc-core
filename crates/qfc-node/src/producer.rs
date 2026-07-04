@@ -1,34 +1,32 @@
 //! Block producer - handles block production loop
+//!
+//! State-transition note (ADR-0012 / spec §1): the producer performs NO
+//! direct state mutation. The whole transition — undelegations, transactions,
+//! rewards — lives in `Chain::execute_at`, shared byte-identically with block
+//! import, and the produced block is committed through
+//! `Chain::store_produced_block`, which self-validates exactly like an
+//! importer. Voter splits and inference-fee settlement were REMOVED from the
+//! block path (they consumed node-local inputs and forked every import).
 
 use parking_lot::RwLock;
 use qfc_ai_coordinator::{ProofPool, TaskPool};
 use qfc_chain::Chain;
 use qfc_consensus::ConsensusEngine;
 use qfc_crypto::blake3_hash;
-use qfc_executor::Executor;
 use qfc_mempool::Mempool;
 use qfc_network::NetworkService;
 use qfc_storage;
 use qfc_types::{
-    block_reward_for_year, DoubleSignEvidence, Heartbeat, InferenceProof, RewardDistribution,
-    Transaction, ValidatorMessage, BLOCK_TIME_MS, FEE_BURN_PERCENT, FEE_PRODUCER_PERCENT,
-    FEE_TREASURY_PERCENT, FEE_VOTERS_PERCENT, INFERENCE_FEE_MINER_PERCENT,
-    INFERENCE_FEE_VALIDATORS_PERCENT, MAX_INFERENCE_PROOFS_PER_BLOCK, PRODUCER_REWARD_PERCENT,
-    U256, VOTERS_REWARD_PERCENT,
+    Heartbeat, Transaction, ValidatorMessage, BLOCK_INTERVAL_MS, MAX_INFERENCE_PROOFS_PER_BLOCK,
 };
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::{interval, Instant};
 use tracing::{debug, error, info, warn};
 
-/// Epoch duration in milliseconds (matches EPOCH_DURATION_SECS)
-const EPOCH_DURATION_MS: u64 = qfc_types::EPOCH_DURATION_SECS * 1000;
-
 /// Block producer configuration
 #[derive(Clone, Debug)]
 pub struct ProducerConfig {
-    /// Block interval in milliseconds
-    pub block_interval_ms: u64,
     /// Maximum transactions per block
     pub max_txs_per_block: usize,
     /// Whether to produce empty blocks
@@ -38,7 +36,6 @@ pub struct ProducerConfig {
 impl Default for ProducerConfig {
     fn default() -> Self {
         Self {
-            block_interval_ms: 3000, // 3 seconds
             max_txs_per_block: 1000,
             produce_empty_blocks: true, // For dev mode, produce even if no txs
         }
@@ -51,11 +48,11 @@ pub struct BlockProducer {
     consensus: Arc<ConsensusEngine>,
     mempool: Arc<RwLock<Mempool>>,
     network: Option<Arc<NetworkService>>,
-    executor: Executor,
     config: ProducerConfig,
     /// v2.0: Pool of verified inference proofs awaiting block inclusion
     proof_pool: Arc<RwLock<ProofPool>>,
-    /// v2.0: Shared task pool for fee settlement
+    /// v2.0: Shared task pool (housekeeping only — no fee settlement in the
+    /// block path)
     task_pool: Arc<RwLock<TaskPool>>,
 }
 
@@ -67,7 +64,6 @@ impl BlockProducer {
         mempool: Arc<RwLock<Mempool>>,
         network: Option<Arc<NetworkService>>,
         config: ProducerConfig,
-        chain_id: u64,
         proof_pool: Arc<RwLock<ProofPool>>,
         task_pool: Arc<RwLock<TaskPool>>,
     ) -> Self {
@@ -76,7 +72,6 @@ impl BlockProducer {
             consensus,
             mempool,
             network,
-            executor: Executor::new(chain_id),
             config,
             proof_pool,
             task_pool,
@@ -93,16 +88,13 @@ impl BlockProducer {
         let our_address = self.consensus.our_address().unwrap();
         info!("Starting block producer for validator {}", our_address);
 
-        // Initialize epoch with a deterministic seed based on genesis
-        let genesis_hash = self.chain.genesis_hash().unwrap_or_default();
-        let mut epoch_seed = [0u8; 32];
-        epoch_seed.copy_from_slice(genesis_hash.as_bytes());
-        self.consensus.start_epoch(1, epoch_seed);
+        // NOTE: no start_epoch here. The genesis seed is anchored once in
+        // Chain::new (before this task spawns); epochs advance from wall
+        // clock via maybe_advance_epoch. This removes the D11 capture race.
 
-        // Validators are already loaded from genesis in chain.rs
-        // No need to override here
-
-        let mut block_timer = interval(Duration::from_millis(self.config.block_interval_ms));
+        // Slot length is the chain constant — never a per-node setting
+        // (a per-node slot length is a silent consensus fork, spec §6).
+        let mut block_timer = interval(Duration::from_millis(BLOCK_INTERVAL_MS));
         let mut heartbeat_counter: u64 = 0;
         let heartbeat_interval = 3; // Send heartbeat every 3 slots
         let mut last_slot: u64 = u64::MAX;
@@ -110,17 +102,12 @@ impl BlockProducer {
         loop {
             block_timer.tick().await;
 
-            // Global wall-clock slot: now_ms / block_interval. Every node
+            // Global wall-clock slot: now_ms / BLOCK_INTERVAL_MS. Every node
             // computes the same slot at the same instant (clocks are
-            // NTP-synced), so exactly one validator is elected network-wide per
-            // slot. A local per-tick counter — the previous approach — drifted
-            // with each node's start time and let several nodes produce the
-            // same height, which is what forked the testnet.
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
-            let slot = now_ms / self.config.block_interval_ms;
+            // NTP-synced), so exactly one validator is elected network-wide
+            // per slot.
+            let now_ms = now_ms();
+            let slot = now_ms / BLOCK_INTERVAL_MS;
 
             // Process each slot at most once (guards against timer jitter
             // firing twice within one slot window).
@@ -130,8 +117,8 @@ impl BlockProducer {
             last_slot = slot;
             heartbeat_counter += 1;
 
-            // Advance epoch (also wall-clock anchored) so selection agrees.
-            self.consensus.maybe_advance_epoch(EPOCH_DURATION_MS);
+            // Advance the observability epoch (wall-clock anchored).
+            self.consensus.maybe_advance_epoch();
 
             // Send periodic heartbeat
             if heartbeat_counter >= heartbeat_interval {
@@ -174,10 +161,7 @@ impl BlockProducer {
             None => return,
         };
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
+        let now = now_ms();
 
         // Create heartbeat
         let mut heartbeat = Heartbeat::new(our_address, head.block.number(), head.hash, now);
@@ -225,77 +209,44 @@ impl BlockProducer {
             .write()
             .drain(MAX_INFERENCE_PROOFS_PER_BLOCK);
 
-        // Execute transactions
-        let state = self.chain.state();
-
-        // Take snapshot before execution (for potential rollback)
-        let _snapshot = state.snapshot();
-
-        // Process mature undelegations before executing transactions
-        self.executor.process_mature_undelegations(&state);
-
-        let (receipts, gas_used) =
-            self.executor
-                .execute_transactions(&transactions, &state, &our_address);
-
-        // Settle inference fees for proofs matched to public tasks (v2.0)
-        self.settle_inference_fees(&inference_proofs, &our_address);
-
-        // Calculate fees from receipts (needed for reward distribution)
-        let total_fees = self.calculate_total_fees(&transactions, &receipts);
-
-        // Get voters for reward distribution (empty for newly produced block)
-        let voters = self.get_block_voters(&qfc_types::Hash::ZERO);
-
-        // Distribute ALL rewards BEFORE committing state so they are included
-        // in the block's state root. Previously rewards were distributed after
-        // commit, causing miner/voter/producer rewards to be lost.
+        // Fix the header timestamp BEFORE executing: undelegation maturity is
+        // timestamp-driven, so the execution and the header must agree.
+        let timestamp = now_ms();
         let block_number = parent_block.number() + 1;
-        match self.distribute_rewards(
+
+        // Deterministic shared state transition against the parent state
+        // root (same code path import runs — D7). No live-state mutation.
+        let outcome = self.chain.execute_at(
+            parent_block.state_root(),
             block_number,
+            timestamp,
             &our_address,
-            total_fees,
-            &voters,
-            &inference_proofs,
-        ) {
-            Ok(distribution) => {
-                debug!(
-                    "Pre-commit rewards for block #{}: producer={}, voters={}, burned={}",
-                    block_number,
-                    distribution.producer_reward,
-                    distribution.voter_reward,
-                    distribution.fee_burned
-                );
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to distribute rewards for block #{}: {}",
-                    block_number, e
-                );
-            }
-        }
+            &transactions,
+        )?;
 
-        // Commit state to get new state root (now includes all rewards)
-        let state_root = state.commit()?;
-
-        // Produce the block
+        // Seal the block (VRF proved against the block-derived epoch seed).
         let block = self
             .consensus
             .produce_block(
                 &parent_block,
                 transactions.clone(),
-                receipts.clone(),
-                state_root,
-                gas_used,
+                outcome.receipts.clone(),
+                outcome.state_root,
+                outcome.gas_used,
                 inference_proofs,
+                timestamp,
             )
             .map_err(|e| anyhow::anyhow!("Consensus error: {}", e))?;
 
         let block_hash = blake3_hash(&block.header_bytes());
         let block_number = block.number();
 
-        // Store the block
-        self.chain.store_produced_block(&block, &receipts)?;
+        // Store the block: self-validates + re-executes exactly like an
+        // importer, under the chain-wide import lock.
+        self.chain.store_produced_block(&block).await?;
+
+        // Node-local task-pool housekeeping (no chain-state writes).
+        self.maintain_task_pool();
 
         // Broadcast to network
         if let Some(network) = &self.network {
@@ -327,88 +278,31 @@ impl BlockProducer {
 
         info!(
             "Block #{} produced: {} txs, {} gas used",
-            block_number, tx_count, gas_used
+            block_number, tx_count, outcome.gas_used
         );
 
         Ok(block_hash)
     }
 
-    /// Settle inference fees for proofs matched to public tasks (v2.0)
-    /// 70% miner, 10% validators, 20% burn
-    fn settle_inference_fees(&self, proofs: &[InferenceProof], _producer: &qfc_types::Address) {
-        let state = self.chain.state();
-        let voters = self.get_block_voters(&qfc_types::Hash::ZERO);
+    /// Node-local task-pool housekeeping (v2.0).
+    ///
+    /// IMPORTANT: this must never touch chain state. Fee settlement and
+    /// expired-task refunds were removed from the block path (ADR-0012):
+    /// the TaskPool is node-local, so paying/refunding from it during block
+    /// production produced state roots no importer could reproduce.
+    /// Settlement moves on-chain later; until then completed/expired tasks
+    /// are only tracked and persisted for querying.
+    fn maintain_task_pool(&self) {
         let mut task_pool = self.task_pool.write();
 
-        for proof in proofs {
-            // Check if this proof completes a public task (match by input_hash)
-            if let Some(public_task) = task_pool.get_public_task_by_input_hash(&proof.input_hash) {
-                if matches!(
-                    public_task.status,
-                    qfc_ai_coordinator::task_pool::PublicTaskStatus::Pending
-                        | qfc_ai_coordinator::task_pool::PublicTaskStatus::Assigned
-                ) {
-                    let fee = U256::from_u128(public_task.max_fee);
-
-                    // 70% to miner (proof submitter)
-                    let miner_share =
-                        fee * U256::from_u64(INFERENCE_FEE_MINER_PERCENT) / U256::from_u64(100);
-                    if let Err(e) = state.add_balance(&proof.validator, miner_share) {
-                        warn!("Failed to pay miner inference fee: {}", e);
-                    }
-
-                    // 10% to validators
-                    let validator_share = fee * U256::from_u64(INFERENCE_FEE_VALIDATORS_PERCENT)
-                        / U256::from_u64(100);
-                    if let Err(e) = self.distribute_voter_rewards(&validator_share, &voters) {
-                        warn!("Failed to distribute inference validator fees: {}", e);
-                    }
-
-                    // 20% burned (not distributed)
-
-                    // Mark task completed
-                    task_pool.complete_public_task_by_input_hash(
-                        &proof.input_hash,
-                        qfc_ai_coordinator::task_pool::ResultStorage::Inline(
-                            proof.output_hash.as_bytes().to_vec(),
-                        ),
-                        proof.validator,
-                        proof.execution_time_ms,
-                    );
-
-                    info!(
-                        "Settled inference fee for task {}: {} to miner {}",
-                        hex::encode(&proof.input_hash.as_bytes()[..8]),
-                        miner_share,
-                        proof.validator
-                    );
-                }
-            }
-        }
-
-        // C2: Re-queue tasks assigned to miners that timed out
+        // Re-queue tasks assigned to miners that timed out
         let reassigned = task_pool.reassign_stale_tasks();
         if reassigned > 0 {
             info!("Reassigned {} stale inference tasks", reassigned);
         }
 
-        // Prune expired tasks and refund submitters
+        // Prune expired tasks (no on-chain refund — see above)
         let expired = task_pool.prune_expired_public(now_ms());
-        for task in &expired {
-            if task.submitter != qfc_types::Address::ZERO {
-                let refund = U256::from_u128(task.max_fee);
-                if let Err(e) = state.add_balance(&task.submitter, refund) {
-                    warn!("Failed to refund expired task: {}", e);
-                } else {
-                    info!(
-                        "Refunded {} for expired task {} to {}",
-                        refund,
-                        hex::encode(&task.task_id.as_bytes()[..8]),
-                        task.submitter
-                    );
-                }
-            }
-        }
 
         // Persist expired tasks to RocksDB for long-term querying
         let db = self.chain.db();
@@ -445,312 +339,6 @@ impl BlockProducer {
             self.config.max_txs_per_block,
             Some(state.as_ref()),
         )
-    }
-
-    /// Calculate the current year based on block height for reward halving
-    fn calculate_year(&self, block_height: u64) -> u64 {
-        // Estimate blocks per year based on block time
-        // BLOCK_TIME_MS = 3333ms => ~262,800 blocks per year (365 * 24 * 60 * 60 * 1000 / 3333)
-        let blocks_per_year = 365 * 24 * 60 * 60 * 1000 / BLOCK_TIME_MS;
-        block_height / blocks_per_year
-    }
-
-    /// Distribute block rewards and fees after block production
-    ///
-    /// Block rewards: 60% producer, 25% voters, 15% inference miners (dynamically adjusted)
-    /// If no inference proofs, the miner share goes back to producer+voters (70/30).
-    /// Transaction fees: 47% producer, 28% voters, 20% burned, 5% treasury
-    /// Dynamic adjustments: burn rate scales with congestion, rewards scale with stake ratio,
-    /// inference pool scales with miner participation.
-    pub fn distribute_rewards(
-        &self,
-        block_height: u64,
-        producer: &qfc_types::Address,
-        total_fees: U256,
-        voters: &[(qfc_types::Address, u64)], // (voter_address, contribution_score)
-        inference_proofs: &[InferenceProof],
-    ) -> anyhow::Result<RewardDistribution> {
-        let state = self.chain.state();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-
-        // Compute dynamic reward adjustments
-        let consensus = self.chain.consensus();
-        let network_state = consensus.get_network_state();
-        let validators = consensus.get_validators();
-        let total_staked: u128 = validators.iter().map(|v| v.total_stake().low_u128()).sum();
-        let circulating_supply = qfc_types::INITIAL_SUPPLY; // approximate
-        let active_miner_count = inference_proofs
-            .iter()
-            .map(|p| p.validator)
-            .collect::<std::collections::HashSet<_>>()
-            .len() as u64;
-        let total_validator_count = validators.len() as u64;
-
-        let adjustments = crate::dynamic_rewards::compute_adjustments(
-            network_state,
-            total_staked,
-            circulating_supply,
-            active_miner_count,
-            total_validator_count,
-        );
-
-        // Calculate block reward with halving + dynamic multiplier
-        let year = self.calculate_year(block_height);
-        let base_reward = block_reward_for_year(year);
-        let block_reward = U256::from_u128(
-            (base_reward.low_u128() as f64 * adjustments.reward_multiplier) as u128,
-        );
-
-        // Inference miner reward pool (dynamically adjusted %)
-        let miner_pool = block_reward * U256::from_u64(adjustments.inference_miner_percent)
-            / U256::from_u64(100);
-
-        // Distribute to inference miners proportional to FLOPS, or redistribute if none
-        let miner_reward = if !inference_proofs.is_empty() {
-            self.distribute_miner_rewards(&miner_pool, inference_proofs, block_height, now)?
-        } else {
-            U256::ZERO
-        };
-        let undistributed_miner = miner_pool - miner_reward;
-
-        // Producer block reward (60% + undistributed miner share * 70%)
-        let producer_block_reward =
-            block_reward * U256::from_u64(PRODUCER_REWARD_PERCENT) / U256::from_u64(100);
-        let producer_extra = undistributed_miner * U256::from_u64(70) / U256::from_u64(100);
-
-        // Producer fee share (50%)
-        let producer_fee_share =
-            total_fees * U256::from_u64(FEE_PRODUCER_PERCENT) / U256::from_u64(100);
-
-        // Total producer reward
-        let producer_reward = producer_block_reward + producer_extra + producer_fee_share;
-
-        // Add producer reward to balance
-        state.add_balance(producer, producer_reward)?;
-
-        // Voter block reward pool (25% + undistributed miner share * 30%)
-        let voters_block_reward =
-            block_reward * U256::from_u64(VOTERS_REWARD_PERCENT) / U256::from_u64(100);
-        let voters_extra = undistributed_miner * U256::from_u64(30) / U256::from_u64(100);
-
-        // Voter fee pool (30%)
-        let voters_fee_share =
-            total_fees * U256::from_u64(FEE_VOTERS_PERCENT) / U256::from_u64(100);
-
-        // Total voter reward pool
-        let voters_reward_pool = voters_block_reward + voters_extra + voters_fee_share;
-
-        // Distribute voter rewards proportionally by contribution score
-        let voter_reward = self.distribute_voter_rewards(&voters_reward_pool, voters)?;
-
-        // Fee burned (20% base, scaled by congestion multiplier)
-        let base_burn = total_fees * U256::from_u64(FEE_BURN_PERCENT) / U256::from_u64(100);
-        let fee_burned = U256::from_u128(
-            (base_burn.low_u128() as f64 * adjustments.burn_rate_multiplier) as u128,
-        );
-
-        // Treasury fee (5%)
-        let treasury_fee = total_fees * U256::from_u64(FEE_TREASURY_PERCENT) / U256::from_u64(100);
-        if !treasury_fee.is_zero() {
-            let treasury_addr = qfc_types::Address::new(qfc_types::TREASURY_ADDRESS_BYTES);
-            state.add_balance(&treasury_addr, treasury_fee)?;
-        }
-
-        debug!(
-            "Block #{} rewards: producer={}, voters={}, miners={}, treasury={}, burned={}",
-            block_height, producer_reward, voter_reward, miner_reward, treasury_fee, fee_burned
-        );
-
-        // Create reward distribution record
-        let distribution =
-            RewardDistribution::new(block_height, producer_reward, voter_reward, fee_burned, now);
-
-        // Store the distribution record
-        self.store_reward_distribution(&distribution)?;
-
-        Ok(distribution)
-    }
-
-    /// Distribute voter rewards proportionally by contribution score
-    fn distribute_voter_rewards(
-        &self,
-        total_reward: &U256,
-        voters: &[(qfc_types::Address, u64)], // (voter_address, contribution_score)
-    ) -> anyhow::Result<U256> {
-        if voters.is_empty() || total_reward.is_zero() {
-            return Ok(U256::ZERO);
-        }
-
-        let state = self.chain.state();
-
-        // Calculate total contribution score
-        let total_score: u64 = voters.iter().map(|(_, score)| score).sum();
-        if total_score == 0 {
-            return Ok(U256::ZERO);
-        }
-
-        let mut distributed = U256::ZERO;
-
-        // Distribute proportionally
-        for (voter_address, score) in voters {
-            if *score == 0 {
-                continue;
-            }
-
-            // reward = total_reward * score / total_score
-            let voter_reward = *total_reward * U256::from_u64(*score) / U256::from_u64(total_score);
-
-            if !voter_reward.is_zero() {
-                state.add_balance(voter_address, voter_reward)?;
-                distributed = distributed + voter_reward;
-
-                debug!(
-                    "Voter {} reward: {} (score: {}/{})",
-                    voter_address, voter_reward, score, total_score
-                );
-            }
-        }
-
-        Ok(distributed)
-    }
-
-    /// Distribute inference miner rewards proportionally by FLOPS contributed
-    fn distribute_miner_rewards(
-        &self,
-        total_reward: &U256,
-        proofs: &[InferenceProof],
-        block_height: u64,
-        timestamp: u64,
-    ) -> anyhow::Result<U256> {
-        if proofs.is_empty() || total_reward.is_zero() {
-            return Ok(U256::ZERO);
-        }
-
-        let state = self.chain.state();
-        let total_flops: u64 = proofs.iter().map(|p| p.flops_estimated).sum();
-        if total_flops == 0 {
-            return Ok(U256::ZERO);
-        }
-
-        let mut distributed = U256::ZERO;
-
-        // Aggregate FLOPS and task count per miner (a miner may have multiple proofs)
-        let mut miner_flops: std::collections::HashMap<qfc_types::Address, u64> =
-            std::collections::HashMap::new();
-        let mut miner_task_count: std::collections::HashMap<qfc_types::Address, u32> =
-            std::collections::HashMap::new();
-        for proof in proofs {
-            *miner_flops.entry(proof.validator).or_default() += proof.flops_estimated;
-            *miner_task_count.entry(proof.validator).or_default() += 1;
-        }
-
-        let db = self.chain.db();
-
-        for (miner, flops) in &miner_flops {
-            let reward = *total_reward * U256::from_u64(*flops) / U256::from_u64(total_flops);
-            if !reward.is_zero() {
-                state.add_balance(miner, reward)?;
-                distributed = distributed + reward;
-
-                // Store per-miner earning record
-                let task_count = miner_task_count.get(miner).copied().unwrap_or(1);
-                let earning = qfc_types::MinerEarning::new(
-                    *miner,
-                    block_height,
-                    reward,
-                    *flops,
-                    task_count,
-                    timestamp,
-                );
-                let key = qfc_types::encode_miner_earning_key(miner, block_height);
-                if let Err(e) = db.put(qfc_storage::cf::MINER_EARNINGS, &key, &earning.to_bytes()) {
-                    tracing::warn!("Failed to store miner earning record: {}", e);
-                }
-
-                debug!(
-                    "Miner {} inference reward: {} ({} FLOPS / {} total, {} tasks)",
-                    miner, reward, flops, total_flops, task_count
-                );
-            }
-        }
-
-        Ok(distributed)
-    }
-
-    /// Store reward distribution record to database
-    fn store_reward_distribution(&self, distribution: &RewardDistribution) -> anyhow::Result<()> {
-        let db = self.chain.db();
-        let key = distribution.block_height.to_be_bytes();
-        db.put(qfc_storage::cf::REWARDS, &key, &distribution.to_bytes())?;
-        Ok(())
-    }
-
-    /// Broadcast double-sign evidence to the network
-    #[allow(dead_code)]
-    pub async fn broadcast_double_sign_evidence(&self, evidence: &DoubleSignEvidence) {
-        let Some(network) = &self.network else {
-            return;
-        };
-
-        let our_address = match self.consensus.our_address() {
-            Some(addr) => addr,
-            None => return,
-        };
-
-        // Convert to slashing evidence for network broadcast
-        let mut slashing = evidence.to_slashing_evidence(our_address);
-
-        // Sign the evidence
-        let evidence_hash = blake3_hash(&slashing.to_bytes_without_signature());
-        match self.consensus.sign_hash(&evidence_hash) {
-            Ok(sig) => slashing.set_signature(sig),
-            Err(_) => return,
-        }
-
-        // Broadcast
-        let msg = ValidatorMessage::SlashingEvidence(slashing);
-        if let Err(e) = network.broadcast_validator_msg(msg.to_bytes()).await {
-            warn!("Failed to broadcast double-sign evidence: {}", e);
-        } else {
-            info!(
-                "Broadcasted double-sign evidence for validator {} at height {}",
-                evidence.validator, evidence.height
-            );
-        }
-    }
-
-    /// Get voters who accepted a block with their contribution scores
-    fn get_block_voters(&self, _block_hash: &qfc_types::Hash) -> Vec<(qfc_types::Address, u64)> {
-        let validators = self.consensus.get_validators();
-
-        // Get pending votes for this block (accept votes only)
-        // Note: In a full implementation, we'd have access to the votes from consensus
-        // For now, we return all active validators as potential voters
-        validators
-            .iter()
-            .filter(|v| v.is_active())
-            .map(|v| (v.address, v.contribution_score))
-            .collect()
-    }
-
-    /// Calculate total fees from executed transactions
-    fn calculate_total_fees(
-        &self,
-        transactions: &[Transaction],
-        receipts: &[qfc_types::Receipt],
-    ) -> U256 {
-        let mut total = U256::ZERO;
-
-        for (tx, receipt) in transactions.iter().zip(receipts.iter()) {
-            // Fee = gas_used * gas_price
-            let fee = U256::from_u64(receipt.gas_used) * tx.gas_price;
-            total = total + fee;
-        }
-
-        total
     }
 }
 

@@ -364,7 +364,7 @@ impl SyncManager {
         self.update_peer_height(block_number);
 
         // Try to import the block
-        match self.chain.import_block(block.clone()) {
+        match self.chain.import_block(block.clone()).await {
             Ok(_) => {
                 info!("Imported block #{} from network", block_number);
                 // Process any pending blocks that might now be importable
@@ -488,11 +488,11 @@ impl SyncManager {
                                 hex::encode(&block_parent.as_bytes()[..8])
                             );
 
-                            match self_clone.chain.import_block(block.clone()) {
+                            match self_clone.chain.import_block(block.clone()).await {
                                 Ok(_) => {
                                     info!("Imported fetched block #{}", block_number);
                                     // Try to process pending blocks
-                                    self_clone.process_pending_blocks_sync();
+                                    self_clone.process_pending_blocks().await;
                                 }
                                 Err(qfc_chain::ChainError::InvalidParent { .. }) => {
                                     // Need to request even earlier blocks
@@ -538,23 +538,26 @@ impl SyncManager {
         });
     }
 
-    /// Try to import pending blocks (async version)
+    /// Try to import pending blocks. Drains the queue, imports what it can
+    /// (each import serializes on the chain-wide import lock), and requeues
+    /// blocks still missing a parent. The queue lock is never held across an
+    /// await.
     async fn process_pending_blocks(&self) {
-        self.process_pending_blocks_sync();
-    }
+        loop {
+            let drained: Vec<Block> = {
+                let mut pending = self.pending_blocks.write();
+                pending.drain(..).collect()
+            };
+            if drained.is_empty() {
+                return;
+            }
 
-    /// Try to import pending blocks (sync version for use in spawned tasks)
-    fn process_pending_blocks_sync(&self) {
-        let mut imported = true;
+            let mut imported = false;
+            let mut to_retry: VecDeque<Block> = VecDeque::new();
 
-        while imported {
-            imported = false;
-            let mut pending = self.pending_blocks.write();
-            let mut to_retry = VecDeque::new();
-
-            while let Some(block) = pending.pop_front() {
+            for block in drained {
                 let block_number = block.number();
-                match self.chain.import_block(block.clone()) {
+                match self.chain.import_block(block.clone()).await {
                     Ok(_) => {
                         info!("Imported pending block #{}", block_number);
                         imported = true;
@@ -572,7 +575,19 @@ impl SyncManager {
                 }
             }
 
-            *pending = to_retry;
+            let done = to_retry.is_empty();
+            {
+                // Prepend the retries; new arrivals may have queued meanwhile.
+                let mut pending = self.pending_blocks.write();
+                while let Some(block) = to_retry.pop_back() {
+                    pending.push_front(block);
+                }
+            }
+
+            // Nothing imported this pass -> another pass cannot make progress.
+            if !imported || done {
+                return;
+            }
         }
     }
 
@@ -698,6 +713,8 @@ impl SyncManager {
             let current_finalized = consensus.finalized_height();
             if vote.block_height > current_finalized {
                 consensus.set_finalized_height(vote.block_height);
+                // Record (height, hash) on the chain — reorgs never cross it.
+                self.chain.record_finalized(vote.block_height, vote.block_hash);
                 info!("Block #{} finalized!", vote.block_height);
 
                 // Prune old votes
@@ -884,22 +901,34 @@ impl SyncManager {
             return;
         }
 
-        // Check if this is a new epoch
-        let current_epoch = consensus.get_epoch();
-        if announcement.epoch_number <= current_epoch.number {
-            debug!(
-                "Ignoring old epoch announcement: {} (current: {})",
-                announcement.epoch_number, current_epoch.number
-            );
-            return;
+        // VERIFY-OR-IGNORE ONLY (ADR-0012, D11): epochs are a pure function
+        // of wall-clock time and the genesis-anchored seed derivation, so a
+        // received announcement can never change our epoch state. Adopting
+        // (epoch, seed) pairs from a single validator signature let any peer
+        // re-anchor a node's schedule and fork it. We verify the announced
+        // seed against our own derivation purely as a health signal.
+        match consensus.derive_epoch_seed(announcement.epoch_number) {
+            Ok(expected_seed) if expected_seed == announcement.seed => {
+                debug!(
+                    "Epoch {} announcement from {} matches our derivation (ignored)",
+                    announcement.epoch_number, announcement.announcer
+                );
+            }
+            Ok(_) => {
+                warn!(
+                    "Epoch {} announcement from {} carries a seed that does NOT match \
+                     our genesis-anchored derivation — ignoring (possible fork or \
+                     misconfigured peer)",
+                    announcement.epoch_number, announcement.announcer
+                );
+            }
+            Err(_) => {
+                debug!(
+                    "Ignoring epoch {} announcement from {}: our genesis seed is unset",
+                    announcement.epoch_number, announcement.announcer
+                );
+            }
         }
-
-        // Start the new epoch
-        info!(
-            "Received epoch {} announcement from {}",
-            announcement.epoch_number, announcement.announcer
-        );
-        consensus.start_epoch(announcement.epoch_number, announcement.seed);
     }
 
     /// Handle slashing evidence
@@ -1382,21 +1411,53 @@ impl SyncManager {
                 .await
             {
                 Ok(SyncResponse::Blocks(blocks)) => {
+                    let mut hard_failure = false;
                     for block_data in blocks {
                         if let Ok(block) = borsh::from_slice::<Block>(&block_data) {
                             let block_number = block.number();
-                            match self.chain.import_block(block) {
+                            let parent_hash = block.parent_hash();
+                            match self.chain.import_block(block.clone()).await {
                                 Ok(_) => {
                                     info!("Synced block #{}", block_number);
                                 }
                                 Err(qfc_chain::ChainError::BlockAlreadyKnown) => {
                                     debug!("Block #{} already known", block_number);
                                 }
+                                Err(qfc_chain::ChainError::InvalidParent { .. }) => {
+                                    // Fork healing: the peer's branch diverges
+                                    // below this range. Queue the block and walk
+                                    // backwards by hash to the common ancestor;
+                                    // the fork-choice import will reorg once the
+                                    // branch connects. Stop hammering the rest of
+                                    // the batch — it all descends from this block.
+                                    info!(
+                                        "Synced block #{} does not connect; walking back to common ancestor",
+                                        block_number
+                                    );
+                                    {
+                                        let mut pending = self.pending_blocks.write();
+                                        if pending.len() < MAX_PENDING_BLOCKS {
+                                            pending.push_back(block);
+                                        }
+                                    }
+                                    self.request_missing_blocks(parent_hash);
+                                    hard_failure = true;
+                                    break;
+                                }
                                 Err(e) => {
+                                    // Hard failure (validation/execution): the
+                                    // rest of the batch builds on this block, so
+                                    // importing it would fail identically —
+                                    // break instead of hammering.
                                     warn!("Failed to import synced block #{}: {}", block_number, e);
+                                    hard_failure = true;
+                                    break;
                                 }
                             }
                         }
+                    }
+                    if hard_failure {
+                        break;
                     }
                     current = request_end + 1;
                 }
