@@ -1,6 +1,6 @@
 # ADR 0012 — Consolidated consensus-convergence fixes (defects D7–D12)
 
-Status: accepted (Phase A implemented; Phase B = sync-before-produce gate pending)
+Status: accepted (Phase A + Phase B implemented)
 Date: 2026-07-04
 Spec: `docs/FIX-SPEC-convergence.md` (distilled from a 3-lens consolidated review)
 Supersedes the one-defect-at-a-time approach of PRs #126–#129.
@@ -141,12 +141,11 @@ announcement can never change local epoch state).
   the next reorg/restart sync); stale receipts/tx-index entries from
   displaced branches are not garbage-collected.
 
-### 5. Sync-before-produce gate — **Phase B, not in this change**
+### 5. Sync-before-produce gate — **Phase B (implemented)**
 
-Spec §5 (peer-status polling, `may_produce`, `QFC_PRODUCE_WHEN_ALONE`,
-bootnode redial, catch-up peer selection, slot-aligned ticks) lands
-separately. The APIs it needs are in place: `Chain::import_block` /
-`store_produced_block` are async and serialize on the chain import lock.
+See §Phase B below. The APIs it needs were put in place by Phase A:
+`Chain::import_block` / `store_produced_block` are async and serialize on
+the chain import lock.
 
 ### 6. Config hardening
 
@@ -162,6 +161,93 @@ separately. The APIs it needs are in place: `Chain::import_block` /
   recorded chain_id differs from the configured one.
 - Genesis content is unchanged (dev == testnet); the network resets once
   after this lands.
+
+## Phase B — sync-before-produce gate + sync-layer fixes (spec §5)
+
+### Active peer-status tracking
+
+`SyncManager` keeps a per-peer `{head, genesis_hash, last_seen}` map fed by
+**active** `GetStatus` polling: a poll loop ticks every 2 s and polls every
+connected peer that has no status yet (new connection) or whose status is
+older than one slot (5 s). Requests are spawned per-peer with an in-flight
+guard, so a dead peer's 30 s request timeout never stalls polling of the
+others. Entries expire on disconnect (pruned each tick against the live
+peer set); statuses older than 3 slots (15 s) are stale and ignored by
+every consumer. Passive gossip/heartbeat heights deliberately do **not**
+feed the gate — they are unauthenticated and absent exactly when every
+validator is gated (they still feed `highest_peer_block` for observability
+and can still trigger the periodic catch-up, which itself only ever syncs
+from a status-verified peer).
+
+### The gate
+
+`gate_decision` (pure function, `producer.rs`) runs each slot **after** the
+heartbeat send — heartbeats keep flowing while gated; the gate skips only
+the produce step. Decision order (load-bearing, spec §5 pseudocode):
+
+1. a fresh, genesis-matching verified peer head **strictly** above ours →
+   gated (`>` not `>=`, so a simultaneous cold start with all heads 0
+   passes);
+2. within 10 s of producer boot (boot-relative grace) → gated;
+3. zero connected peers → produce **only** with the explicit
+   `produce_when_alone`;
+4. peers connected but no fresh verified status yet → gated (data before
+   liveness; the 2 s poll guarantees this state resolves);
+5. otherwise produce.
+
+When the gate has held a node strictly-behind for more than 2 consecutive
+slots, the producer forces a `sync_with_peer` attempt (spawned, no-op if a
+sync is already running). This escapes the dead zone where lag 1–2 gates
+production but sits below `CATCH_UP_LAG_THRESHOLD` (> 2) and would never
+trigger the periodic catch-up.
+
+### Zero-peer production rule (`QFC_PRODUCE_WHEN_ALONE`)
+
+Explicit `--produce-when-alone[=BOOL]` / `QFC_PRODUCE_WHEN_ALONE=0|1`
+always wins. When unset it defaults to **true only for `--dev` with no
+bootnodes configured** — that covers single-node dev
+(`cargo run -- --dev`, with or without `--no-network`) and the
+release-binary integration tests (`--dev --no-network`), which must keep
+producing blocks with zero peers. Any node with bootnodes configured (every
+testnet/compose node) defaults to **false**; the compose bootstrap node
+(node-1) is the only one that sets it. It is never inferred from runtime
+conditions such as "no peers reachable".
+
+### is_syncing fix
+
+`is_syncing()` was false during forward catch-up (it required pending-queue
+activity, which only the gossip backward-walk produces). Now:
+`catching_up` (an `AtomicBool` held around `sync_with_peer`) OR pending /
+backward-walk activity OR a fresh verified peer head more than
+`CATCH_UP_LAG_THRESHOLD` above our height.
+
+### Bootnode redial
+
+The one-shot dial at startup is backed by a redial loop inside
+`NetworkService`: while the peer set is empty, re-dial every configured
+bootnode and re-trigger the Kademlia bootstrap, with exponential backoff
+(5 s base, 60 s cap) that resets whenever at least one peer is held.
+Startup now **hard-errors** when bootnodes are configured but none parse
+(previously a warning — an isolated node with a gate would sit gated, or
+produce alone, forever).
+
+### Catch-up peer selection
+
+Catch-up syncs from the peer with the highest verified (status-confirmed,
+genesis-matching, fresh) head — never `peers().first()`. A rotation cursor
+advances to the next-best candidate whenever a sync attempt fails (status
+failure, foreign genesis, or a hard failure mid-range) and resets on
+success. With no verified candidate, catch-up waits for the poller rather
+than syncing from an arbitrary peer.
+
+### Producer slot alignment
+
+The producer's boot-phase-locked `tokio::time::interval` is replaced by
+`sleep` until the next wall-clock multiple of `BLOCK_INTERVAL_MS`,
+recomputed every iteration (self-correcting). Leaders now produce at the
+start of their slot, so block timestamps land inside the elected
+slot/epoch instead of up to a full interval late. The per-slot dedup
+(`last_slot`) is kept as a guard against timer jitter.
 
 ## Out of scope (unchanged from spec)
 
