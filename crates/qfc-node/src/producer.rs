@@ -278,7 +278,11 @@ impl BlockProducer {
                         "Slot {}: gated — {} peer(s) connected but no fresh verified status yet",
                         slot, connected_peers
                     );
-                    gated_behind_slots = 0;
+                    // Deliberately NOT resetting gated_behind_slots (review
+                    // fix 16): a peer whose status flaps between fresh and
+                    // stale produces Behind → AwaitingPeerStatus → Behind
+                    // cycles that would otherwise never reach the forced
+                    // catch-up threshold, starving the node forever.
                     continue;
                 }
             }
@@ -360,7 +364,10 @@ impl BlockProducer {
             return Err(anyhow::anyhow!("No transactions"));
         }
 
-        // Drain inference proofs from pool (v2.0)
+        // Drain inference proofs from pool (v2.0). From here until the
+        // block is durably stored, any failure must REQUEUE the drained
+        // proofs (review fix 14) — e.g. a head that moved under a
+        // concurrent import would otherwise silently discard them.
         let inference_proofs = self
             .proof_pool
             .write()
@@ -373,34 +380,46 @@ impl BlockProducer {
 
         // Deterministic shared state transition against the parent state
         // root (same code path import runs — D7). No live-state mutation.
-        let outcome = self.chain.execute_at(
+        let outcome = match self.chain.execute_at(
             parent_block.state_root(),
             block_number,
             timestamp,
             &our_address,
             &transactions,
-        )?;
+        ) {
+            Ok(o) => o,
+            Err(e) => {
+                self.requeue_proofs(&inference_proofs);
+                return Err(e.into());
+            }
+        };
 
         // Seal the block (VRF proved against the block-derived epoch seed).
-        let block = self
-            .consensus
-            .produce_block(
-                &parent_block,
-                transactions.clone(),
-                outcome.receipts.clone(),
-                outcome.state_root,
-                outcome.gas_used,
-                inference_proofs,
-                timestamp,
-            )
-            .map_err(|e| anyhow::anyhow!("Consensus error: {}", e))?;
+        let block = match self.consensus.produce_block(
+            &parent_block,
+            transactions.clone(),
+            outcome.receipts.clone(),
+            outcome.state_root,
+            outcome.gas_used,
+            inference_proofs.clone(),
+            timestamp,
+        ) {
+            Ok(b) => b,
+            Err(e) => {
+                self.requeue_proofs(&inference_proofs);
+                return Err(anyhow::anyhow!("Consensus error: {}", e));
+            }
+        };
 
         let block_hash = blake3_hash(&block.header_bytes());
         let block_number = block.number();
 
         // Store the block: self-validates + re-executes exactly like an
         // importer, under the chain-wide import lock.
-        self.chain.store_produced_block(&block).await?;
+        if let Err(e) = self.chain.store_produced_block(&block).await {
+            self.requeue_proofs(&inference_proofs);
+            return Err(e.into());
+        }
 
         // Node-local task-pool housekeeping (no chain-state writes).
         self.maintain_task_pool();
@@ -414,16 +433,21 @@ impl BlockProducer {
                 debug!("Broadcasted block #{} to network", block_number);
             }
 
-            // Cast and broadcast our own vote for the block we produced
-            if let Ok(vote) = self.consensus.vote(&block, true) {
-                let vote_data = vote.to_bytes();
-                if let Err(e) = network.broadcast_vote(vote_data).await {
-                    warn!("Failed to broadcast vote: {}", e);
-                } else {
-                    debug!("Broadcasted accept vote for block #{}", block_number);
+            // Cast and broadcast our own vote for the block we produced.
+            // try_record_own_vote keeps the one-vote-per-height invariant
+            // (review fix 2a) so incoming votes for this block cannot make
+            // us vote a second time.
+            if self.consensus.try_record_own_vote(block_number, block_hash) {
+                if let Ok(vote) = self.consensus.vote(&block, true) {
+                    let vote_data = vote.to_bytes();
+                    if let Err(e) = network.broadcast_vote(vote_data).await {
+                        warn!("Failed to broadcast vote: {}", e);
+                    } else {
+                        debug!("Broadcasted accept vote for block #{}", block_number);
+                    }
+                    // Add our vote to pending votes
+                    self.consensus.add_vote(vote);
                 }
-                // Add our vote to pending votes
-                self.consensus.add_vote(vote);
             }
         }
 
@@ -439,6 +463,22 @@ impl BlockProducer {
         );
 
         Ok(block_hash)
+    }
+
+    /// Return drained-but-unused inference proofs to the pool (review fix
+    /// 14): a failed seal/store must not silently discard verified proofs.
+    fn requeue_proofs(&self, proofs: &[qfc_types::InferenceProof]) {
+        if proofs.is_empty() {
+            return;
+        }
+        let mut pool = self.proof_pool.write();
+        for proof in proofs {
+            pool.add(proof.clone());
+        }
+        debug!(
+            "Requeued {} inference proof(s) after failed block production",
+            proofs.len()
+        );
     }
 
     /// Node-local task-pool housekeeping (v2.0).

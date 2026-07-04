@@ -411,16 +411,17 @@ impl SyncManager {
             ticker.tick().await;
 
             let our_height = self.chain.block_number();
-            // Trigger on the best height signal we have (verified statuses
-            // preferred; passive gossip can still light the fuse — the sync
-            // itself only ever runs against a status-verified peer).
-            let verified = self
+            // Trigger ONLY on fresh verified (status-confirmed,
+            // genesis-matching) peer heads — never `highest_peer_block`,
+            // which gossip/heartbeats feed and which a single bogus claim
+            // could ratchet to keep this loop spinning forever (review fix
+            // 15). `highest_peer_block` remains observability-only.
+            let highest_peer = self
                 .fresh_verified_peer_heads()
                 .into_iter()
                 .map(|(_, head)| head)
                 .max()
                 .unwrap_or(0);
-            let highest_peer = verified.max(*self.highest_peer_block.read());
             if !Self::should_catch_up(our_height, highest_peer) {
                 continue;
             }
@@ -588,18 +589,27 @@ impl SyncManager {
             hex::encode(&block_hash.as_bytes()[..8])
         );
 
-        // Update highest known peer block
-        self.update_peer_height(block_number);
-
         // Try to import the block
         match self.chain.import_block(block.clone()).await {
             Ok(_) => {
                 info!("Imported block #{} from network", block_number);
+                // Only a VALIDATED height may ratchet highest_peer_block
+                // (review fix 15): pre-validation gossip heights let a bogus
+                // claim drive the catch-up loop forever.
+                self.update_peer_height(block_number);
                 // Process any pending blocks that might now be importable
                 self.process_pending_blocks().await;
 
-                // If we're a validator, cast our vote for this block
-                if self.chain.consensus().is_validator() {
+                // If we're a validator, cast our vote — but ONLY for a block
+                // that became canonical at its height (review fix 3b):
+                // side-branch stores must never attract accept votes, or
+                // finality can wedge on a hash the canonical chain lacks.
+                if self.chain.consensus().is_validator()
+                    && self
+                        .chain
+                        .is_canonical(&block_hash, block_number)
+                        .unwrap_or(false)
+                {
                     self.cast_vote_for_block(&block).await;
                 }
             }
@@ -633,6 +643,13 @@ impl SyncManager {
     async fn cast_vote_for_block(&self, block: &Block) {
         let consensus = self.chain.consensus();
         let block_number = block.number();
+        let block_hash = blake3_hash(&block.header_bytes());
+
+        // Never vote twice at a height / for a block (review fix 2a).
+        if !consensus.try_record_own_vote(block_number, block_hash) {
+            debug!("Already voted at height {}, not voting again", block_number);
+            return;
+        }
 
         // Create an accept vote (we validated the block during import)
         let vote = match consensus.vote(block, true) {
@@ -673,16 +690,15 @@ impl SyncManager {
             requested.insert(missing_parent);
         }
 
-        // Get a peer to request from
-        let peers = self.network.peers();
-        if peers.is_empty() {
-            warn!("No peers available to request blocks from");
+        // Request from the status-verified peer with the highest head
+        // (same rotation machinery as the forward catch-up) — never an
+        // arbitrary HashSet-ordered peer, which could be genesis-foreign or
+        // permanently behind (review fix 6).
+        let Some(peer) = self.best_sync_peer() else {
+            warn!("No status-verified peer available to request blocks from");
             self.requested_hashes.write().remove(&missing_parent);
             return;
-        }
-
-        // Try to request from the first peer
-        let peer = peers[0];
+        };
         let self_clone = self.clone();
 
         info!(
@@ -926,7 +942,7 @@ impl SyncManager {
         let is_accept = vote.decision == VoteDecision::Accept;
         consensus.record_vote(&vote.voter, true);
 
-        // 8. Add vote to pending votes
+        // 8. Add vote to pending votes (dedups by voter address)
         consensus.add_vote(vote.clone());
 
         info!(
@@ -936,8 +952,17 @@ impl SyncManager {
             vote.block_height
         );
 
-        // 9. Check if block has reached finality
-        if consensus.check_finality(&vote.block_hash) {
+        // 9. Check if the block has reached finality — but only for a block
+        // we hold CANONICALLY at that height (review fixes 3c/3d): votes
+        // for unknown or side-branch blocks are stored but must never move
+        // the finalized pointer, or every future reorg wedges on a hash
+        // the canonical chain cannot contain.
+        let canonical = block_exists
+            && self
+                .chain
+                .is_canonical(&vote.block_hash, vote.block_height)
+                .unwrap_or(false);
+        if canonical && consensus.check_finality(&vote.block_hash) {
             let current_finalized = consensus.finalized_height();
             if vote.block_height > current_finalized {
                 consensus.set_finalized_height(vote.block_height);
@@ -951,23 +976,40 @@ impl SyncManager {
             }
         }
 
-        // 10. If we're a validator and haven't voted yet, cast our vote
+        // 10. If we're a validator and haven't voted at this height yet,
+        // cast our vote. Receiving a vote must never unconditionally emit a
+        // new one (review fix 2b) — maybe_cast_vote is a no-op once we have
+        // voted at the height, so vote traffic converges instead of echoing.
         if consensus.is_validator() {
             self.maybe_cast_vote(&vote.block_hash, vote.block_height)
                 .await;
         }
     }
 
-    /// Cast our own vote for a block if we haven't already
+    /// Cast our own vote for a block if we haven't already voted at its
+    /// height and the block is canonical locally (review fixes 2a/3b).
     async fn maybe_cast_vote(&self, block_hash: &Hash, block_height: u64) {
         let consensus = self.chain.consensus();
 
-        // Check if we've already voted for this block
-        // (A more robust implementation would track our own votes)
         let our_address = match consensus.our_address() {
             Some(addr) => addr,
             None => return,
         };
+
+        // Only vote for blocks that are canonical at their height —
+        // side-branch blocks must not attract votes (review fix 3b).
+        if !self
+            .chain
+            .is_canonical(block_hash, block_height)
+            .unwrap_or(false)
+        {
+            debug!(
+                "Not voting: block {} is not canonical at height {}",
+                hex::encode(&block_hash.as_bytes()[..8]),
+                block_height
+            );
+            return;
+        }
 
         // Get the block to validate
         let block = match self.chain.get_block_by_hash(block_hash) {
@@ -986,6 +1028,12 @@ impl SyncManager {
                 return;
             }
         };
+
+        // Never vote twice at a height / for a block (review fix 2a).
+        if !consensus.try_record_own_vote(block_height, *block_hash) {
+            debug!("Already voted at height {}, not voting again", block_height);
+            return;
+        }
 
         // Validate the block and decide our vote
         let accept = consensus.validate_block(&block, &parent).is_ok();
