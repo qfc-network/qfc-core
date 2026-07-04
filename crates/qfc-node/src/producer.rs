@@ -8,6 +8,7 @@
 //! importer. Voter splits and inference-fee settlement were REMOVED from the
 //! block path (they consumed node-local inputs and forked every import).
 
+use crate::sync::SyncManager;
 use parking_lot::RwLock;
 use qfc_ai_coordinator::{ProofPool, TaskPool};
 use qfc_chain::Chain;
@@ -20,8 +21,18 @@ use qfc_types::{
 };
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::{interval, Instant};
+use tokio::time::Instant;
 use tracing::{debug, error, info, warn};
+
+/// Boot-relative grace period before the first block may be produced
+/// (spec §5). Gives libp2p time to form the mesh and the status poller time
+/// to learn peer heads, so a restarting node never races its own peers.
+pub(crate) const PRODUCE_BOOT_GRACE_MS: u64 = 10_000;
+
+/// When the gate has held us back as strictly-behind for more than this many
+/// consecutive slots, force a catch-up attempt even below the catch-up lag
+/// threshold (the lag 1–2 dead zone; spec §5).
+const FORCE_SYNC_AFTER_GATED_SLOTS: u32 = 2;
 
 /// Block producer configuration
 #[derive(Clone, Debug)]
@@ -30,6 +41,9 @@ pub struct ProducerConfig {
     pub max_txs_per_block: usize,
     /// Whether to produce empty blocks
     pub produce_empty_blocks: bool,
+    /// Whether the gate may produce with zero connected peers
+    /// (QFC_PRODUCE_WHEN_ALONE / --produce-when-alone; ADR-0012 §Phase B).
+    pub produce_when_alone: bool,
 }
 
 impl Default for ProducerConfig {
@@ -37,8 +51,69 @@ impl Default for ProducerConfig {
         Self {
             max_txs_per_block: 1000,
             produce_empty_blocks: true, // For dev mode, produce even if no txs
+            produce_when_alone: false,
         }
     }
+}
+
+/// Outcome of the sync-before-produce gate for one slot (spec §5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GateDecision {
+    /// Safe to run leader election / block production this slot.
+    Produce,
+    /// A fresh verified peer head is strictly above ours — sync first.
+    Behind { our: u64, peer: u64 },
+    /// Still inside the boot grace period.
+    BootGrace,
+    /// Zero connected peers and `produce_when_alone` is off.
+    Alone,
+    /// Peers are connected but none has delivered a fresh verified status
+    /// yet — data before liveness (the 2s status poll guarantees progress).
+    AwaitingPeerStatus,
+}
+
+/// The sync-before-produce gate (spec §5 pseudocode, verbatim semantics).
+///
+/// Decision order is load-bearing:
+/// 1. strictly behind a fresh verified peer head → gate (STRICT `>` so a
+///    simultaneous cold start — all heads 0 — passes);
+/// 2. boot grace (10s, boot-relative) → gate;
+/// 3. zero peers → produce only with the explicit `produce_when_alone`;
+/// 4. peers but no fresh verified status yet → gate;
+/// 5. otherwise produce.
+///
+/// `max_fresh_peer_head` must come from ACTIVE GetStatus polling of
+/// genesis-matching peers (never passive gossip/heartbeat heights — those
+/// are unauthenticated and absent exactly when everyone is gated). Pure;
+/// unit-tested with injected clock/peer views.
+pub fn gate_decision(
+    our_height: u64,
+    max_fresh_peer_head: Option<u64>,
+    connected_peers: usize,
+    ms_since_boot: u64,
+    produce_when_alone: bool,
+) -> GateDecision {
+    let max_head = max_fresh_peer_head.unwrap_or(0);
+    if max_head > our_height {
+        return GateDecision::Behind {
+            our: our_height,
+            peer: max_head,
+        };
+    }
+    if ms_since_boot < PRODUCE_BOOT_GRACE_MS {
+        return GateDecision::BootGrace;
+    }
+    if connected_peers == 0 {
+        return if produce_when_alone {
+            GateDecision::Produce
+        } else {
+            GateDecision::Alone
+        };
+    }
+    if max_fresh_peer_head.is_none() {
+        return GateDecision::AwaitingPeerStatus;
+    }
+    GateDecision::Produce
 }
 
 /// Block producer
@@ -53,6 +128,9 @@ pub struct BlockProducer {
     /// v2.0: Shared task pool (housekeeping only — no fee settlement in the
     /// block path)
     task_pool: Arc<RwLock<TaskPool>>,
+    /// Gate input source (verified peer statuses) + forced catch-up target.
+    /// None only when networking is disabled (`--no-network`).
+    sync_manager: Option<Arc<SyncManager>>,
 }
 
 impl BlockProducer {
@@ -74,6 +152,25 @@ impl BlockProducer {
             config,
             proof_pool,
             task_pool,
+            sync_manager: None,
+        }
+    }
+
+    /// Attach the sync manager (gate peer view + forced catch-up).
+    pub fn with_sync_manager(mut self, sync_manager: Arc<SyncManager>) -> Self {
+        self.sync_manager = Some(sync_manager);
+        self
+    }
+
+    /// Gate inputs for the current slot: connected peer count and the
+    /// highest fresh verified (genesis-matching) peer head.
+    fn gate_peer_view(&self) -> (usize, Option<u64>) {
+        match (&self.sync_manager, &self.network) {
+            (Some(sm), _) => sm.gate_peer_view(),
+            // Network without sync manager (not wired in practice): count
+            // peers but treat all statuses as unknown — fail gated, not open.
+            (None, Some(net)) => (net.peer_count(), None),
+            (None, None) => (0, None),
         }
     }
 
@@ -93,13 +190,18 @@ impl BlockProducer {
 
         // Slot length is the chain constant — never a per-node setting
         // (a per-node slot length is a silent consensus fork, spec §6).
-        let mut block_timer = interval(Duration::from_millis(BLOCK_INTERVAL_MS));
+        let boot = Instant::now();
         let mut heartbeat_counter: u64 = 0;
         let heartbeat_interval = 3; // Send heartbeat every 3 slots
         let mut last_slot: u64 = u64::MAX;
+        let mut gated_behind_slots: u32 = 0;
 
         loop {
-            block_timer.tick().await;
+            // Slot-aligned tick (spec §5): sleep until the next wall-clock
+            // multiple of BLOCK_INTERVAL_MS instead of a boot-phase-locked
+            // interval, so the elected leader produces at the START of its
+            // slot and the block timestamp lands inside the elected epoch.
+            sleep_until_next_slot_boundary().await;
 
             // Global wall-clock slot: now_ms / BLOCK_INTERVAL_MS. Every node
             // computes the same slot at the same instant (clocks are
@@ -119,10 +221,66 @@ impl BlockProducer {
             // Advance the observability epoch (wall-clock anchored).
             self.consensus.maybe_advance_epoch();
 
-            // Send periodic heartbeat
+            // Send periodic heartbeat — heartbeats keep flowing while gated
+            // (the gate below skips ONLY the produce step).
             if heartbeat_counter >= heartbeat_interval {
                 heartbeat_counter = 0;
                 self.send_heartbeat().await;
+            }
+
+            // Sync-before-produce gate (spec §5).
+            let (connected_peers, max_fresh_peer_head) = self.gate_peer_view();
+            let decision = gate_decision(
+                self.chain.block_number(),
+                max_fresh_peer_head,
+                connected_peers,
+                boot.elapsed().as_millis() as u64,
+                self.config.produce_when_alone,
+            );
+            match decision {
+                GateDecision::Produce => {
+                    gated_behind_slots = 0;
+                }
+                GateDecision::Behind { our, peer } => {
+                    gated_behind_slots += 1;
+                    info!(
+                        "Slot {}: gated — behind verified peer head ({} < {}), {} gated slot(s)",
+                        slot, our, peer, gated_behind_slots
+                    );
+                    // Dead-zone escape: CATCH_UP_LAG_THRESHOLD only triggers
+                    // the periodic catch-up at lag > 2, but the gate holds at
+                    // lag ≥ 1 — force a sync so a 1–2 block lag can't gate us
+                    // forever.
+                    if gated_behind_slots > FORCE_SYNC_AFTER_GATED_SLOTS {
+                        if let Some(sm) = &self.sync_manager {
+                            sm.spawn_forced_catch_up();
+                        }
+                        gated_behind_slots = 0;
+                    }
+                    continue;
+                }
+                GateDecision::BootGrace => {
+                    debug!("Slot {}: gated — inside boot grace period", slot);
+                    gated_behind_slots = 0;
+                    continue;
+                }
+                GateDecision::Alone => {
+                    info!(
+                        "Slot {}: gated — no connected peers (set QFC_PRODUCE_WHEN_ALONE=1 \
+                         to bootstrap a network from this node)",
+                        slot
+                    );
+                    gated_behind_slots = 0;
+                    continue;
+                }
+                GateDecision::AwaitingPeerStatus => {
+                    info!(
+                        "Slot {}: gated — {} peer(s) connected but no fresh verified status yet",
+                        slot, connected_peers
+                    );
+                    gated_behind_slots = 0;
+                    continue;
+                }
             }
 
             // Check if we should produce
@@ -346,4 +504,110 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64
+}
+
+/// Sleep until the next wall-clock multiple of [`BLOCK_INTERVAL_MS`].
+///
+/// Recomputed from the wall clock every call (self-correcting): however long
+/// the previous produce/heartbeat step took, the next wake lands on a slot
+/// boundary, not on `boot_phase + n * interval` like `tokio::time::interval`
+/// did — that phase lock made late-in-slot booters produce with timestamps
+/// that could cross into the next slot/epoch.
+async fn sleep_until_next_slot_boundary() {
+    let now = now_ms();
+    let next_boundary = (now / BLOCK_INTERVAL_MS + 1) * BLOCK_INTERVAL_MS;
+    tokio::time::sleep(Duration::from_millis(next_boundary.saturating_sub(now))).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{gate_decision, GateDecision, PRODUCE_BOOT_GRACE_MS};
+
+    const AFTER_GRACE: u64 = PRODUCE_BOOT_GRACE_MS; // exactly the boundary is "past grace"
+    const IN_GRACE: u64 = PRODUCE_BOOT_GRACE_MS - 1;
+
+    /// Spec required-test 8a: simultaneous cold start — every node is at
+    /// height 0 and every fresh verified peer status reports head 0. The
+    /// STRICT `>` comparison must let production start once the grace period
+    /// has elapsed (a `>=` here would deadlock the whole network forever).
+    #[test]
+    fn cold_start_all_heads_zero_produces_after_grace() {
+        // Before grace: gated regardless of statuses.
+        assert_eq!(
+            gate_decision(0, Some(0), 2, IN_GRACE, false),
+            GateDecision::BootGrace
+        );
+        // After grace: peers verified at the same height → produce.
+        assert_eq!(
+            gate_decision(0, Some(0), 2, AFTER_GRACE, false),
+            GateDecision::Produce
+        );
+        // Also when we are level with a non-zero network.
+        assert_eq!(
+            gate_decision(7, Some(7), 3, AFTER_GRACE, false),
+            GateDecision::Produce
+        );
+        // And when we are AHEAD of every verified peer.
+        assert_eq!(
+            gate_decision(9, Some(7), 3, AFTER_GRACE, false),
+            GateDecision::Produce
+        );
+    }
+
+    /// Spec required-test 8b: a node strictly behind a fresh verified peer
+    /// head stays gated — even after grace, even by a single block (the
+    /// lag-1 dead zone is escaped by the forced catch-up, not by producing).
+    #[test]
+    fn strictly_behind_node_stays_gated() {
+        assert_eq!(
+            gate_decision(3, Some(5), 2, AFTER_GRACE, false),
+            GateDecision::Behind { our: 3, peer: 5 }
+        );
+        // One block behind is still behind.
+        assert_eq!(
+            gate_decision(4, Some(5), 2, AFTER_GRACE, true),
+            GateDecision::Behind { our: 4, peer: 5 }
+        );
+        // Behind wins over the grace period (checked first).
+        assert_eq!(
+            gate_decision(0, Some(10), 1, IN_GRACE, true),
+            GateDecision::Behind { our: 0, peer: 10 }
+        );
+    }
+
+    /// Spec required-test 8c: a zero-peer node produces only with the
+    /// explicit produce_when_alone opt-in — and even then only after grace.
+    #[test]
+    fn zero_peer_node_produces_only_when_alone_flag_set() {
+        assert_eq!(
+            gate_decision(0, None, 0, AFTER_GRACE, false),
+            GateDecision::Alone
+        );
+        assert_eq!(
+            gate_decision(0, None, 0, AFTER_GRACE, true),
+            GateDecision::Produce
+        );
+        // Grace applies to the alone branch too (spec order: grace first).
+        assert_eq!(
+            gate_decision(0, None, 0, IN_GRACE, true),
+            GateDecision::BootGrace
+        );
+    }
+
+    /// "Peers but no status yet → wait": data before liveness. Connected
+    /// peers whose statuses are missing or stale must gate production; the
+    /// 2s status poll loop guarantees this state resolves.
+    #[test]
+    fn peers_without_fresh_status_gate_production() {
+        assert_eq!(
+            gate_decision(5, None, 2, AFTER_GRACE, false),
+            GateDecision::AwaitingPeerStatus
+        );
+        // produce_when_alone does NOT bypass this branch — it is strictly
+        // for the zero-peer case.
+        assert_eq!(
+            gate_decision(5, None, 2, AFTER_GRACE, true),
+            GateDecision::AwaitingPeerStatus
+        );
+    }
 }

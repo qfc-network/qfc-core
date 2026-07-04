@@ -73,6 +73,20 @@ struct Args {
     #[arg(long, env = "QFC_BOOTNODES", value_delimiter = ',')]
     bootnodes: Vec<String>,
 
+    /// Allow block production with ZERO connected peers (sync-before-produce
+    /// gate, ADR-0012 §Phase B). Set on exactly one node when bootstrapping a
+    /// network (compose: node-1 only). Unset, it defaults to true only for
+    /// --dev with no bootnodes configured (single-node dev / integration
+    /// tests); any multi-node deployment must set it explicitly.
+    #[arg(
+        long,
+        env = "QFC_PRODUCE_WHEN_ALONE",
+        value_parser = parse_lenient_bool,
+        num_args = 0..=1,
+        default_missing_value = "true"
+    )]
+    produce_when_alone: Option<bool>,
+
     /// Enable mining for compute contribution (20% weight in PoC)
     #[arg(long, env = "QFC_MINING_ENABLED")]
     mine: bool,
@@ -174,6 +188,15 @@ struct Args {
     /// hook). 0 = disabled.
     #[arg(long, default_value_t = 600, env = "QFC_AI_COST_REPORT_INTERVAL_SECS")]
     ai_cost_report_interval_secs: u64,
+}
+
+/// Lenient boolean parser for env-style flags (QFC_PRODUCE_WHEN_ALONE=1).
+fn parse_lenient_bool(s: &str) -> std::result::Result<bool, String> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" | "" => Ok(false),
+        other => Err(format!("invalid boolean value: {other:?}")),
+    }
 }
 
 #[tokio::main]
@@ -363,12 +386,27 @@ async fn main() -> Result<()> {
             .parse()
             .unwrap()];
 
-        // Add bootnodes
-        for bootnode in &args.bootnodes {
+        // Add bootnodes. A node whose every configured bootnode fails to
+        // parse can never join the network — with the produce gate that
+        // means it would sit gated (or, worse, produce alone) forever, so
+        // this is a hard startup error, not a warning (ADR-0012 §Phase B).
+        let configured_bootnodes: Vec<&String> = args
+            .bootnodes
+            .iter()
+            .filter(|s| !s.trim().is_empty())
+            .collect();
+        for bootnode in &configured_bootnodes {
             match bootnode.parse() {
                 Ok(addr) => network_config.bootnodes.push(addr),
                 Err(e) => warn!("Invalid bootnode address '{}': {}", bootnode, e),
             }
+        }
+        if !configured_bootnodes.is_empty() && network_config.bootnodes.is_empty() {
+            anyhow::bail!(
+                "all {} configured bootnode address(es) failed to parse — refusing to start \
+                 an isolated node (fix QFC_BOOTNODES / --bootnodes)",
+                configured_bootnodes.len()
+            );
         }
 
         match NetworkService::start(network_config).await {
@@ -409,6 +447,15 @@ async fn main() -> Result<()> {
                 let sync_manager_for_catchup = sync_manager.clone();
                 tokio::spawn(async move {
                     sync_manager_for_catchup.run_catch_up_loop().await;
+                });
+
+                // Active peer-status poll loop (ADR-0012 §Phase B): polls
+                // every connected peer with GetStatus (~2s until fresh),
+                // feeding the sync-before-produce gate and catch-up peer
+                // selection with verified heads.
+                let sync_manager_for_status = sync_manager.clone();
+                tokio::spawn(async move {
+                    sync_manager_for_status.run_status_poll_loop().await;
                 });
 
                 Some((service, sync_manager))
@@ -498,14 +545,30 @@ async fn main() -> Result<()> {
     // ADR-0012).
     let is_validator = consensus.is_validator();
     if is_validator {
+        // Zero-peer production rule (ADR-0012 §Phase B): explicit
+        // --produce-when-alone / QFC_PRODUCE_WHEN_ALONE always wins; unset,
+        // it defaults to true only for --dev with no bootnodes configured
+        // (single-node dev + the release-binary integration tests, which run
+        // --dev --no-network). Testnet/compose nodes have bootnodes, so they
+        // default to false and must opt in exactly one bootstrap node.
+        let has_bootnodes = args.bootnodes.iter().any(|s| !s.trim().is_empty());
+        let produce_when_alone = args
+            .produce_when_alone
+            .unwrap_or(args.dev && !has_bootnodes);
+        info!(
+            "Sync-before-produce gate active (produce_when_alone: {})",
+            produce_when_alone
+        );
+
         let producer_config = ProducerConfig {
             produce_empty_blocks: true, // Always produce empty blocks for testing
+            produce_when_alone,
             ..Default::default()
         };
 
         let network_for_producer = _network_service.clone();
 
-        let producer = BlockProducer::new(
+        let mut producer = BlockProducer::new(
             chain.clone(),
             consensus.clone(),
             mempool.clone(),
@@ -514,6 +577,9 @@ async fn main() -> Result<()> {
             proof_pool.clone(),
             task_pool.clone(),
         );
+        if let Some(ref sync) = _sync_manager {
+            producer = producer.with_sync_manager(sync.clone());
+        }
 
         tokio::spawn(async move {
             producer.start().await;
