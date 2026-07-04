@@ -10,7 +10,7 @@ use qfc_chain::{Chain, ChainConfig, GenesisConfig, GenesisValidator};
 use qfc_consensus::{ConsensusConfig, ConsensusEngine};
 use qfc_crypto::{address_from_public_key, blake3_hash, VrfKeypair};
 use qfc_storage::Database;
-use qfc_types::{Block, Hash, BLOCK_INTERVAL_MS, U256};
+use qfc_types::{Block, Hash, ReceiptStatus, Signature, Transaction, BLOCK_INTERVAL_MS, U256};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -26,9 +26,11 @@ fn keys() -> Vec<VrfKeypair> {
 }
 
 /// A genesis config whose validator set we hold ALL the keys for.
+/// Validator 0's account also gets a balance allocation so tests can send
+/// funded transactions (delegation etc.) from a key we hold.
 fn test_genesis() -> GenesisConfig {
     let keys = keys();
-    let validators = keys
+    let validators: Vec<GenesisValidator> = keys
         .iter()
         .map(|k| {
             let addr = address_from_public_key(&k.public_key());
@@ -40,11 +42,19 @@ fn test_genesis() -> GenesisConfig {
         })
         .collect();
 
+    let mut alloc = HashMap::new();
+    alloc.insert(
+        validators[0].address.clone(),
+        qfc_chain::GenesisAllocation {
+            balance: "1000000000000000000000000".to_string(), // 1M QFC
+        },
+    );
+
     GenesisConfig {
         chain_id: qfc_types::DEFAULT_CHAIN_ID,
         timestamp: 0,
         extra_data: b"convergence-test".to_vec(),
-        alloc: HashMap::new(),
+        alloc,
         validators,
     }
 }
@@ -366,13 +376,13 @@ async fn reorg_refuses_to_cross_finalized() {
     assert_eq!(block_hash(&canonical_1), block_hash(&b1));
 }
 
-/// REQUIRED TEST 5d — reorg depth cap: a fork deeper than MAX_REORG_DEPTH
-/// below the tip is never adopted, however long it grows.
-///
-/// Canonical chain: 65 blocks. Side branch diverging at genesis: 66 blocks.
-/// The winning-length reorg would need to walk 66 > 64 blocks back — refused.
+/// REQUIRED TEST 5d, revised by review fix 5 — a reorg deeper than
+/// MAX_REORG_DEPTH IS adopted when the new chain retains the finalized
+/// (height, hash): here nothing above genesis is finalized, the branches
+/// diverge at genesis, and the honest longer branch must win however deep
+/// the walk is (the old unconditional cap wedged exactly this healing).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn reorg_depth_cap_respected() {
+async fn deep_reorg_adopted_when_finalized_retained() {
     let chain = make_chain();
     let engines = validator_engines(&chain);
     let genesis = chain.head().unwrap().block;
@@ -380,27 +390,68 @@ async fn reorg_depth_cap_respected() {
 
     let canonical_len = qfc_chain::MAX_REORG_DEPTH + 1; // 65
     let mut parent = genesis.clone();
-    let mut canonical_head = Hash::ZERO;
     for i in 0..canonical_len {
         let b = seal_at_slot(&chain, &engines, &parent, base + i);
-        canonical_head = block_hash(&b);
         chain.import_block(b.clone()).await.unwrap();
         parent = b;
     }
     assert_eq!(chain.block_number(), canonical_len);
 
     // Side branch from genesis, one block longer, on disjoint slots.
+    // Adopting it needs a 66-block walk — deeper than the 64 cap.
     let side_base = base + canonical_len + 10;
     let mut parent = genesis;
+    let mut side_head = Hash::ZERO;
     for i in 0..(canonical_len + 1) {
         let b = seal_at_slot(&chain, &engines, &parent, side_base + i);
+        side_head = block_hash(&b);
         chain.import_block(b.clone()).await.unwrap();
         parent = b;
     }
 
-    // Head unchanged: adopting the longer branch would exceed the depth cap.
-    assert_eq!(chain.block_number(), canonical_len);
-    assert_eq!(chain.head().unwrap().hash, canonical_head);
+    // The deep reorg went through: finality (genesis) is retained by the
+    // new chain, so the depth cap does not apply.
+    assert_eq!(chain.block_number(), canonical_len + 1);
+    assert_eq!(chain.head().unwrap().hash, side_head);
+}
+
+/// Review fix 5 counterpart — the cap/finality guard stays HARD for deep
+/// branches that do NOT contain the finalized (height, hash): once a
+/// canonical block above the divergence point is finalized, a longer
+/// branch from genesis is refused at every depth, shallow or deep.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deep_reorg_refused_when_it_abandons_finalized() {
+    let chain = make_chain();
+    let engines = validator_engines(&chain);
+    let genesis = chain.head().unwrap().block;
+    let base = past_slot_base();
+
+    // Canonical: 3 blocks; finalize height 2.
+    let b1 = seal_at_slot(&chain, &engines, &genesis, base);
+    let b2 = seal_at_slot(&chain, &engines, &b1, base + 1);
+    let b3 = seal_at_slot(&chain, &engines, &b2, base + 2);
+    for b in [&b1, &b2, &b3] {
+        chain.import_block(b.clone()).await.unwrap();
+    }
+    chain.record_finalized(2, block_hash(&b2));
+
+    // Side branch from genesis growing far past the depth cap: every reorg
+    // attempt (shallow through deep) must be refused — the branch does not
+    // contain the finalized (2, b2).
+    let deep_len = qfc_chain::MAX_REORG_DEPTH + 6; // 70
+    let side_base = base + deep_len + 10;
+    let mut parent = genesis;
+    for i in 0..deep_len {
+        let b = seal_at_slot(&chain, &engines, &parent, side_base + i);
+        // Valid blocks; stored on the side branch, reorg refused.
+        chain.import_block(b.clone()).await.unwrap();
+        parent = b;
+    }
+
+    assert_eq!(chain.block_number(), 3);
+    assert_eq!(chain.head().unwrap().hash, block_hash(&b3));
+    let canonical_2 = chain.get_block_by_number(2).unwrap().unwrap();
+    assert_eq!(block_hash(&canonical_2), block_hash(&b2));
 }
 
 /// REQUIRED TEST 6 — a failed import leaves the live state root untouched
@@ -509,4 +560,98 @@ async fn store_produced_block_self_validates() {
     chain.store_produced_block(&good).await.unwrap();
     assert_eq!(chain.block_number(), 1);
     assert_eq!(chain.state_root(), good.state_root());
+}
+
+/// Sign a QFC-native transaction with `key` (Ed25519 over the blake3 of the
+/// unsigned bytes, public key included in the signed payload).
+fn signed_tx(key: &VrfKeypair, mut tx: Transaction) -> Transaction {
+    tx.public_key = key.public_key();
+    let hash = blake3_hash(&tx.to_bytes_without_signature());
+    tx.signature = Signature::new(key.prove(hash.as_bytes()).proof);
+    tx
+}
+
+/// Review fix 1 — the undelegation `unlock_at` must be a pure function of
+/// the BLOCK timestamp, never the executing node's wall clock: a block
+/// containing an Undelegate tx produced on chain A must import cleanly on
+/// chain B, and STILL import cleanly on a chain that executes it seconds
+/// later. (With the old `SystemTime::now()` inside the state transition,
+/// any import ≥1s after production derived a different `unlock_at`,
+/// mismatched the state root, and hard-forked the importer away.)
+#[tokio::test]
+async fn undelegate_unlock_time_is_block_deterministic() {
+    let chain_a = make_chain();
+    let chain_b = make_chain();
+    let engines = validator_engines(&chain_a);
+    let genesis = chain_a.head().unwrap().block;
+
+    // Delegator = validator 0 (holds a genesis balance allocation);
+    // delegate to validator 1, then undelegate half — both in one block.
+    let delegator_key = &keys()[0];
+    let validator_1 = address_from_public_key(&keys()[1].public_key());
+    let amount = U256::from_u128(qfc_types::MIN_DELEGATION);
+    let half = amount / U256::from_u64(2);
+    let gas_price = U256::from_u64(qfc_types::MIN_GAS_PRICE);
+
+    let txs = vec![
+        signed_tx(
+            delegator_key,
+            Transaction::delegate(validator_1, amount, 0, gas_price),
+        ),
+        signed_tx(
+            delegator_key,
+            Transaction::undelegate(validator_1, half, 1, gas_price),
+        ),
+    ];
+
+    let slot = past_slot_base();
+    let leader = engines[0].select_producer(slot).expect("leader");
+    let idx = engines
+        .iter()
+        .position(|e| e.our_address() == Some(leader))
+        .unwrap();
+    let timestamp = slot_timestamp(slot);
+
+    let outcome = chain_a
+        .execute_at(genesis.state_root(), 1, timestamp, &leader, &txs)
+        .unwrap();
+    // Both transactions must actually succeed — a failed undelegate would
+    // make the determinism assertion below vacuous.
+    for receipt in &outcome.receipts {
+        assert!(
+            matches!(receipt.status, ReceiptStatus::Success),
+            "tx failed: {:?}",
+            receipt.status
+        );
+    }
+
+    let block = engines[idx]
+        .produce_block(
+            &genesis,
+            txs,
+            outcome.receipts,
+            outcome.state_root,
+            outcome.gas_used,
+            vec![],
+            timestamp,
+        )
+        .unwrap();
+
+    chain_a.import_block(block.clone()).await.unwrap();
+
+    // Chain B imports immediately.
+    chain_b.import_block(block.clone()).await.unwrap();
+    assert_eq!(chain_a.state_root(), chain_b.state_root());
+
+    // A third chain imports the SAME block after a real >1s delay — under
+    // the wall-clock bug its recomputed unlock_at (second resolution)
+    // differed, so the state root mismatched and the import failed.
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let chain_c = make_chain();
+    chain_c
+        .import_block(block)
+        .await
+        .expect("re-import after delay must be byte-identical");
+    assert_eq!(chain_c.state_root(), chain_a.state_root());
+    assert_eq!(chain_c.head().unwrap().hash, chain_a.head().unwrap().hash);
 }

@@ -646,12 +646,11 @@ impl Executor {
         // Reduce delegation amount
         state.sub_delegation_amount(sender, amount)?;
 
-        // Calculate unlock time (current time + 7 days)
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let unlock_at = now + UNSTAKE_DELAY_SECS;
+        // Calculate unlock time from the BLOCK timestamp (set via
+        // `set_block_context` by `Chain::execute_at`), never the local wall
+        // clock: the producer and every importer must derive the exact same
+        // `unlock_at` or their state roots diverge (consensus fork D12).
+        let unlock_at = self.block_timestamp / 1000 + UNSTAKE_DELAY_SECS;
 
         // Store undelegation record — funds are locked until unlock_at
         let undelegation = qfc_types::Undelegation::new(*sender, validator, amount, unlock_at);

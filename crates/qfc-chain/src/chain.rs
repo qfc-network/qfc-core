@@ -389,7 +389,7 @@ impl Chain {
     }
 
     /// Whether `hash` is the canonical block at `number`.
-    fn is_canonical(&self, hash: &Hash, number: u64) -> Result<bool> {
+    pub fn is_canonical(&self, hash: &Hash, number: u64) -> Result<bool> {
         match self.get_block_by_number(number)? {
             Some(b) => Ok(blake3_hash(&b.header_bytes()) == *hash),
             None => Ok(false),
@@ -505,15 +505,24 @@ impl Chain {
     ) -> Result<ExecutionOutcome> {
         let scratch = StateDB::with_root(self.db.clone(), parent_state_root);
 
+        // Per-execution executor with the block context set: the EVM's
+        // TIMESTAMP/NUMBER opcodes and every timestamp-derived transition
+        // (undelegation `unlock_at`) see the block's own values instead of
+        // zeros or the local wall clock. A local instance keeps this method
+        // `&self` and race-free against concurrent executions.
+        let mut executor = Executor::new(self.config.chain_id);
+        executor.set_block_context(
+            block_number,
+            timestamp_ms,
+            qfc_types::DEFAULT_BLOCK_GAS_LIMIT,
+        );
+
         // 1. Mature undelegations — maturity clock is the BLOCK timestamp,
         //    never the local wall clock (D12).
-        self.executor
-            .process_mature_undelegations(&scratch, timestamp_ms / 1000);
+        executor.process_mature_undelegations(&scratch, timestamp_ms / 1000);
 
         // 2. Execute transactions.
-        let (receipts, gas_used) =
-            self.executor
-                .execute_transactions(transactions, &scratch, producer);
+        let (receipts, gas_used) = executor.execute_transactions(transactions, &scratch, producer);
 
         // 3. Deterministic rewards — pure function of the block contents.
         let total_fees = Self::total_fees(transactions, &receipts);
@@ -719,8 +728,10 @@ impl Chain {
                 }
                 Err(e) => {
                     // The block itself is valid and stored on its branch; a
-                    // refused reorg (finality guard, depth cap, missing
-                    // ancestor) keeps the current head.
+                    // refused reorg (finality guard, missing ancestor, failed
+                    // branch re-execution) keeps the current head — accurate
+                    // now that the canonical rewrite is a single atomic batch
+                    // performed only after the whole branch re-executed.
                     warn!(
                         "Reorg to block {} at height {} refused: {}",
                         block_hash,
@@ -745,21 +756,29 @@ impl Chain {
     /// Reorganize the canonical chain onto the branch ending at `tip`.
     ///
     /// Walks parents (all by hash) to the first canonical ancestor, refuses
-    /// to cross the finalized (height, hash) or exceed [`MAX_REORG_DEPTH`],
-    /// then re-executes the new branch from the ancestor's state root and
-    /// rewrites the canonical index block by block.
+    /// any reorg whose resulting chain would not contain the finalized
+    /// (height, hash), re-executes the ENTIRE new branch on scratch state,
+    /// and only then rewrites the canonical index + head metadata in a
+    /// single atomic batch — an `Err` anywhere leaves the old canonical
+    /// chain fully intact.
+    ///
+    /// Depth policy (review fix 5): reorgs deeper than [`MAX_REORG_DEPTH`]
+    /// are permitted — logged at WARN — as long as the new chain retains
+    /// the finalized (height, hash); the cap remains a hard limit for
+    /// branches that do NOT (those are refused at any depth, since with
+    /// review fix 3 finality only ever advances on the canonical chain and
+    /// an honest majority branch therefore always qualifies).
     fn reorg_to(&self, tip_hash: Hash, tip: &Block) -> Result<()> {
         let old_head = self
             .head
             .read()
             .clone()
             .ok_or(ChainError::GenesisNotFound)?;
-        let finalized_height = self
-            .consensus
-            .finalized_height()
-            .max(self.finalized.read().0);
+        let (recorded_fin_height, recorded_fin_hash) = *self.finalized.read();
+        let finalized_height = self.consensus.finalized_height().max(recorded_fin_height);
 
-        // Collect the non-canonical branch, tip first.
+        // Collect the non-canonical branch, tip first. (No depth abort here:
+        // the depth decision needs the finalized-containment answer below.)
         let mut branch: Vec<(Hash, Block)> = Vec::new();
         let mut cursor_hash = tip_hash;
         let mut cursor = tip.clone();
@@ -768,11 +787,6 @@ impl Chain {
                 break; // `cursor` is the common ancestor
             }
             branch.push((cursor_hash, cursor.clone()));
-            if branch.len() as u64 > MAX_REORG_DEPTH {
-                return Err(ChainError::InvalidBlock(format!(
-                    "reorg depth exceeds cap {MAX_REORG_DEPTH}"
-                )));
-            }
             let parent_hash = cursor.parent_hash();
             cursor =
                 self.get_block_by_hash(&parent_hash)?
@@ -784,32 +798,42 @@ impl Chain {
         }
         let ancestor = cursor;
 
-        // Never reorg across finality.
-        if ancestor.number() < finalized_height {
+        // Does the post-reorg canonical chain still contain the finalized
+        // (height, hash)? Either the divergence point is at/above it (the
+        // shared prefix keeps it — the finalized block is canonical, review
+        // fix 3c) or the new branch itself carries that exact block at that
+        // exact height (walk the NEW branch for the finalized hash, review
+        // fix 3a).
+        let retains_finalized = ancestor.number() >= finalized_height
+            || (recorded_fin_height == finalized_height
+                && branch.iter().any(|(hash, block)| {
+                    block.number() == finalized_height && *hash == recorded_fin_hash
+                }));
+
+        if !retains_finalized {
             return Err(ChainError::InvalidBlock(format!(
-                "reorg would cross finalized height {finalized_height} (ancestor at {})",
+                "reorg would abandon finalized height {finalized_height} (ancestor at {}, \
+                 new branch does not contain the finalized hash)",
                 ancestor.number()
             )));
         }
 
-        // Drop the old branch's canonical hash-index entries (its blocks stay
-        // available in the hash-keyed branch store).
-        let mut cleanup = WriteBatch::new();
-        for number in (ancestor.number() + 1)..=old_head.number() {
-            if let Some(old) = self.get_block_by_number(number)? {
-                let old_hash = blake3_hash(&old.header_bytes());
-                cleanup.delete(cf::BLOCK_HASH_INDEX, old_hash.as_bytes().to_vec());
-            }
-        }
-        if !cleanup.is_empty() {
-            self.db.write_batch_sync(cleanup)?;
+        if branch.len() as u64 > MAX_REORG_DEPTH {
+            warn!(
+                "Deep reorg: adopting a branch {} blocks deep (cap {} waived — the new \
+                 chain retains the finalized height {})",
+                branch.len(),
+                MAX_REORG_DEPTH,
+                finalized_height
+            );
         }
 
-        // Re-execute the new branch in order from the ancestor's state and
-        // commit each block canonically. Roots were already verified when the
-        // branch blocks were first imported; this regenerates receipts and
-        // guards against storage rot.
+        // Phase 1 — re-execute the ENTIRE new branch on scratch state first.
+        // Roots were already verified when the branch blocks were imported;
+        // this regenerates receipts and guards against storage rot. Nothing
+        // canonical is written until every block has succeeded.
         let mut parent_root = ancestor.state_root();
+        let mut executed: Vec<(&Hash, &Block, ExecutionOutcome)> = Vec::new();
         for (hash, block) in branch.iter().rev() {
             let outcome = self.execute_block(block, parent_root)?;
             if outcome.state_root != block.state_root() {
@@ -817,8 +841,44 @@ impl Chain {
                     "state root mismatch re-executing branch block {hash}"
                 )));
             }
-            self.commit_canonical(block, &outcome.receipts, &outcome.state_root)?;
             parent_root = outcome.state_root;
+            executed.push((hash, block, outcome));
+        }
+
+        // Phase 2 — single atomic batch: drop the old branch's canonical
+        // hash-index entries (its blocks stay available in the hash-keyed
+        // branch store), write every new branch block canonically, and
+        // repoint the head metadata. RocksDB applies the batch atomically,
+        // so a crash or error can never leave a half-rewritten index.
+        let mut batch = WriteBatch::new();
+        for number in (ancestor.number() + 1)..=old_head.number() {
+            if let Some(old) = self.get_block_by_number(number)? {
+                let old_hash = blake3_hash(&old.header_bytes());
+                batch.delete(cf::BLOCK_HASH_INDEX, old_hash.as_bytes().to_vec());
+            }
+        }
+        for (_, block, outcome) in &executed {
+            Self::append_block_to_batch(&mut batch, block);
+            Self::append_receipts_and_head_to_batch(
+                &mut batch,
+                block,
+                &outcome.receipts,
+                &outcome.state_root,
+            );
+        }
+        self.db.write_batch_sync(batch)?;
+
+        // Durable commit succeeded: adopt the new tip in memory and run the
+        // per-block consensus hooks.
+        let tip_root = executed
+            .last()
+            .map(|(_, _, o)| o.state_root)
+            .unwrap_or_else(|| ancestor.state_root());
+        self.state.set_root(tip_root);
+        *self.head.write() = Some(SealedBlock::new(tip_hash, tip.clone()));
+        for (_, block, _) in &executed {
+            self.consensus.record_block_produced(&block.producer());
+            let _ = self.maybe_create_checkpoint(block.number());
         }
 
         Ok(())
@@ -851,7 +911,22 @@ impl Chain {
     }
 
     /// Record a finalized (height, hash). Reorgs never cross it.
+    ///
+    /// Only records when `hash` is canonical locally at `height` (review
+    /// fix 3c): finalizing a side-branch or unknown block would wedge every
+    /// future reorg — the finality guard would then demand a hash the
+    /// canonical chain can never contain.
     pub fn record_finalized(&self, height: u64, hash: Hash) {
+        match self.is_canonical(&hash, height) {
+            Ok(true) => {}
+            _ => {
+                debug!(
+                    "Ignoring finalization of non-canonical block {} at height {}",
+                    hash, height
+                );
+                return;
+            }
+        }
         let mut fin = self.finalized.write();
         if height > fin.0 {
             *fin = (height, hash);
@@ -1036,8 +1111,18 @@ impl Chain {
         self.consensus.get_validators()
     }
 
-    /// Get current epoch
+    /// Get current epoch.
+    ///
+    /// Advances the tracked epoch to the wall-clock one first (guarded on
+    /// the genesis seed being anchored): non-validator/full nodes run no
+    /// producer or miner loop, so without this qfc_getEpoch, task
+    /// submission and synthetic-task generation were stuck on the boot
+    /// epoch forever (review fix 10). Epochs are a pure function of
+    /// wall-clock time; validation never reads this state.
     pub fn get_epoch(&self) -> Epoch {
+        if self.consensus.has_genesis_seed() {
+            self.consensus.maybe_advance_epoch();
+        }
         self.consensus.get_epoch()
     }
 
@@ -1126,16 +1211,20 @@ impl Chain {
         let block_number = self.block_number();
         let block_timestamp = self.head().map(|b| b.block.timestamp()).unwrap_or(0);
 
-        // Take a snapshot so we can revert any state changes
-        let snapshot = self.state.snapshot();
+        // Simulate on a SCRATCH state at the current root — never
+        // snapshot/revert the shared live instance, which raced concurrent
+        // imports adopting a new root between the snapshot and the revert
+        // (review fix 9). The scratch is dropped without commit; nothing it
+        // writes is ever referenced.
+        let scratch = StateDB::with_root(self.db.clone(), self.state_root());
 
         // Give sender enough balance for gas (simulation only)
         let gas_cost = U256::from_u64(gas) * U256::from_u64(1_000_000_000);
         let total_needed = gas_cost + value;
-        let _ = self.state.add_balance(&sender, total_needed);
+        let _ = scratch.add_balance(&sender, total_needed);
 
         let evm_executor = qfc_executor::EvmExecutor::new(
-            &self.state,
+            &scratch,
             self.config.chain_id,
             block_number,
             block_timestamp,
@@ -1155,9 +1244,6 @@ impl Chain {
             // Contract creation
             evm_executor.create(&sender, data, value, gas)
         };
-
-        // Revert state changes
-        let _ = self.state.revert(snapshot);
 
         match result {
             Ok(evm_result) => {
