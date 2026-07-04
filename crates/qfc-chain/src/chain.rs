@@ -9,11 +9,27 @@ use qfc_executor::Executor;
 use qfc_state::StateDB;
 use qfc_storage::{cf, encode_block_number, Database, WriteBatch};
 use qfc_types::{
-    Address, Block, BlockBody, BlockHeader, Epoch, Hash, Receipt, SealedBlock, Transaction,
-    ValidatorNode, U256,
+    block_reward_for_year, Address, Block, BlockBody, BlockHeader, Epoch, Hash, Receipt,
+    SealedBlock, Transaction, ValidatorNode, BLOCK_INTERVAL_MS, FEE_PRODUCER_PERCENT,
+    FEE_TREASURY_PERCENT, U256,
 };
 use std::sync::Arc;
 use tracing::{debug, info, warn};
+
+/// Maximum reorg depth: a fork whose common ancestor is deeper than this
+/// below the new tip is never adopted (spec §4 of ADR-0012).
+pub const MAX_REORG_DEPTH: u64 = 64;
+
+/// The result of executing a block body against its parent state.
+#[derive(Clone, Debug)]
+pub struct ExecutionOutcome {
+    /// Post-execution state root
+    pub state_root: Hash,
+    /// Receipts for the executed transactions
+    pub receipts: Vec<Receipt>,
+    /// Total gas used
+    pub gas_used: u64,
+}
 
 /// Chain configuration
 #[derive(Clone, Debug)]
@@ -49,6 +65,15 @@ pub struct Chain {
     head: RwLock<Option<SealedBlock>>,
     /// Genesis hash
     genesis_hash: RwLock<Option<Hash>>,
+    /// Serializes ALL canonical-chain mutations: gossip imports, catch-up
+    /// imports, backward-walk imports, pending rescans AND
+    /// `store_produced_block`. Kills the shared-StateDB import races (D10).
+    /// tokio Mutex so sync paths (Phase B gate, catch-up loop) can hold it
+    /// across awaits.
+    import_lock: tokio::sync::Mutex<()>,
+    /// Last finalized (height, hash). Reorgs never cross it. Starts at
+    /// (0, genesis) until finality votes land.
+    finalized: RwLock<(u64, Hash)>,
 }
 
 impl Chain {
@@ -65,6 +90,8 @@ impl Chain {
             config,
             head: RwLock::new(None),
             genesis_hash: RwLock::new(None),
+            import_lock: tokio::sync::Mutex::new(()),
+            finalized: RwLock::new((0, Hash::ZERO)),
         };
 
         // Initialize genesis if needed
@@ -75,6 +102,21 @@ impl Chain {
 
     /// Initialize genesis block
     fn init_genesis(&self) -> Result<()> {
+        // Refuse to open a database created for a different chain (§6):
+        // a chain_id mismatch silently forks execution (EVM chain id,
+        // signature domains), so it must be a hard startup error.
+        if let Some(stored) = self.db.get(cf::METADATA, qfc_storage::meta::CHAIN_ID)? {
+            if stored.len() == 8 {
+                let stored = u64::from_le_bytes(stored.try_into().unwrap());
+                if stored != self.config.chain_id {
+                    return Err(ChainError::ChainIdMismatch {
+                        stored,
+                        configured: self.config.chain_id,
+                    });
+                }
+            }
+        }
+
         // Check if genesis already exists
         if let Some(genesis_hash) = self.db.get(cf::METADATA, qfc_storage::meta::GENESIS_HASH)? {
             let hash = Hash::from_slice(&genesis_hash).ok_or_else(|| {
@@ -82,6 +124,13 @@ impl Chain {
             })?;
 
             *self.genesis_hash.write() = Some(hash);
+            *self.finalized.write() = (0, hash);
+
+            // Anchor the deterministic epoch-seed derivation BEFORE anything
+            // can run a producer/miner/sync task (D11: genesis_seed race).
+            let mut seed = [0u8; 32];
+            seed.copy_from_slice(hash.as_bytes());
+            self.consensus.set_genesis_seed(seed);
 
             // Load head block
             if let Some(head_bytes) = self
@@ -169,7 +218,14 @@ impl Chain {
         self.db.write_batch_sync(batch)?;
 
         *self.genesis_hash.write() = Some(hash);
+        *self.finalized.write() = (0, hash);
         *self.head.write() = Some(SealedBlock::new(hash, genesis));
+
+        // Anchor the deterministic epoch-seed derivation (D11) — set exactly
+        // once, before any producer/miner/sync task can observe the engine.
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(hash.as_bytes());
+        self.consensus.set_genesis_seed(seed);
 
         // Register genesis validators with consensus engine
         self.register_genesis_validators();
@@ -308,9 +364,17 @@ impl Chain {
         }))
     }
 
-    /// Get a block by hash
+    /// Get a block by hash. Finds canonical AND side-branch blocks — the
+    /// hash-keyed store holds every block ever imported or produced.
     pub fn get_block_by_hash(&self, hash: &Hash) -> Result<Option<Block>> {
-        // Look up block number from hash index
+        if let Some(bytes) = self.db.get(cf::BLOCKS_BY_HASH, hash.as_bytes())? {
+            let block: Block =
+                borsh::from_slice(&bytes).map_err(|e| ChainError::Storage(e.to_string()))?;
+            return Ok(Some(block));
+        }
+
+        // Legacy fallback (databases written before the hash-keyed store):
+        // resolve through the canonical number index.
         let number_bytes = match self.db.get(cf::BLOCK_HASH_INDEX, hash.as_bytes())? {
             Some(b) => b,
             None => return Ok(None),
@@ -322,6 +386,14 @@ impl Chain {
 
         let number = u64::from_be_bytes(number_bytes.try_into().unwrap());
         self.get_block_by_number(number)
+    }
+
+    /// Whether `hash` is the canonical block at `number`.
+    fn is_canonical(&self, hash: &Hash, number: u64) -> Result<bool> {
+        match self.get_block_by_number(number)? {
+            Some(b) => Ok(blake3_hash(&b.header_bytes()) == *hash),
+            None => Ok(false),
+        }
     }
 
     /// Get a transaction by hash
@@ -411,15 +483,139 @@ impl Chain {
         Ok(Some((receipt, block_hash, block_height)))
     }
 
-    /// Import a block
-    pub fn import_block(&self, block: Block) -> Result<Hash> {
+    // ============ Shared deterministic state transition (spec §1) ============
+
+    /// Execute a block body against an explicit parent state root, on a
+    /// SCRATCH state instance — the live head state is never touched, so a
+    /// failed import can never poison it (D10). This is THE single state
+    /// transition, used byte-identically by block production and block
+    /// import (D7): mature undelegations (block-timestamp clock), then
+    /// transactions, then the deterministic reward application.
+    ///
+    /// Note: committing the scratch trie writes content-addressed trie nodes
+    /// to storage even when the resulting root is later rejected; unreferenced
+    /// nodes are harmless garbage (pruning collects them).
+    pub fn execute_at(
+        &self,
+        parent_state_root: Hash,
+        block_number: u64,
+        timestamp_ms: u64,
+        producer: &Address,
+        transactions: &[Transaction],
+    ) -> Result<ExecutionOutcome> {
+        let scratch = StateDB::with_root(self.db.clone(), parent_state_root);
+
+        // 1. Mature undelegations — maturity clock is the BLOCK timestamp,
+        //    never the local wall clock (D12).
+        self.executor
+            .process_mature_undelegations(&scratch, timestamp_ms / 1000);
+
+        // 2. Execute transactions.
+        let (receipts, gas_used) =
+            self.executor
+                .execute_transactions(transactions, &scratch, producer);
+
+        // 3. Deterministic rewards — pure function of the block contents.
+        let total_fees = Self::total_fees(transactions, &receipts);
+        Self::apply_block_rewards(&scratch, block_number, producer, total_fees)?;
+
+        let state_root = scratch.commit()?;
+        Ok(ExecutionOutcome {
+            state_root,
+            receipts,
+            gas_used,
+        })
+    }
+
+    /// Execute `block` against `parent_state_root` (see [`Self::execute_at`]).
+    pub fn execute_block(&self, block: &Block, parent_state_root: Hash) -> Result<ExecutionOutcome> {
+        self.execute_at(
+            parent_state_root,
+            block.number(),
+            block.timestamp(),
+            &block.producer(),
+            &block.transactions,
+        )
+    }
+
+    /// Total transaction fees: Σ gas_used × gas_price.
+    fn total_fees(transactions: &[Transaction], receipts: &[Receipt]) -> U256 {
+        let mut total = U256::ZERO;
+        for (tx, receipt) in transactions.iter().zip(receipts.iter()) {
+            total = total + U256::from_u64(receipt.gas_used) * tx.gas_price;
+        }
+        total
+    }
+
+    /// Apply block rewards deterministically (spec §1):
+    /// - producer: full year-halved block reward + FEE_PRODUCER_PERCENT of fees
+    /// - treasury: FEE_TREASURY_PERCENT of fees
+    /// - the remaining fee share is burned (senders already paid; simply not
+    ///   re-credited)
+    ///
+    /// Deliberately REMOVED from the block path (they were node-local and
+    /// therefore forked every import; see ADR-0012):
+    /// - voter split (blocks carry no votes; "all locally-active validators"
+    ///   is not deterministic) — restore when votes are in-block
+    /// - inference fee settlement (TaskPool is node-local) — moves on-chain
+    ///   later; RPC/TaskPool behavior is otherwise unchanged
+    /// - dynamic network-state multipliers (no production setter exists);
+    ///   NetworkState::Normal is hard-coded by using none at all
+    fn apply_block_rewards(
+        state: &StateDB,
+        block_number: u64,
+        producer: &Address,
+        total_fees: U256,
+    ) -> Result<()> {
+        // Halving year from the REAL block interval (§6 — the old math used
+        // a stale 3333 ms constant).
+        let blocks_per_year = 365 * 24 * 60 * 60 * 1000 / BLOCK_INTERVAL_MS;
+        let year = block_number / blocks_per_year;
+        let block_reward = block_reward_for_year(year);
+
+        let producer_fee_share =
+            total_fees * U256::from_u64(FEE_PRODUCER_PERCENT) / U256::from_u64(100);
+        state.add_balance(producer, block_reward + producer_fee_share)?;
+
+        let treasury_fee = total_fees * U256::from_u64(FEE_TREASURY_PERCENT) / U256::from_u64(100);
+        if !treasury_fee.is_zero() {
+            let treasury_addr = Address::new(qfc_types::TREASURY_ADDRESS_BYTES);
+            state.add_balance(&treasury_addr, treasury_fee)?;
+        }
+
+        Ok(())
+    }
+
+    // ============ Import + fork choice (spec §4) ============
+
+    /// Import a block (gossip, catch-up, backward-walk, pending rescans).
+    ///
+    /// All imports and `store_produced_block` serialize through one lock, so
+    /// concurrent paths can never interleave commits (D10).
+    pub async fn import_block(&self, block: Block) -> Result<Hash> {
+        let _guard = self.import_lock.lock().await;
+        self.import_block_locked(block)
+    }
+
+    /// Blocking variant of [`Self::import_block`] for non-async contexts
+    /// (tests, tools). Panics if called from within an async runtime.
+    pub fn import_block_blocking(&self, block: Block) -> Result<Hash> {
+        let _guard = self.import_lock.blocking_lock();
+        self.import_block_locked(block)
+    }
+
+    fn import_block_locked(&self, block: Block) -> Result<Hash> {
         let block_hash = blake3_hash(&block.header_bytes());
 
-        // Check if block already exists
+        // Check if block already exists (canonical or side branch)
         if self
             .db
-            .get(cf::BLOCK_HASH_INDEX, block_hash.as_bytes())?
+            .get(cf::BLOCKS_BY_HASH, block_hash.as_bytes())?
             .is_some()
+            || self
+                .db
+                .get(cf::BLOCK_HASH_INDEX, block_hash.as_bytes())?
+                .is_some()
         {
             return Err(ChainError::BlockAlreadyKnown);
         }
@@ -441,7 +637,7 @@ impl Chain {
         // Cache block for future double-sign detection
         self.consensus.cache_block(&block);
 
-        // Get parent block
+        // Get parent block (canonical or side branch)
         let parent = self
             .get_block_by_hash(&block.parent_hash())?
             .ok_or_else(|| ChainError::InvalidParent {
@@ -449,28 +645,8 @@ impl Chain {
                 actual: block.parent_hash().to_string(),
             })?;
 
-        // Validate block
+        // Validate block (self-contained: schedule, VRF, timestamps, roots)
         self.consensus.validate_block(&block, &parent)?;
-
-        // Process mature undelegations before executing transactions
-        self.executor.process_mature_undelegations(&self.state);
-
-        // Execute transactions
-        let producer = block.producer();
-        let (receipts, gas_used) =
-            self.executor
-                .execute_transactions(&block.transactions, &self.state, &producer);
-
-        // Verify state root
-        let state_root = self.state.commit()?;
-        if state_root != block.state_root() {
-            return Err(ChainError::InvalidBlock("State root mismatch".to_string()));
-        }
-
-        // Verify gas used
-        if gas_used != block.gas_used() {
-            return Err(ChainError::InvalidBlock("Gas used mismatch".to_string()));
-        }
 
         // Verify inference proofs root (v2.0)
         if block.header.version >= 2 || !block.inference_proofs.is_empty() {
@@ -487,27 +663,196 @@ impl Chain {
             }
         }
 
-        // Apply inference scores from block proofs (v2.0 on-chain state)
+        // Execute against the PARENT's state root on a scratch state — the
+        // live head state is untouched until the block is accepted (D10).
+        let outcome = self.execute_block(&block, parent.state_root())?;
+        if outcome.state_root != block.state_root() {
+            return Err(ChainError::InvalidBlock("State root mismatch".to_string()));
+        }
+        if outcome.gas_used != block.gas_used() {
+            return Err(ChainError::InvalidBlock("Gas used mismatch".to_string()));
+        }
+
+        // Apply inference scores from block proofs (observability scoring)
         for proof in &block.inference_proofs {
             self.consensus
                 .update_inference_score(&proof.validator, proof.flops_estimated, 1);
         }
 
-        // Commit block, receipts, and head metadata in a single atomic batch
-        self.commit_block(&block, &receipts, &state_root)?;
+        // Fork choice: canonical = highest number, tie-break lowest hash.
+        let head = self
+            .head
+            .read()
+            .clone()
+            .ok_or_else(|| ChainError::GenesisNotFound)?;
+
+        if block.parent_hash() == head.hash {
+            // Fast path: extends the canonical head.
+            self.commit_canonical(&block, &outcome.receipts, &outcome.state_root)?;
+            info!("Imported block {} at height {}", block_hash, block.number());
+            return Ok(block_hash);
+        }
+
+        // Side branch: persist by hash only (branch store), then decide.
+        self.db.put(
+            cf::BLOCKS_BY_HASH,
+            block_hash.as_bytes(),
+            &borsh::to_vec(&block).map_err(|e| ChainError::Storage(e.to_string()))?,
+        )?;
+
+        let better = block.number() > head.number()
+            || (block.number() == head.number() && block_hash < head.hash);
+        if better {
+            match self.reorg_to(block_hash, &block) {
+                Ok(()) => {
+                    info!(
+                        "Reorged to block {} at height {} (old head {} at {})",
+                        block_hash,
+                        block.number(),
+                        head.hash,
+                        head.number()
+                    );
+                }
+                Err(e) => {
+                    // The block itself is valid and stored on its branch; a
+                    // refused reorg (finality guard, depth cap, missing
+                    // ancestor) keeps the current head.
+                    warn!(
+                        "Reorg to block {} at height {} refused: {}",
+                        block_hash,
+                        block.number(),
+                        e
+                    );
+                }
+            }
+        } else {
+            debug!(
+                "Stored side-branch block {} at height {} (head {} at {})",
+                block_hash,
+                block.number(),
+                head.hash,
+                head.number()
+            );
+        }
+
+        Ok(block_hash)
+    }
+
+    /// Reorganize the canonical chain onto the branch ending at `tip`.
+    ///
+    /// Walks parents (all by hash) to the first canonical ancestor, refuses
+    /// to cross the finalized (height, hash) or exceed [`MAX_REORG_DEPTH`],
+    /// then re-executes the new branch from the ancestor's state root and
+    /// rewrites the canonical index block by block.
+    fn reorg_to(&self, tip_hash: Hash, tip: &Block) -> Result<()> {
+        let old_head = self
+            .head
+            .read()
+            .clone()
+            .ok_or_else(|| ChainError::GenesisNotFound)?;
+        let finalized_height = self
+            .consensus
+            .finalized_height()
+            .max(self.finalized.read().0);
+
+        // Collect the non-canonical branch, tip first.
+        let mut branch: Vec<(Hash, Block)> = Vec::new();
+        let mut cursor_hash = tip_hash;
+        let mut cursor = tip.clone();
+        loop {
+            if self.is_canonical(&cursor_hash, cursor.number())? {
+                break; // `cursor` is the common ancestor
+            }
+            branch.push((cursor_hash, cursor.clone()));
+            if branch.len() as u64 > MAX_REORG_DEPTH {
+                return Err(ChainError::InvalidBlock(format!(
+                    "reorg depth exceeds cap {MAX_REORG_DEPTH}"
+                )));
+            }
+            let parent_hash = cursor.parent_hash();
+            cursor = self
+                .get_block_by_hash(&parent_hash)?
+                .ok_or_else(|| ChainError::InvalidParent {
+                    expected: "existing branch ancestor".to_string(),
+                    actual: parent_hash.to_string(),
+                })?;
+            cursor_hash = parent_hash;
+        }
+        let ancestor = cursor;
+
+        // Never reorg across finality.
+        if ancestor.number() < finalized_height {
+            return Err(ChainError::InvalidBlock(format!(
+                "reorg would cross finalized height {finalized_height} (ancestor at {})",
+                ancestor.number()
+            )));
+        }
+
+        // Drop the old branch's canonical hash-index entries (its blocks stay
+        // available in the hash-keyed branch store).
+        let mut cleanup = WriteBatch::new();
+        for number in (ancestor.number() + 1)..=old_head.number() {
+            if let Some(old) = self.get_block_by_number(number)? {
+                let old_hash = blake3_hash(&old.header_bytes());
+                cleanup.delete(cf::BLOCK_HASH_INDEX, old_hash.as_bytes().to_vec());
+            }
+        }
+        if !cleanup.is_empty() {
+            self.db.write_batch_sync(cleanup)?;
+        }
+
+        // Re-execute the new branch in order from the ancestor's state and
+        // commit each block canonically. Roots were already verified when the
+        // branch blocks were first imported; this regenerates receipts and
+        // guards against storage rot.
+        let mut parent_root = ancestor.state_root();
+        for (hash, block) in branch.iter().rev() {
+            let outcome = self.execute_block(block, parent_root)?;
+            if outcome.state_root != block.state_root() {
+                return Err(ChainError::InvalidBlock(format!(
+                    "state root mismatch re-executing branch block {hash}"
+                )));
+            }
+            self.commit_canonical(block, &outcome.receipts, &outcome.state_root)?;
+            parent_root = outcome.state_root;
+        }
+
+        Ok(())
+    }
+
+    /// Commit a block as the new canonical head: header/body/indexes/receipts
+    /// and head metadata land in a single atomic batch, then the live state
+    /// adopts the block's root and the in-memory head advances.
+    fn commit_canonical(&self, block: &Block, receipts: &[Receipt], state_root: &Hash) -> Result<Hash> {
+        let block_hash = self.commit_block(block, receipts, state_root)?;
+
+        // The live state view (RPC/mempool reads) adopts the committed root.
+        self.state.set_root(*state_root);
 
         // Update in-memory head (only after the durable commit succeeded)
         *self.head.write() = Some(SealedBlock::new(block_hash, block.clone()));
 
         // Record block production in consensus engine for PoC scoring
-        self.consensus.record_block_produced(&producer);
+        self.consensus.record_block_produced(&block.producer());
 
         // Maybe create checkpoint at epoch boundary
         let _ = self.maybe_create_checkpoint(block.number());
 
-        info!("Imported block {} at height {}", block_hash, block.number());
-
         Ok(block_hash)
+    }
+
+    /// Record a finalized (height, hash). Reorgs never cross it.
+    pub fn record_finalized(&self, height: u64, hash: Hash) {
+        let mut fin = self.finalized.write();
+        if height > fin.0 {
+            *fin = (height, hash);
+        }
+        self.consensus.set_finalized_height(height.max(self.consensus.finalized_height()));
+    }
+
+    /// Last finalized (height, hash).
+    pub fn finalized(&self) -> (u64, Hash) {
+        *self.finalized.read()
     }
 
     /// Store double-sign evidence for later broadcast
@@ -548,11 +893,19 @@ impl Chain {
             borsh::to_vec(&body).unwrap(),
         );
 
-        // Store hash index
+        // Store hash index (canonical membership)
         batch.put(
             cf::BLOCK_HASH_INDEX,
             block_hash.as_bytes().to_vec(),
             key.to_vec(),
+        );
+
+        // Store the full block in the hash-keyed branch store (fork choice
+        // resolves parents by hash across branches)
+        batch.put(
+            cf::BLOCKS_BY_HASH,
+            block_hash.as_bytes().to_vec(),
+            borsh::to_vec(block).unwrap(),
         );
 
         // Store transactions and their locations
@@ -683,18 +1036,57 @@ impl Chain {
         self.consensus.finalized_height()
     }
 
-    /// Store a block that we produced (skip validation since we created it)
-    pub fn store_produced_block(&self, block: &Block, receipts: &[Receipt]) -> Result<()> {
-        // Commit block, receipts, and head metadata in a single atomic batch
-        let block_hash = self.commit_block(block, receipts, &block.state_root())?;
+    /// Store a block that we produced ourselves.
+    ///
+    /// Runs the SAME validate + execute path as import (self-validation,
+    /// spec §4): a node must never commit a block that its peers would
+    /// reject, so the producer path re-derives the schedule, VRF and state
+    /// root exactly like an importer would. Serializes on the import lock.
+    pub async fn store_produced_block(&self, block: &Block) -> Result<()> {
+        let _guard = self.import_lock.lock().await;
+        self.store_produced_block_locked(block)
+    }
 
-        // Update in-memory head (only after the durable commit succeeded)
-        *self.head.write() = Some(SealedBlock::new(block_hash, block.clone()));
+    /// Blocking variant of [`Self::store_produced_block`] for non-async
+    /// contexts. Panics if called from within an async runtime.
+    pub fn store_produced_block_blocking(&self, block: &Block) -> Result<()> {
+        let _guard = self.import_lock.blocking_lock();
+        self.store_produced_block_locked(block)
+    }
 
-        // Maybe create checkpoint at epoch boundary — the producer path must
-        // checkpoint too, otherwise a block-producing node never persists
-        // consensus state and every restart re-derives from genesis.
-        let _ = self.maybe_create_checkpoint(block.number());
+    fn store_produced_block_locked(&self, block: &Block) -> Result<()> {
+        let head = self
+            .head
+            .read()
+            .clone()
+            .ok_or_else(|| ChainError::GenesisNotFound)?;
+
+        // A produced block must extend the current canonical head — if the
+        // head moved (a concurrent import won the lock first), drop it.
+        if block.parent_hash() != head.hash {
+            return Err(ChainError::InvalidParent {
+                expected: head.hash.to_string(),
+                actual: block.parent_hash().to_string(),
+            });
+        }
+
+        // Self-validation: same checks every importer applies.
+        self.consensus.validate_block(block, &head.block)?;
+
+        // Same deterministic execution against the parent state root.
+        let outcome = self.execute_block(block, head.block.state_root())?;
+        if outcome.state_root != block.state_root() {
+            return Err(ChainError::InvalidBlock(
+                "produced block state root mismatch (self-validation)".to_string(),
+            ));
+        }
+        if outcome.gas_used != block.gas_used() {
+            return Err(ChainError::InvalidBlock(
+                "produced block gas used mismatch (self-validation)".to_string(),
+            ));
+        }
+
+        let block_hash = self.commit_canonical(block, &outcome.receipts, &outcome.state_root)?;
 
         debug!(
             "Stored produced block {} at height {}",
@@ -831,9 +1223,10 @@ mod tests {
         Chain::append_block_to_batch(&mut batch, &block);
         Chain::append_receipts_and_head_to_batch(&mut batch, &block, &receipts, &Hash::ZERO);
 
-        // header + body + hash index + 1 tx + 1 tx location + 1 receipt
-        // + latest_block_number + latest_state_root = 8 ops, one batch
-        assert_eq!(batch.len(), 8);
+        // header + body + hash index + block-by-hash + 1 tx + 1 tx location
+        // + 1 receipt + latest_block_number + latest_state_root = 9 ops,
+        // one batch
+        assert_eq!(batch.len(), 9);
 
         let cfs: std::collections::HashSet<&str> = batch
             .ops()
@@ -847,6 +1240,7 @@ mod tests {
             cf::BLOCK_HEADERS,
             cf::BLOCK_BODIES,
             cf::BLOCK_HASH_INDEX,
+            cf::BLOCKS_BY_HASH,
             cf::TRANSACTIONS,
             cf::TX_INDEX,
             cf::RECEIPTS,
@@ -875,7 +1269,12 @@ mod tests {
             ..Default::default()
         }];
 
-        chain.store_produced_block(&block, &receipts).unwrap();
+        // Commit through the canonical path directly: this test exercises
+        // storage atomicity, not consensus validation (the produced-block
+        // path now self-validates schedule + VRF + state root).
+        chain
+            .commit_canonical(&block, &receipts, &block.state_root())
+            .unwrap();
 
         // Block, transaction, location, and receipt are all readable
         assert!(chain.get_block_by_number(1).unwrap().is_some());
@@ -934,7 +1333,9 @@ mod tests {
     }
 
     /// Produce dummy blocks up to `height` so an epoch-boundary checkpoint
-    /// (every BLOCKS_PER_EPOCH blocks) is written by the producer path.
+    /// (every BLOCKS_PER_EPOCH blocks) is written by the commit path.
+    /// (Commits directly through the canonical path — these dummy blocks
+    /// exercise persistence, not consensus validation.)
     fn produce_blocks(chain: &Chain, from: u64, to: u64) {
         let mut parent_hash = chain.head().unwrap().hash;
         for number in from..=to {
@@ -942,7 +1343,9 @@ mod tests {
             block.header.number = number;
             block.header.parent_hash = parent_hash;
             block.header.state_root = chain.state_root();
-            chain.store_produced_block(&block, &[]).unwrap();
+            chain
+                .commit_canonical(&block, &[], &block.state_root())
+                .unwrap();
             parent_hash = blake3_hash(&block.header_bytes());
         }
     }
