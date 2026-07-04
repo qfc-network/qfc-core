@@ -612,6 +612,11 @@ impl SyncManager {
                 {
                     self.cast_vote_for_block(&block).await;
                 }
+
+                // Votes may have arrived BEFORE the block (stored in
+                // pending_votes); now that the block is imported, re-check
+                // finality so an early quorum is not missed at this height.
+                self.try_finalize(&block_hash, block_number);
             }
             Err(qfc_chain::ChainError::BlockAlreadyKnown) => {
                 debug!("Block #{} already known", block_number);
@@ -636,6 +641,34 @@ impl SyncManager {
             Err(e) => {
                 warn!("Failed to import block #{}: {}", block_number, e);
             }
+        }
+    }
+
+    /// Single writer for the finalized pointer (review-fix hardening).
+    ///
+    /// Finality moves only for a block we hold CANONICALLY at that height
+    /// (review fixes 3c/3d): votes for unknown or side-branch blocks are
+    /// stored but must never move the finalized pointer, or every future
+    /// reorg wedges on a hash the canonical chain cannot contain.
+    /// `Chain::record_finalized` re-checks canonicity and is the ONLY
+    /// place that raises the engine's finalized height, so a height is
+    /// never recorded without its hash.
+    fn try_finalize(&self, block_hash: &Hash, height: u64) {
+        let consensus = self.chain.consensus();
+        let before = self.chain.finalized().0;
+        if height <= before {
+            return;
+        }
+        if !self.chain.is_canonical(block_hash, height).unwrap_or(false) {
+            return;
+        }
+        if !consensus.check_finality(block_hash) {
+            return;
+        }
+        self.chain.record_finalized(height, *block_hash);
+        if self.chain.finalized().0 > before {
+            info!("Block #{} finalized!", height);
+            consensus.prune_old_votes(height);
         }
     }
 
@@ -805,6 +838,10 @@ impl SyncManager {
                     Ok(_) => {
                         info!("Imported pending block #{}", block_number);
                         imported = true;
+                        // Early-stored votes for this block may already form
+                        // a quorum — re-check now that it is importable.
+                        let hash = blake3_hash(&block.header_bytes());
+                        self.try_finalize(&hash, block_number);
                     }
                     Err(qfc_chain::ChainError::BlockAlreadyKnown) => {
                         // Already imported, skip
@@ -907,11 +944,11 @@ impl SyncManager {
             }
         };
 
-        // 4. Check if voter is active
-        if !voter_validator.is_active() {
-            warn!("Vote from inactive/jailed validator: {}", vote.voter);
-            return;
-        }
+        // 4. NOTE: no is_active() gate here. Jail status is node-local
+        // (gossip-driven) state; filtering a consensus input (finality votes)
+        // by it would let nodes disagree on which votes count — the same
+        // class of divergence review fix 4 removed from the election.
+        // Registry membership + signature verification suffice.
 
         // 5. Verify the vote signature
         let vote_hash = blake3_hash(&vote.to_bytes_without_signature());
@@ -952,28 +989,10 @@ impl SyncManager {
             vote.block_height
         );
 
-        // 9. Check if the block has reached finality — but only for a block
-        // we hold CANONICALLY at that height (review fixes 3c/3d): votes
-        // for unknown or side-branch blocks are stored but must never move
-        // the finalized pointer, or every future reorg wedges on a hash
-        // the canonical chain cannot contain.
-        let canonical = block_exists
-            && self
-                .chain
-                .is_canonical(&vote.block_hash, vote.block_height)
-                .unwrap_or(false);
-        if canonical && consensus.check_finality(&vote.block_hash) {
-            let current_finalized = consensus.finalized_height();
-            if vote.block_height > current_finalized {
-                consensus.set_finalized_height(vote.block_height);
-                // Record (height, hash) on the chain — reorgs never cross it.
-                self.chain
-                    .record_finalized(vote.block_height, vote.block_hash);
-                info!("Block #{} finalized!", vote.block_height);
-
-                // Prune old votes
-                consensus.prune_old_votes(vote.block_height);
-            }
+        // 9. Check if the block has reached finality (see try_finalize for
+        // the canonicality rules).
+        if block_exists {
+            self.try_finalize(&vote.block_hash, vote.block_height);
         }
 
         // 10. If we're a validator and haven't voted at this height yet,

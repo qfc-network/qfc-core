@@ -363,3 +363,22 @@ reset; the merged, deduped findings and their resolutions:
     no longer reset on `AwaitingPeerStatus`, so status flapping
     (Behind → AwaitingPeerStatus → Behind) still reaches the forced
     catch-up threshold.
+
+## Verification-pass hardening (post review-fixes)
+
+A final verification review of the 16 review fixes confirmed no blocking defects and
+produced three cheap hardening changes, applied here:
+
+1. `handle_vote` no longer filters votes through the node-local `is_active()` jail flag —
+   gossip-driven jailing must not gate a consensus input (same principle as freezing the
+   election set). Registry membership + signature verification remain.
+2. Finality writes go through a single `SyncManager::try_finalize` helper backed by
+   `Chain::record_finalized`, which is now the only writer of the engine's finalized
+   height — a finalized height can no longer be recorded without its hash (closes a
+   TOCTOU window that could transiently over-restrict reorgs).
+3. Finality is re-checked after successful block import (gossip and pending paths), so a
+   quorum formed by votes that arrived BEFORE the block is no longer missed at that height.
+
+Deferred follow-up (tracked in PR): persist `own_votes` across restart so a restarted
+validator cannot equivocate at an already-voted height (no vote slashing exists yet, and
+count-based finality needs 3-of-4, so testnet impact is bounded).
