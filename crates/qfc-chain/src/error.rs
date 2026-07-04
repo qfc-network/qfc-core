@@ -22,6 +22,9 @@ pub enum ChainError {
     #[error("Genesis not found")]
     GenesisNotFound,
 
+    #[error("Chain ID mismatch: database has {stored}, node configured with {configured}")]
+    ChainIdMismatch { stored: u64, configured: u64 },
+
     #[error("Storage error: {0}")]
     Storage(String),
 

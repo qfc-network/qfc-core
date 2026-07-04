@@ -1037,6 +1037,9 @@ pub struct RpcMinerVesting {
     pub active_tranches: u64,
     /// Detailed vesting tranches (most recent first)
     pub tranches: Vec<RpcVestingTranche>,
+    /// Explanatory note (set while miner rewards are not paid by the block
+    /// path, so all vesting figures are zero)
+    pub note: String,
 }
 
 /// A single vesting tranche from a block reward

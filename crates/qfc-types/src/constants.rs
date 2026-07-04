@@ -50,14 +50,29 @@ pub const INFERENCE_FEE_VALIDATORS_PERCENT: u64 = 10;
 /// Inference fee distribution: burn (20%)
 pub const INFERENCE_FEE_BURN_PERCENT: u64 = 20;
 
-/// Epoch duration in seconds
-pub const EPOCH_DURATION_SECS: u64 = 10;
+/// Canonical block production interval in milliseconds.
+///
+/// SINGLE SOURCE for the consensus slot length: engine, producer, miner and
+/// block validation must all consume this constant (never a per-node config
+/// value — a per-node slot length is a silent consensus fork; see
+/// docs/adr/0012-consensus-convergence-fixes.md).
+pub const BLOCK_INTERVAL_MS: u64 = 5000;
+
+/// Canonical epoch duration in milliseconds (single source, see
+/// [`BLOCK_INTERVAL_MS`]). Must be a multiple of `BLOCK_INTERVAL_MS` so a
+/// slot never straddles an epoch boundary.
+pub const EPOCH_DURATION_MS: u64 = 10_000;
+
+/// Epoch duration in seconds (derived from [`EPOCH_DURATION_MS`])
+pub const EPOCH_DURATION_SECS: u64 = EPOCH_DURATION_MS / 1000;
+
+/// Maximum allowed clock drift for block timestamps in milliseconds.
+/// A block's timestamp may be at most this far in the validator's future;
+/// it also bounds the slot-boundary tolerance in producer enforcement.
+pub const MAX_TIMESTAMP_DRIFT_MS: u64 = 1500;
 
 /// Blocks per epoch
 pub const BLOCKS_PER_EPOCH: u64 = 3;
-
-/// Block time in milliseconds (approximately)
-pub const BLOCK_TIME_MS: u64 = 3333;
 
 /// Minimum stake for validators (10,000 QFC)
 pub const MIN_VALIDATOR_STAKE: u128 = 10_000_000_000_000_000_000_000; // 10^22 wei

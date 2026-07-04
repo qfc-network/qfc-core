@@ -9,7 +9,9 @@ use qfc_consensus::ConsensusEngine;
 use qfc_crypto::blake3_hash;
 use qfc_network::NetworkService;
 use qfc_pow::{adjust_difficulty, initial_difficulty, Miner, MiningResult};
-use qfc_types::{Address, DifficultyConfig, Hash, MiningTask, ValidatorMessage, U256};
+use qfc_types::{
+    Address, DifficultyConfig, Hash, MiningTask, ValidatorMessage, EPOCH_DURATION_MS, U256,
+};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -37,8 +39,6 @@ impl Default for ComputeMode {
 pub struct MiningConfig {
     /// Number of mining threads
     pub threads: usize,
-    /// Epoch duration in milliseconds
-    pub epoch_duration_ms: u64,
     /// Difficulty adjustment config
     pub difficulty_config: DifficultyConfig,
     /// Compute mode: pow (v1) or inference (v2)
@@ -55,7 +55,6 @@ impl Default for MiningConfig {
             threads: std::thread::available_parallelism()
                 .map(|n| n.get())
                 .unwrap_or(1),
-            epoch_duration_ms: 10_000, // 10 seconds
             difficulty_config: DifficultyConfig::default(),
             compute_mode: ComputeMode::default(),
             inference_backend: None,
@@ -129,7 +128,7 @@ impl MiningService {
         self.consensus
             .set_provides_compute(&self.validator_address, true);
 
-        let mut epoch_timer = interval(Duration::from_millis(self.config.epoch_duration_ms));
+        let mut epoch_timer = interval(Duration::from_millis(EPOCH_DURATION_MS));
         let mut current_epoch = 0u64;
 
         loop {
@@ -161,10 +160,7 @@ impl MiningService {
                     mining_service.validator_address,
                     mining_service.config.threads,
                 );
-                miner.mine_for_duration(
-                    &task_clone,
-                    Duration::from_millis(mining_service.config.epoch_duration_ms - 500),
-                )
+                miner.mine_for_duration(&task_clone, Duration::from_millis(EPOCH_DURATION_MS - 500))
             })
             .await;
 
@@ -211,7 +207,7 @@ impl MiningService {
         let model_registry = qfc_inference::model::ModelRegistry::default_v2();
         let mut task_pool = qfc_ai_coordinator::TaskPool::new();
 
-        let mut epoch_timer = interval(Duration::from_millis(self.config.epoch_duration_ms));
+        let mut epoch_timer = interval(Duration::from_millis(EPOCH_DURATION_MS));
         let mut tasks_completed = 0u64;
 
         loop {
@@ -223,9 +219,7 @@ impl MiningService {
             }
 
             // Advance consensus epoch if expired (needed when this node is not the block producer)
-            let current_epoch = self
-                .consensus
-                .maybe_advance_epoch(self.config.epoch_duration_ms);
+            let current_epoch = self.consensus.maybe_advance_epoch();
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -360,7 +354,7 @@ impl MiningService {
             seed,
             *self.current_difficulty.read(),
             now,
-            now + self.config.epoch_duration_ms,
+            now + EPOCH_DURATION_MS,
         )
     }
 

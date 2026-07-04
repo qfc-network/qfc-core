@@ -646,12 +646,11 @@ impl Executor {
         // Reduce delegation amount
         state.sub_delegation_amount(sender, amount)?;
 
-        // Calculate unlock time (current time + 7 days)
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let unlock_at = now + UNSTAKE_DELAY_SECS;
+        // Calculate unlock time from the BLOCK timestamp (set via
+        // `set_block_context` by `Chain::execute_at`), never the local wall
+        // clock: the producer and every importer must derive the exact same
+        // `unlock_at` or their state roots diverge (consensus fork D12).
+        let unlock_at = self.block_timestamp / 1000 + UNSTAKE_DELAY_SECS;
 
         // Store undelegation record — funds are locked until unlock_at
         let undelegation = qfc_types::Undelegation::new(*sender, validator, amount, unlock_at);
@@ -696,13 +695,13 @@ impl Executor {
 
     /// Process mature undelegations: return locked funds to delegators.
     /// Called during block execution before processing transactions.
-    pub fn process_mature_undelegations(&self, state: &StateDB) -> u32 {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        let mature = match state.get_mature_undelegations(now) {
+    ///
+    /// `now_secs` is the maturity clock and MUST be derived from the block
+    /// timestamp (`block.timestamp() / 1000`), never from `SystemTime::now()`:
+    /// the producer and every importer must see the exact same set of mature
+    /// undelegations or their state roots diverge (consensus fork D12).
+    pub fn process_mature_undelegations(&self, state: &StateDB, now_secs: u64) -> u32 {
+        let mature = match state.get_mature_undelegations(now_secs) {
             Ok(m) => m,
             Err(e) => {
                 warn!("Failed to get mature undelegations: {}", e);

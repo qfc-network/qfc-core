@@ -25,6 +25,9 @@ pub enum ConsensusError {
     #[error("Not a validator")]
     NotValidator,
 
+    #[error("Genesis seed not initialized")]
+    GenesisSeedUnset,
+
     #[error("Validator is jailed")]
     ValidatorJailed,
 
