@@ -306,8 +306,29 @@ impl Executor {
         let gas_cost = tx.tx.gas_cost();
         state.sub_balance(&sender, gas_cost)?;
 
-        // 2. Increment nonce
-        state.increment_nonce(&sender)?;
+        // 2. Nonce advance.
+        //
+        // Non-EVM tx types never run revm, so we advance the sender nonce here
+        // (as they always have).
+        //
+        // EVM tx types (ContractCreate / ContractCall) must NOT be
+        // pre-incremented: revm reads the caller's CURRENT (pre-increment)
+        // nonce to derive the CREATE address — the Ethereum standard
+        // `f(sender, tx.nonce)` — and bumps the caller nonce itself. Bumping
+        // here first shifted every CREATE address to `f(sender, tx.nonce + 1)`
+        // (off-by-one vs. every standard EVM tool) AND double-counted the
+        // nonce (+2 per EVM tx). The nonce for EVM tx types is finalized to
+        // exactly `tx.nonce + 1` after execution (see step 4), which is
+        // correct whether revm persisted its own bump (success) or not
+        // (revert/halt, or a ContractCall to an account with no code, neither
+        // of which runs a state-applying revm pass).
+        let evm_tx = matches!(
+            tx.tx.tx_type,
+            TransactionType::ContractCreate | TransactionType::ContractCall
+        );
+        if !evm_tx {
+            state.increment_nonce(&sender)?;
+        }
 
         // 3. Execute based on transaction type
         let result = match tx.tx.tx_type {
@@ -347,6 +368,18 @@ impl Executor {
         // 4. Handle result
         match result {
             Ok(exec_result) => {
+                // Finalize the sender nonce for EVM tx types to exactly
+                // tx.nonce + 1. On success revm already wrote this via
+                // apply_state_changes (no-op here); on a reverted/halted EVM
+                // tx, or a ContractCall to a code-less account (which does a
+                // bare value transfer without invoking revm), revm never
+                // persisted a bump, so this is the single authoritative +1.
+                // Only the sender EOA is touched — contract/factory nonces
+                // bumped by revm during execution are left intact.
+                if evm_tx {
+                    state.set_nonce(&sender, tx.tx.nonce + 1)?;
+                }
+
                 // Refund unused gas
                 let gas_refund = (gas_limit - exec_result.gas_used) * tx.tx.gas_price.low_u64();
                 state.add_balance(&sender, U256::from_u64(gas_refund))?;
@@ -928,6 +961,211 @@ mod tests {
         // Sender should have: initial - transfer - gas
         assert!(sender_balance < U256::from_u128(100_000_000_000_000_000));
         assert_eq!(recipient_balance, U256::from_u64(1000));
+    }
+
+    // Minimal init code that deploys a valid, callable runtime:
+    //   init: CODECOPY the 11-byte runtime to memory and RETURN it
+    //   runtime: SLOAD slot0; MSTORE; RETURN 32 bytes (no INVALID opcodes)
+    const TEST_INIT_CODE: &str = "600b80600b6000396000f360005460005260206000f3";
+
+    fn fund(state: &StateDB, addr: &Address) {
+        state
+            .set_balance(addr, U256::from_u128(10_000_000_000_000_000_000))
+            .unwrap();
+    }
+
+    /// Ethereum CREATE address `f(sender, nonce)` = keccak256(rlp([sender, nonce]))[12..].
+    /// Computed via revm's own helper so the expectation matches the EVM
+    /// authoritatively.
+    fn eth_create_address(sender: &Address, nonce: u64) -> Address {
+        use revm::primitives::Address as RevmAddress;
+        let created = RevmAddress::from_slice(sender.as_bytes()).create(nonce);
+        Address::from_slice(created.as_slice()).unwrap()
+    }
+
+    fn sign(tx: Transaction, sender: Address) -> SignedTransaction {
+        let h = blake3_hash(&tx.to_bytes_without_signature());
+        SignedTransaction::new(tx, h, sender)
+    }
+
+    #[test]
+    fn test_create_address_uses_pre_increment_nonce() {
+        let executor = Executor::testnet();
+        let state = create_test_state();
+        let sender = Address::new([0xAB; 20]);
+        let producer = Address::new([0x33; 20]);
+        fund(&state, &sender);
+        state.set_nonce(&sender, 7).unwrap();
+
+        let tx = Transaction::contract_create(
+            hex::decode(TEST_INIT_CODE).unwrap(),
+            U256::ZERO,
+            7,
+            1_000_000,
+            U256::from_u64(1_000_000_000),
+        );
+        let result = executor
+            .execute(&sign(tx, sender), &state, &producer)
+            .unwrap();
+
+        assert!(result.success, "create failed: {:?}", result.error);
+        // Invariant 1: address == f(sender, tx.nonce), NOT tx.nonce + 1.
+        assert_eq!(
+            result.contract_address.unwrap(),
+            eth_create_address(&sender, 7),
+            "CREATE address must use the pre-increment nonce (Ethereum standard)"
+        );
+        assert_ne!(
+            result.contract_address.unwrap(),
+            eth_create_address(&sender, 8),
+            "CREATE address must not use the post-increment nonce"
+        );
+        // Invariant 2: nonce advances by exactly 1.
+        assert_eq!(state.get_nonce(&sender).unwrap(), 8);
+    }
+
+    #[test]
+    fn test_sequential_creates_follow_ethereum_sequence() {
+        let executor = Executor::testnet();
+        let state = create_test_state();
+        let sender = Address::new([0xCD; 20]);
+        let producer = Address::new([0x33; 20]);
+        fund(&state, &sender);
+        state.set_nonce(&sender, 0).unwrap();
+
+        for n in 0..3u64 {
+            let tx = Transaction::contract_create(
+                hex::decode(TEST_INIT_CODE).unwrap(),
+                U256::ZERO,
+                n,
+                1_000_000,
+                U256::from_u64(1_000_000_000),
+            );
+            let result = executor
+                .execute(&sign(tx, sender), &state, &producer)
+                .unwrap();
+            assert!(result.success);
+            // Invariant 3: each deploy lands at f(sender, n), no gaps/overlaps.
+            assert_eq!(
+                result.contract_address.unwrap(),
+                eth_create_address(&sender, n),
+                "deploy #{n} landed at the wrong address"
+            );
+            assert_eq!(state.get_nonce(&sender).unwrap(), n + 1);
+        }
+    }
+
+    #[test]
+    fn test_transfer_advances_nonce_by_one() {
+        let executor = Executor::testnet();
+        let state = create_test_state();
+        let sender = Address::new([0x11; 20]);
+        let producer = Address::new([0x33; 20]);
+        fund(&state, &sender);
+        state.set_nonce(&sender, 4).unwrap();
+
+        let tx = Transaction::transfer(
+            Address::new([0x22; 20]),
+            U256::from_u64(1000),
+            4,
+            U256::from_u64(1_000_000_000),
+        );
+        let result = executor
+            .execute(&sign(tx, sender), &state, &producer)
+            .unwrap();
+        assert!(result.success);
+        assert_eq!(state.get_nonce(&sender).unwrap(), 5);
+    }
+
+    #[test]
+    fn test_stake_advances_nonce_by_one() {
+        let executor = Executor::testnet();
+        let state = create_test_state();
+        let sender = Address::new([0x44; 20]);
+        let producer = Address::new([0x33; 20]);
+        state
+            .set_balance(&sender, U256::from_u128(MIN_VALIDATOR_STAKE * 2))
+            .unwrap();
+        state.set_nonce(&sender, 9).unwrap();
+
+        let tx = Transaction::stake(
+            U256::from_u128(MIN_VALIDATOR_STAKE),
+            9,
+            U256::from_u64(1_000_000_000),
+        );
+        let result = executor
+            .execute(&sign(tx, sender), &state, &producer)
+            .unwrap();
+        assert!(result.success);
+        assert_eq!(state.get_nonce(&sender).unwrap(), 10);
+    }
+
+    #[test]
+    fn test_contract_call_to_deployed_contract_advances_nonce_by_one() {
+        let executor = Executor::testnet();
+        let state = create_test_state();
+        let sender = Address::new([0xEE; 20]);
+        let producer = Address::new([0x33; 20]);
+        fund(&state, &sender);
+        state.set_nonce(&sender, 0).unwrap();
+
+        // Deploy first (nonce 0), then call it (nonce 1).
+        let deploy = Transaction::contract_create(
+            hex::decode(TEST_INIT_CODE).unwrap(),
+            U256::ZERO,
+            0,
+            1_000_000,
+            U256::from_u64(1_000_000_000),
+        );
+        let dr = executor
+            .execute(&sign(deploy, sender), &state, &producer)
+            .unwrap();
+        assert!(dr.success);
+        let contract = dr.contract_address.unwrap();
+        assert_eq!(state.get_nonce(&sender).unwrap(), 1);
+
+        let call = Transaction::contract_call(
+            contract,
+            Vec::new(),
+            U256::ZERO,
+            1,
+            1_000_000,
+            U256::from_u64(1_000_000_000),
+        );
+        let cr = executor
+            .execute(&sign(call, sender), &state, &producer)
+            .unwrap();
+        assert!(cr.success, "call failed: {:?}", cr.error);
+        // Invariant 4: call still works and nonce advances by exactly 1.
+        assert_eq!(state.get_nonce(&sender).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_contract_call_to_eoa_advances_nonce_by_one() {
+        // A ContractCall whose target has no code does a bare value transfer
+        // and never invokes revm — the sender nonce must still advance by 1.
+        let executor = Executor::testnet();
+        let state = create_test_state();
+        let sender = Address::new([0x55; 20]);
+        let eoa = Address::new([0x66; 20]);
+        let producer = Address::new([0x33; 20]);
+        fund(&state, &sender);
+        state.set_nonce(&sender, 2).unwrap();
+
+        let tx = Transaction::contract_call(
+            eoa,
+            Vec::new(),
+            U256::from_u64(500),
+            2,
+            100_000,
+            U256::from_u64(1_000_000_000),
+        );
+        let result = executor
+            .execute(&sign(tx, sender), &state, &producer)
+            .unwrap();
+        assert!(result.success);
+        assert_eq!(state.get_nonce(&sender).unwrap(), 3);
+        assert_eq!(state.get_balance(&eoa).unwrap(), U256::from_u64(500));
     }
 
     #[test]

@@ -830,3 +830,94 @@ async fn reorg_forwards_only_displaced_txs_to_sink() {
     assert!(chain.canonical_tx_at(&tx1_hash).unwrap().is_some());
     assert!(chain.canonical_tx_at(&tx0_hash).unwrap().is_none());
 }
+
+/// Independent (non-revm) Ethereum CREATE address: keccak256(rlp([sender,
+/// nonce]))[12..]. Used to cross-check the address the EVM produces.
+fn eth_create_address(sender: &qfc_types::Address, nonce: u64) -> qfc_types::Address {
+    use sha3::{Digest, Keccak256};
+    let mut stream = rlp::RlpStream::new_list(2);
+    let sender_bytes: &[u8] = sender.as_bytes();
+    stream.append(&sender_bytes);
+    stream.append(&nonce);
+    let hash = Keccak256::digest(stream.out());
+    qfc_types::Address::from_slice(&hash[12..]).unwrap()
+}
+
+/// CREATE address off-by-one fix (ADR-0014).
+///
+/// A contract-deploy tx must land at the Ethereum-standard address
+/// `f(sender, tx.nonce)` — NOT `f(sender, tx.nonce + 1)` — and the sender
+/// nonce must advance by exactly 1. Driven through `execute_at` (the shared
+/// deterministic transition used by BOTH produce and import), and imported on
+/// two independent chains to prove the result is consensus-neutral.
+#[tokio::test]
+async fn contract_create_address_uses_pre_increment_nonce() {
+    let chain_a = make_chain();
+    let chain_b = make_chain();
+    let engines = validator_engines(&chain_a);
+    let genesis = chain_a.head().unwrap().block;
+    let base = past_slot_base();
+
+    let sender_key = &keys()[0]; // holds the genesis balance allocation
+    let sender = address_from_public_key(&sender_key.public_key());
+    let gas_price = U256::from_u64(qfc_types::MIN_GAS_PRICE);
+
+    // Minimal init code that deploys a valid, callable runtime (no INVALID
+    // opcodes): CODECOPY the 11-byte runtime and RETURN it.
+    let init_code = hex::decode("600b80600b6000396000f360005460005260206000f3").unwrap();
+
+    // Two sequential deploys from the same sender (nonces 0 and 1) — the
+    // resulting addresses must follow the standard Ethereum sequence.
+    let tx0 = signed_tx(
+        sender_key,
+        Transaction::contract_create(init_code.clone(), U256::ZERO, 0, 1_000_000, gas_price),
+    );
+    let tx1 = signed_tx(
+        sender_key,
+        Transaction::contract_create(init_code.clone(), U256::ZERO, 1, 1_000_000, gas_price),
+    );
+    let tx0_hash = blake3_hash(&tx0.to_bytes_without_signature());
+    let tx1_hash = blake3_hash(&tx1.to_bytes_without_signature());
+
+    let block = seal_at_slot_with_txs(
+        &chain_a,
+        &engines,
+        &genesis,
+        base,
+        vec![tx0.clone(), tx1.clone()],
+    );
+    chain_a.import_block(block.clone()).await.unwrap();
+    chain_b.import_block(block.clone()).await.unwrap();
+
+    // Consensus-neutral: independent importers converge on the same root.
+    assert_eq!(chain_a.state_root(), chain_b.state_root());
+
+    let expected0 = eth_create_address(&sender, 0);
+    let expected1 = eth_create_address(&sender, 1);
+
+    let r0 = chain_a.get_receipt(&tx0_hash).unwrap().unwrap();
+    let r1 = chain_a.get_receipt(&tx1_hash).unwrap().unwrap();
+    assert!(matches!(r0.status, ReceiptStatus::Success));
+    assert!(matches!(r1.status, ReceiptStatus::Success));
+
+    // Invariant 1 + 3: addresses match f(sender, nonce), sequentially.
+    assert_eq!(
+        r0.contract_address.unwrap(),
+        expected0,
+        "deploy 0 must land at f(sender, 0), not f(sender, 1)"
+    );
+    assert_eq!(
+        r1.contract_address.unwrap(),
+        expected1,
+        "deploy 1 must land at f(sender, 1)"
+    );
+    assert_ne!(r0.contract_address.unwrap(), r1.contract_address.unwrap());
+
+    // Code was actually deployed at the standard address.
+    assert!(!chain_a.get_code(&expected0).unwrap().is_empty());
+    assert!(!chain_a.get_code(&expected1).unwrap().is_empty());
+
+    // Invariant 2: two txs → sender nonce advanced by exactly 2.
+    assert_eq!(chain_a.get_nonce(&sender).unwrap(), 2);
+    assert_eq!(chain_b.get_nonce(&sender).unwrap(), 2);
+}
