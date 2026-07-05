@@ -1019,6 +1019,7 @@ mod tests {
                 ChainConfig {
                     chain_id: 9000,
                     genesis: GenesisConfig::dev(),
+                    ..Default::default()
                 },
                 consensus.clone(),
             )

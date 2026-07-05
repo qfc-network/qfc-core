@@ -62,6 +62,13 @@ fn test_genesis() -> GenesisConfig {
 /// A fresh chain over a temp DB with a NON-validator engine (like an
 /// observer/full node). Production is driven by separate validator engines.
 fn make_chain() -> Arc<Chain> {
+    make_chain_with_activation(qfc_types::EVM_OPCODE_ACTIVATION_HEIGHT)
+}
+
+/// Like [`make_chain`] but with a custom ADR-0017 activation height, so
+/// tests can exercise post-activation EVM opcode semantics on short chains
+/// (the production height, 13_000, is unreachable in a test).
+fn make_chain_with_activation(evm_opcode_activation_height: u64) -> Arc<Chain> {
     let db = Database::open_temp().unwrap();
     let consensus = Arc::new(ConsensusEngine::new(ConsensusConfig::default()));
     Arc::new(
@@ -70,6 +77,7 @@ fn make_chain() -> Arc<Chain> {
             ChainConfig {
                 chain_id: qfc_types::DEFAULT_CHAIN_ID,
                 genesis: test_genesis(),
+                evm_opcode_activation_height,
             },
             consensus,
         )
@@ -129,6 +137,7 @@ fn seal_at_slot(chain: &Chain, engines: &[ConsensusEngine], parent: &Block, slot
     let outcome = chain
         .execute_at(
             parent.state_root(),
+            block_hash(parent),
             parent.number() + 1,
             timestamp,
             &leader,
@@ -169,6 +178,7 @@ fn seal_at_slot_with_txs(
     let outcome = chain
         .execute_at(
             parent.state_root(),
+            block_hash(parent),
             parent.number() + 1,
             timestamp,
             &leader,
@@ -297,7 +307,14 @@ async fn wrong_slot_producer_rejected() {
     let timestamp = slot_timestamp(slot);
 
     let outcome = chain
-        .execute_at(genesis.state_root(), 1, timestamp, &wrong_addr, &[])
+        .execute_at(
+            genesis.state_root(),
+            block_hash(&genesis),
+            1,
+            timestamp,
+            &wrong_addr,
+            &[],
+        )
         .unwrap();
     let block = engines[wrong_idx]
         .produce_block(
@@ -653,7 +670,14 @@ async fn undelegate_unlock_time_is_block_deterministic() {
     let timestamp = slot_timestamp(slot);
 
     let outcome = chain_a
-        .execute_at(genesis.state_root(), 1, timestamp, &leader, &txs)
+        .execute_at(
+            genesis.state_root(),
+            block_hash(&genesis),
+            1,
+            timestamp,
+            &leader,
+            &txs,
+        )
         .unwrap();
     // Both transactions must actually succeed — a failed undelegate would
     // make the determinism assertion below vacuous.
@@ -841,6 +865,143 @@ fn eth_create_address(sender: &qfc_types::Address, nonce: u64) -> qfc_types::Add
     stream.append(&nonce);
     let hash = Keccak256::digest(stream.out());
     qfc_types::Address::from_slice(&hash[12..]).unwrap()
+}
+
+/// ADR-0017 test contract: on every call, stores `blockhash(block.number-1)`
+/// at slot 0 and PREVRANDAO at slot 1. Runtime (14 bytes):
+///   NUMBER PUSH1 1 SWAP1 SUB BLOCKHASH PUSH1 0 SSTORE
+///   PREVRANDAO PUSH1 1 SSTORE STOP
+/// prefixed by the standard 11-byte CODECOPY deployer.
+fn opcode_probe_init_code() -> Vec<u8> {
+    hex::decode("600e80600b6000396000f34360019003406000554460015500").unwrap()
+}
+
+/// Deploy the opcode probe in block 1 and call it in block 2. Returns
+/// (block1, block2, contract address) with both blocks imported on `chain`.
+async fn run_opcode_probe(
+    chain: &Arc<Chain>,
+    engines: &[ConsensusEngine],
+) -> (Block, Block, qfc_types::Address) {
+    let genesis = chain.head().unwrap().block;
+    let base = past_slot_base();
+    let sender_key = &keys()[0]; // holds the genesis balance allocation
+    let sender = address_from_public_key(&sender_key.public_key());
+    let gas_price = U256::from_u64(qfc_types::MIN_GAS_PRICE);
+
+    let deploy = signed_tx(
+        sender_key,
+        Transaction::contract_create(
+            opcode_probe_init_code(),
+            U256::ZERO,
+            0,
+            1_000_000,
+            gas_price,
+        ),
+    );
+    let b1 = seal_at_slot_with_txs(chain, engines, &genesis, base, vec![deploy.clone()]);
+    chain.import_block(b1.clone()).await.unwrap();
+
+    let contract = eth_create_address(&sender, 0);
+    assert!(
+        !chain.get_code(&contract).unwrap().is_empty(),
+        "probe contract must be deployed"
+    );
+
+    let call = signed_tx(
+        sender_key,
+        Transaction::contract_call(contract, vec![], U256::ZERO, 1, 200_000, gas_price),
+    );
+    let call_hash = blake3_hash(&call.to_bytes_without_signature());
+    let b2 = seal_at_slot_with_txs(chain, engines, &b1, base + 1, vec![call.clone()]);
+    chain.import_block(b2.clone()).await.unwrap();
+
+    let receipt = chain.get_receipt(&call_hash).unwrap().unwrap();
+    assert!(
+        matches!(receipt.status, ReceiptStatus::Success),
+        "probe call failed: {:?}",
+        receipt.status
+    );
+
+    (b1, b2, contract)
+}
+
+/// ADR-0017 — post-activation, BLOCKHASH resolves along the executing
+/// block's own ancestor chain through the REAL hash-keyed block store: the
+/// probe called in block 2 must observe block 1's blake3 header hash (the
+/// same hash the eth RPC reports). PREVRANDAO must read
+/// keccak256(parent_hash). And the whole thing is consensus-neutral: an
+/// independent chain importing the same blocks converges on the same state
+/// root and observes identical values.
+#[tokio::test]
+async fn evm_opcode_fixes_post_activation_resolve_and_converge() {
+    // Activation height 1: blocks 1 and 2 both execute post-fork.
+    let chain_a = make_chain_with_activation(1);
+    let chain_b = make_chain_with_activation(1);
+    let engines = validator_engines(&chain_a);
+
+    let (b1, b2, contract) = run_opcode_probe(&chain_a, &engines).await;
+
+    // BLOCKHASH(1) seen from block 2 = blake3 header hash of block 1.
+    let stored_blockhash = chain_a.get_storage(&contract, &U256::ZERO).unwrap();
+    assert_eq!(
+        stored_blockhash,
+        U256::from_be_bytes(block_hash(&b1).as_bytes()),
+        "BLOCKHASH must return the parent's blake3 header hash"
+    );
+
+    // PREVRANDAO seen from block 2 = keccak256(block 1's hash).
+    use sha3::{Digest, Keccak256};
+    let expected_randao: [u8; 32] = Keccak256::digest(block_hash(&b1).as_bytes()).into();
+    let stored_randao = chain_a.get_storage(&contract, &U256::from_u64(1)).unwrap();
+    assert_eq!(
+        stored_randao,
+        U256::from_be_bytes(&expected_randao),
+        "PREVRANDAO must be keccak256(parent_hash)"
+    );
+    assert_ne!(stored_randao, U256::ZERO);
+
+    // Cross-chain determinism: an independent importer executes the same
+    // opcode-using blocks byte-identically.
+    chain_b.import_block(b1.clone()).await.unwrap();
+    chain_b.import_block(b2.clone()).await.unwrap();
+    assert_eq!(chain_a.state_root(), chain_b.state_root());
+    assert_eq!(chain_a.head().unwrap().hash, chain_b.head().unwrap().hash);
+    assert_eq!(
+        chain_b.get_storage(&contract, &U256::ZERO).unwrap(),
+        stored_blockhash
+    );
+    assert_eq!(
+        chain_b.get_storage(&contract, &U256::from_u64(1)).unwrap(),
+        stored_randao
+    );
+}
+
+/// ADR-0017 gating — with the production activation height (13_000), blocks
+/// at heights 1–2 still execute with the consensus-frozen historical
+/// semantics: BLOCKHASH and PREVRANDAO both read 0, and two independent
+/// chains still converge.
+#[tokio::test]
+async fn evm_opcode_fixes_inactive_below_activation_height() {
+    let chain_a = make_chain(); // default = EVM_OPCODE_ACTIVATION_HEIGHT
+    let chain_b = make_chain();
+    let engines = validator_engines(&chain_a);
+
+    let (b1, b2, contract) = run_opcode_probe(&chain_a, &engines).await;
+
+    assert_eq!(
+        chain_a.get_storage(&contract, &U256::ZERO).unwrap(),
+        U256::ZERO,
+        "pre-activation BLOCKHASH must stay 0"
+    );
+    assert_eq!(
+        chain_a.get_storage(&contract, &U256::from_u64(1)).unwrap(),
+        U256::ZERO,
+        "pre-activation PREVRANDAO must stay 0"
+    );
+
+    chain_b.import_block(b1).await.unwrap();
+    chain_b.import_block(b2).await.unwrap();
+    assert_eq!(chain_a.state_root(), chain_b.state_root());
 }
 
 /// CREATE address off-by-one fix (ADR-0014).

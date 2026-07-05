@@ -294,6 +294,28 @@ pub fn min_delegation() -> U256 {
     U256::from_u128(MIN_DELEGATION)
 }
 
+// ============ EVM opcode hardfork (ADR-0017) ============
+
+/// Activation height for the consensus-window EVM opcode fixes
+/// (BLOCKHASH ancestor resolution, keccak256 EXTCODEHASH, PREVRANDAO).
+///
+/// All three fixes change execution results — and therefore state roots —
+/// for any transaction that touches the affected opcodes. Fresh nodes
+/// re-execute every historical block from genesis with the current binary,
+/// so the new semantics MUST NOT apply retroactively: below this height the
+/// executor reproduces the exact pre-fork behavior (BLOCKHASH = 0, blake3
+/// code_hash, prevrandao = 0), at/after it the corrected behavior applies.
+/// The gate keys off the EXECUTING block's number.
+///
+/// Height choice: at the time this fork was scheduled the testnet head was
+/// ~9,551 with an observed cadence of ~6.6 s/block (nominal
+/// [`BLOCK_INTERVAL_MS`] = 5 s), so 13,000 activates roughly 6 hours after
+/// the merge — safely after the rolling validator deploy completes. EVERY
+/// validator must run the upgraded binary BEFORE this height, or it
+/// diverges on the first post-activation block whose transactions use these
+/// opcodes (see docs/adr/0017-evm-opcode-consensus-window.md).
+pub const EVM_OPCODE_ACTIVATION_HEIGHT: u64 = 13_000;
+
 // ============ State Rent ============
 
 /// Storage deposit per account creation (0.01 QFC — refundable on deletion)
