@@ -115,7 +115,10 @@ impl RpcBlock {
             transactions_root: block.header.transactions_root.to_string(),
             receipts_root: block.header.receipts_root.to_string(),
             miner: block.producer().to_string(),
-            timestamp: format!("0x{:x}", block.timestamp()),
+            // Header timestamp is milliseconds (consensus slot clock); the
+            // Ethereum JSON-RPC convention (and every explorer/tool) expects
+            // Unix seconds, matching the EVM `block.timestamp`. Convert here.
+            timestamp: format!("0x{:x}", block.timestamp() / 1000),
             gas_limit: format!("0x{:x}", block.gas_limit()),
             gas_used: format!("0x{:x}", block.gas_used()),
             extra_data: format!("0x{}", hex::encode(&block.header.extra_data)),

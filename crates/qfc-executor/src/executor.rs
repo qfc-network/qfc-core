@@ -1055,6 +1055,94 @@ mod tests {
         }
     }
 
+    /// BUG B regression: a contract deploy must charge the sender EXACTLY
+    /// `gas_used * gas_price` (1x), and the producer must receive EXACTLY
+    /// `gas_used * gas_price`. Before the fix revm ALSO deducted gas from the
+    /// caller (on top of the executor's prepay), draining ~2x. Now revm runs
+    /// gas-neutral (tx gas_price = 0, basefee = 0) so the executor is the sole
+    /// gas accountant.
+    #[test]
+    fn test_contract_create_charges_gas_once() {
+        let executor = Executor::testnet();
+        let state = create_test_state();
+        let sender = Address::new([0x11; 20]);
+        let producer = Address::new([0x33; 20]);
+        fund(&state, &sender);
+        state.set_nonce(&sender, 0).unwrap();
+
+        let gas_price = 1_000_000_000u64; // 1 Gwei
+        let sender_before = state.get_balance(&sender).unwrap();
+        let producer_before = state.get_balance(&producer).unwrap();
+
+        let tx = Transaction::contract_create(
+            hex::decode(TEST_INIT_CODE).unwrap(),
+            U256::ZERO, // no value transfer — isolate gas accounting
+            0,
+            1_000_000,
+            U256::from_u64(gas_price),
+        );
+        let result = executor
+            .execute(&sign(tx, sender), &state, &producer)
+            .unwrap();
+        assert!(result.success, "create failed: {:?}", result.error);
+
+        let expected_charge = U256::from_u64(result.gas_used * gas_price);
+
+        let sender_after = state.get_balance(&sender).unwrap();
+        let producer_after = state.get_balance(&producer).unwrap();
+
+        // Sender drops by EXACTLY 1x gas_used*gas_price (not 2x).
+        assert_eq!(
+            sender_before - sender_after,
+            expected_charge,
+            "sender must be charged exactly gas_used*gas_price (1x), not double"
+        );
+        // Producer receives EXACTLY gas_used*gas_price (gas payout preserved).
+        assert_eq!(
+            producer_after - producer_before,
+            expected_charge,
+            "producer must receive exactly gas_used*gas_price"
+        );
+    }
+
+    /// BUG B second-order effect: an account funded to only the Ethereum
+    /// requirement (gas + value) must NOT fail inside revm with
+    /// insufficient-funds. With the executor already prepaying gas and revm
+    /// running gas-neutral, revm's balance check requires only `value`, so a
+    /// deploy succeeds without needing 2x the gas balance.
+    #[test]
+    fn test_contract_create_does_not_need_double_gas_balance() {
+        let executor = Executor::testnet();
+        let state = create_test_state();
+        let sender = Address::new([0x44; 20]);
+        let producer = Address::new([0x33; 20]);
+        state.set_nonce(&sender, 0).unwrap();
+
+        let gas_price = 1_000_000_000u64;
+        let gas_limit = 1_000_000u64;
+        // Fund the sender to EXACTLY the gas prepayment (Ethereum requirement),
+        // no slack. Pre-fix this failed inside revm (double deduction).
+        state
+            .set_balance(&sender, U256::from_u64(gas_limit * gas_price))
+            .unwrap();
+
+        let tx = Transaction::contract_create(
+            hex::decode(TEST_INIT_CODE).unwrap(),
+            U256::ZERO,
+            0,
+            gas_limit,
+            U256::from_u64(gas_price),
+        );
+        let result = executor
+            .execute(&sign(tx, sender), &state, &producer)
+            .unwrap();
+        assert!(
+            result.success,
+            "deploy funded to exactly gas requirement must succeed: {:?}",
+            result.error
+        );
+    }
+
     #[test]
     fn test_transfer_advances_nonce_by_one() {
         let executor = Executor::testnet();

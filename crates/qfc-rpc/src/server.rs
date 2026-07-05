@@ -1333,7 +1333,9 @@ impl EthApiServer for RpcServer {
                                     number: format!("0x{:x}", block.number()),
                                     hash: block_hash.to_string(),
                                     parent_hash: block.header.parent_hash.to_string(),
-                                    timestamp: format!("0x{:x}", block.header.timestamp),
+                                    // Header timestamp is ms; emit Unix seconds
+                                    // to match Ethereum convention & eth_getBlock.
+                                    timestamp: format!("0x{:x}", block.header.timestamp / 1000),
                                     state_root: block.header.state_root.to_string(),
                                     transactions_root: block.header.transactions_root.to_string(),
                                     gas_used: format!("0x{:x}", block.header.gas_used),
