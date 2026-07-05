@@ -5,9 +5,9 @@ use crate::evm::EvmExecutor;
 use qfc_crypto::{address_from_public_key, blake3_hash};
 use qfc_state::StateDB;
 use qfc_types::{
-    create_bloom, Address, Log, Receipt, ReceiptStatus, SignedTransaction, Transaction,
-    TransactionType, DEFAULT_CHAIN_ID, MINIMUM_GAS, MIN_DELEGATION, MIN_VALIDATOR_STAKE,
-    TRANSFER_GAS, U256, UNSTAKE_DELAY_SECS,
+    create_bloom, max_validator_stake, Address, Log, Receipt, ReceiptStatus, SignedTransaction,
+    Transaction, TransactionType, DEFAULT_CHAIN_ID, MAX_VALIDATOR_STAKE_PERCENT, MINIMUM_GAS,
+    MIN_DELEGATION, MIN_VALIDATOR_STAKE, TRANSFER_GAS, U256, UNSTAKE_DELAY_SECS,
 };
 use tracing::{debug, trace, warn};
 
@@ -93,6 +93,41 @@ impl Executor {
     /// Create an executor for the default testnet
     pub fn testnet() -> Self {
         Self::new(DEFAULT_CHAIN_ID)
+    }
+
+    fn ensure_validator_stake_cap(
+        &self,
+        state: &StateDB,
+        validator: &Address,
+        added_stake: U256,
+    ) -> Result<()> {
+        if added_stake.is_zero() {
+            return Ok(());
+        }
+
+        let current_total_stake = state.get_total_stake()?;
+        if current_total_stake.is_zero() {
+            return Ok(());
+        }
+
+        // Genesis validators bypass transaction execution; this cap only governs
+        // post-genesis stake/delegation changes.
+        let validator_total_after = state
+            .get_stake(validator)?
+            .saturating_add(state.get_total_delegated_to(validator)?)
+            .saturating_add(added_stake);
+        let network_total_after = current_total_stake.saturating_add(added_stake);
+        let max_allowed = max_validator_stake(network_total_after);
+
+        if validator_total_after > max_allowed {
+            return Err(ExecutorError::ValidatorStakeTooHigh {
+                max_percent: MAX_VALIDATOR_STAKE_PERCENT,
+                max_allowed: max_allowed.to_string(),
+                attempted: validator_total_after.to_string(),
+            });
+        }
+
+        Ok(())
     }
 
     /// Set block context for EVM execution
@@ -216,6 +251,36 @@ impl Executor {
                         minimum: U256::from_u128(MIN_VALIDATOR_STAKE).to_string(),
                         provided: stake.to_string(),
                     });
+                }
+            }
+            TransactionType::ValidatorRegister => {
+                let stake = tx.value;
+                if stake < U256::from_u128(MIN_VALIDATOR_STAKE) {
+                    return Err(ExecutorError::StakeTooLow {
+                        minimum: U256::from_u128(MIN_VALIDATOR_STAKE).to_string(),
+                        provided: stake.to_string(),
+                    });
+                }
+            }
+            TransactionType::Delegate => {
+                let validator = tx.to.ok_or(ExecutorError::MissingRecipient)?;
+                let amount = tx.value;
+                if amount < U256::from_u128(MIN_DELEGATION) {
+                    return Err(ExecutorError::DelegationTooLow {
+                        minimum: U256::from_u128(MIN_DELEGATION).to_string(),
+                        provided: amount.to_string(),
+                    });
+                }
+
+                let (existing_validator, _) = state.get_delegation(&sender)?;
+                if let Some(existing) = existing_validator {
+                    if existing != validator {
+                        return Err(ExecutorError::AlreadyDelegated);
+                    }
+                }
+
+                if state.get_stake(&validator)?.is_zero() {
+                    return Err(ExecutorError::InvalidValidator);
                 }
             }
             _ => {}
@@ -448,6 +513,7 @@ impl Executor {
                 provided: new_stake.to_string(),
             });
         }
+        self.ensure_validator_stake_cap(state, sender, stake_amount)?;
 
         // Lock the tokens (move from balance to stake)
         state.sub_balance(sender, stake_amount)?;
@@ -522,6 +588,7 @@ impl Executor {
                 provided: stake_amount.to_string(),
             });
         }
+        self.ensure_validator_stake_cap(state, sender, stake_amount)?;
 
         // Lock stake
         state.sub_balance(sender, stake_amount)?;
@@ -591,6 +658,7 @@ impl Executor {
         if validator_stake.is_zero() {
             return Err(ExecutorError::InvalidValidator);
         }
+        self.ensure_validator_stake_cap(state, &validator, amount)?;
 
         // Lock tokens (deduct from balance)
         state.sub_balance(sender, amount)?;
@@ -860,5 +928,61 @@ mod tests {
         // Sender should have: initial - transfer - gas
         assert!(sender_balance < U256::from_u128(100_000_000_000_000_000));
         assert_eq!(recipient_balance, U256::from_u64(1000));
+    }
+
+    #[test]
+    fn test_stake_cap_rejects_excessive_stake_increase() {
+        let executor = Executor::testnet();
+        let state = create_test_state();
+        let validator = Address::new([0x11; 20]);
+        let other_validator = Address::new([0x22; 20]);
+
+        state.set_stake(&validator, U256::from_u64(2_000)).unwrap();
+        state
+            .set_stake(&other_validator, U256::from_u64(8_000))
+            .unwrap();
+        state.set_balance(&validator, U256::from_u64(100)).unwrap();
+
+        let tx = Transaction::stake(U256::from_u64(100), 0, U256::ZERO);
+        let err = executor.execute_stake(&tx, &validator, &state).unwrap_err();
+
+        assert!(matches!(err, ExecutorError::ValidatorStakeTooHigh { .. }));
+        assert_eq!(state.get_stake(&validator).unwrap(), U256::from_u64(2_000));
+    }
+
+    #[test]
+    fn test_stake_cap_rejects_excessive_delegation() {
+        let executor = Executor::testnet();
+        let state = create_test_state();
+        let validator = Address::new([0x11; 20]);
+        let other_validator = Address::new([0x22; 20]);
+        let delegator = Address::new([0x33; 20]);
+        let qfc = qfc_types::ONE_QFC;
+
+        state
+            .set_stake(&validator, U256::from_u128(1_950 * qfc))
+            .unwrap();
+        state
+            .set_stake(&other_validator, U256::from_u128(8_050 * qfc))
+            .unwrap();
+        state
+            .set_balance(&delegator, U256::from_u128(qfc_types::MIN_DELEGATION))
+            .unwrap();
+
+        let tx = Transaction::delegate(
+            validator,
+            U256::from_u128(qfc_types::MIN_DELEGATION),
+            0,
+            U256::ZERO,
+        );
+        let err = executor
+            .execute_delegate(&tx, &delegator, &state)
+            .unwrap_err();
+
+        assert!(matches!(err, ExecutorError::ValidatorStakeTooHigh { .. }));
+        assert_eq!(
+            state.get_total_delegated_to(&validator).unwrap(),
+            U256::ZERO
+        );
     }
 }

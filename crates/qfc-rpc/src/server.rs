@@ -33,7 +33,10 @@ use qfc_consensus::NetworkState;
 use qfc_crypto::{blake3_hash, verify_hash_signature};
 use qfc_mempool::Mempool;
 use qfc_network::NetworkService;
-use qfc_types::{Address, EthTransaction, Hash, Transaction, U256};
+use qfc_types::{
+    Address, EthTransaction, Hash, Transaction, JAIL_INVALID_INFERENCE_MS,
+    SLASH_INVALID_INFERENCE_PERCENT, U256,
+};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -2172,7 +2175,11 @@ impl QfcApiServer for RpcServer {
                                 hex::encode(&expected.as_bytes()[..8]),
                                 hex::encode(&got.as_bytes()[..8]),
                             );
-                            consensus.slash_validator(&proof.validator, 5, 6 * 60 * 60 * 1000);
+                            consensus.slash_validator(
+                                &proof.validator,
+                                SLASH_INVALID_INFERENCE_PERCENT as u8,
+                                JAIL_INVALID_INFERENCE_MS,
+                            );
 
                             // Deliver slashing webhook notification
                             crate::webhook::deliver(
@@ -2188,7 +2195,9 @@ impl QfcApiServer for RpcServer {
                                     spot_checked: Some(true),
                                     timestamp: proof.timestamp,
                                     message: format!(
-                                        "Slashing applied: 5% stake penalty, 6h jail. Reason: spot-check output hash mismatch (task {})",
+                                        "Slashing applied: {}% stake penalty, {}h jail. Reason: spot-check output hash mismatch (task {})",
+                                        SLASH_INVALID_INFERENCE_PERCENT,
+                                        JAIL_INVALID_INFERENCE_MS / (60 * 60 * 1000),
                                         hex::encode(&proof.input_hash.as_bytes()[..8]),
                                     ),
                                 },

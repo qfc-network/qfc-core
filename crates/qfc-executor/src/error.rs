@@ -63,6 +63,15 @@ pub enum ExecutorError {
 
     #[error("Insufficient delegation: need {need}, have {have}")]
     InsufficientDelegation { need: String, have: String },
+
+    #[error(
+        "Validator stake exceeds {max_percent}% cap: max {max_allowed}, attempted {attempted}"
+    )]
+    ValidatorStakeTooHigh {
+        max_percent: u64,
+        max_allowed: String,
+        attempted: String,
+    },
 }
 
 impl From<qfc_state::StateError> for ExecutorError {

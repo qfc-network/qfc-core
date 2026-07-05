@@ -587,6 +587,38 @@ impl Trie {
     pub fn contains(&self, key: &[u8]) -> Result<bool> {
         Ok(self.get(key)?.is_some())
     }
+
+    /// Return all values stored in the trie.
+    pub fn values(&self) -> Result<Vec<Vec<u8>>> {
+        let mut values = Vec::new();
+        self.collect_values(&self.root, &mut values)?;
+        Ok(values)
+    }
+
+    fn collect_values(&self, node_hash: &Hash, values: &mut Vec<Vec<u8>>) -> Result<()> {
+        if *node_hash == Hash::ZERO {
+            return Ok(());
+        }
+
+        match self.get_node(node_hash)? {
+            TrieNode::Empty => {}
+            TrieNode::Leaf { value, .. } => values.push(value),
+            TrieNode::Extension { child, .. } => {
+                self.collect_values(&child, values)?;
+            }
+            TrieNode::Branch { children, value } => {
+                if let Some(value) = value {
+                    values.push(value);
+                }
+
+                for child in children.iter().flatten() {
+                    self.collect_values(child, values)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -647,6 +679,23 @@ mod tests {
         assert!(trie.delete(b"key1").unwrap());
         assert!(trie.get(b"key1").unwrap().is_none());
         assert_eq!(trie.get(b"key2").unwrap(), Some(b"value2".to_vec()));
+    }
+
+    #[test]
+    fn test_values() {
+        let mut trie = create_test_trie();
+
+        trie.insert(b"key1", b"value1".to_vec()).unwrap();
+        trie.insert(b"key2", b"value2".to_vec()).unwrap();
+        trie.insert(b"key3", b"value3".to_vec()).unwrap();
+
+        let mut values = trie.values().unwrap();
+        values.sort();
+
+        assert_eq!(
+            values,
+            vec![b"value1".to_vec(), b"value2".to_vec(), b"value3".to_vec()]
+        );
     }
 
     #[test]
