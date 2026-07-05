@@ -13,7 +13,9 @@ use qfc_types::{
     SealedBlock, Transaction, ValidatorNode, BLOCK_INTERVAL_MS, FEE_PRODUCER_PERCENT,
     FEE_TREASURY_PERCENT, U256,
 };
+use std::collections::HashSet;
 use std::sync::Arc;
+use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info, warn};
 
 /// Maximum reorg depth: a fork whose common ancestor is deeper than this
@@ -74,6 +76,12 @@ pub struct Chain {
     /// Last finalized (height, hash). Reorgs never cross it. Starts at
     /// (0, genesis) until finality votes land.
     finalized: RwLock<(u64, Hash)>,
+    /// Optional sink for transactions displaced by a reorg. When a reorg
+    /// abandons a canonical block, every tx it carried that is NOT present
+    /// on the winning branch is sent here so the node can re-inject it into
+    /// the mempool — otherwise a deploy/transfer orphaned by a fork is lost
+    /// forever (phantom-receipt / reorg-cleanup fix, ADR-0013).
+    reorg_tx_sink: RwLock<Option<UnboundedSender<Transaction>>>,
 }
 
 impl Chain {
@@ -92,6 +100,7 @@ impl Chain {
             genesis_hash: RwLock::new(None),
             import_lock: tokio::sync::Mutex::new(()),
             finalized: RwLock::new((0, Hash::ZERO)),
+            reorg_tx_sink: RwLock::new(None),
         };
 
         // Initialize genesis if needed
@@ -460,27 +469,63 @@ impl Chain {
         }
     }
 
-    /// Get receipt with block info
+    /// Resolve a tx hash to its CANONICAL block + position, or `None`.
+    ///
+    /// This is the single source of truth for "is this tx actually on the
+    /// canonical chain right now?". A reorg can leave a stale `TX_INDEX` /
+    /// `RECEIPTS` row for a tx that was only ever in an abandoned block
+    /// (phantom receipt). Rather than trust the recorded location, we load
+    /// the canonical block at that height and verify the tx really sits at
+    /// the recorded index by re-hashing it. A mismatch (or a missing block /
+    /// out-of-range index) means the row is stale and the tx is NOT
+    /// canonical — callers then report it as pending, which is correct: the
+    /// client keeps waiting / resubmits.
+    pub fn canonical_tx_at(&self, hash: &Hash) -> Result<Option<(Block, usize)>> {
+        let (block_height, tx_index) = match self.get_transaction_location(hash)? {
+            Some(loc) => loc,
+            None => return Ok(None),
+        };
+        let block = match self.get_block_by_number(block_height)? {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+        let idx = tx_index as usize;
+        match block.transactions.get(idx) {
+            Some(tx) if blake3_hash(&tx.to_bytes_without_signature()) == *hash => {
+                Ok(Some((block, idx)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Get receipt with block info.
+    ///
+    /// Returns `None` for a tx that is not canonically at its recorded
+    /// location (a phantom receipt left behind by a reorg): the receipt is
+    /// stale, so the RPC reports the tx as pending.
     pub fn get_receipt_with_block_info(&self, hash: &Hash) -> Result<Option<(Receipt, Hash, u64)>> {
+        // Verify the tx is actually on the canonical chain at its recorded
+        // position before trusting the receipt (guards against phantom
+        // receipts from abandoned branches).
+        let block = match self.canonical_tx_at(hash)? {
+            Some((block, _idx)) => block,
+            None => return Ok(None),
+        };
+
         let receipt = match self.get_receipt(hash)? {
             Some(r) => r,
             None => return Ok(None),
         };
 
-        // Get transaction location
-        let (block_height, _tx_index) = match self.get_transaction_location(hash)? {
-            Some(loc) => loc,
-            None => return Ok(Some((receipt, Hash::ZERO, 0))),
-        };
-
-        // Get block hash
-        let block = match self.get_block_by_number(block_height)? {
-            Some(b) => b,
-            None => return Ok(Some((receipt, Hash::ZERO, block_height))),
-        };
-
         let block_hash = blake3_hash(&block.header_bytes());
-        Ok(Some((receipt, block_hash, block_height)))
+        Ok(Some((receipt, block_hash, block.number())))
+    }
+
+    /// Install the sink that receives transactions displaced by a reorg
+    /// (see [`Self::reorg_tx_sink`]). The node wires this to a task that
+    /// re-injects them into the mempool.
+    pub fn set_reorg_tx_sink(&self, sink: UnboundedSender<Transaction>) {
+        *self.reorg_tx_sink.write() = Some(sink);
     }
 
     // ============ Shared deterministic state transition (spec §1) ============
@@ -717,7 +762,7 @@ impl Chain {
             || (block.number() == head.number() && block_hash < head.hash);
         if better {
             match self.reorg_to(block_hash, &block) {
-                Ok(()) => {
+                Ok(_displaced) => {
                     info!(
                         "Reorged to block {} at height {} (old head {} at {})",
                         block_hash,
@@ -768,7 +813,14 @@ impl Chain {
     /// branches that do NOT (those are refused at any depth, since with
     /// review fix 3 finality only ever advances on the canonical chain and
     /// an honest majority branch therefore always qualifies).
-    fn reorg_to(&self, tip_hash: Hash, tip: &Block) -> Result<()> {
+    ///
+    /// Returns the transactions displaced by the reorg: every tx carried by
+    /// an abandoned canonical block that is NOT present on the winning
+    /// branch. Their stale `RECEIPTS` / `TX_INDEX` / `TRANSACTIONS` rows are
+    /// deleted in the same atomic batch (before the new branch's writes, so
+    /// a tx in BOTH branches keeps its correct new location), and each is
+    /// forwarded to [`Self::reorg_tx_sink`] for mempool re-injection.
+    fn reorg_to(&self, tip_hash: Hash, tip: &Block) -> Result<Vec<Transaction>> {
         let old_head = self
             .head
             .read()
@@ -845,16 +897,41 @@ impl Chain {
             executed.push((hash, block, outcome));
         }
 
+        // Every tx hash carried by the winning branch — a tx present in BOTH
+        // the abandoned and the new branch must KEEP its (new) receipt/index,
+        // so it is excluded from the phantom-row deletion below.
+        let new_branch_tx_hashes: HashSet<Hash> = executed
+            .iter()
+            .flat_map(|(_, block, _)| block.transactions.iter())
+            .map(|tx| blake3_hash(&tx.to_bytes_without_signature()))
+            .collect();
+
         // Phase 2 — single atomic batch: drop the old branch's canonical
-        // hash-index entries (its blocks stay available in the hash-keyed
-        // branch store), write every new branch block canonically, and
-        // repoint the head metadata. RocksDB applies the batch atomically,
-        // so a crash or error can never leave a half-rewritten index.
+        // hash-index entries AND the phantom receipt/tx-index/tx rows for the
+        // txs it carried that are not on the new branch (its blocks stay
+        // available in the hash-keyed branch store), write every new branch
+        // block canonically, and repoint the head metadata. RocksDB applies
+        // batch ops in insertion order, so the new-branch writes below land
+        // AFTER these deletes — a tx in both branches ends up with its
+        // correct new receipt/location. The whole batch is atomic, so a
+        // crash or error can never leave a half-rewritten index.
         let mut batch = WriteBatch::new();
+        let mut displaced: Vec<Transaction> = Vec::new();
         for number in (ancestor.number() + 1)..=old_head.number() {
             if let Some(old) = self.get_block_by_number(number)? {
                 let old_hash = blake3_hash(&old.header_bytes());
                 batch.delete(cf::BLOCK_HASH_INDEX, old_hash.as_bytes().to_vec());
+
+                for tx in &old.transactions {
+                    let tx_hash = blake3_hash(&tx.to_bytes_without_signature());
+                    if new_branch_tx_hashes.contains(&tx_hash) {
+                        continue; // survives on the new branch — keep its rows
+                    }
+                    batch.delete(cf::RECEIPTS, tx_hash.as_bytes().to_vec());
+                    batch.delete(cf::TX_INDEX, tx_hash.as_bytes().to_vec());
+                    batch.delete(cf::TRANSACTIONS, tx_hash.as_bytes().to_vec());
+                    displaced.push(tx.clone());
+                }
             }
         }
         for (_, block, outcome) in &executed {
@@ -881,7 +958,17 @@ impl Chain {
             let _ = self.maybe_create_checkpoint(block.number());
         }
 
-        Ok(())
+        // Forward displaced txs for mempool re-injection (best effort: a
+        // missing/closed sink just means no re-injection is wired).
+        if !displaced.is_empty() {
+            if let Some(sink) = self.reorg_tx_sink.read().as_ref() {
+                for tx in &displaced {
+                    let _ = sink.send(tx.clone());
+                }
+            }
+        }
+
+        Ok(displaced)
     }
 
     /// Commit a block as the new canonical head: header/body/indexes/receipts
