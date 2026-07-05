@@ -36,7 +36,7 @@ RUN cargo chef cook --release --features candle --recipe-path recipe.json
 
 # Copy source and build actual binaries (only project crates recompile)
 COPY . .
-RUN cargo build --release --features candle --bin qfc-node --bin qfc-miner
+RUN cargo build --release --features candle --bin qfc-node --bin qfc-miner --bin qfc-watchdog
 
 # ============================================
 # Stage 4: Runtime
@@ -55,6 +55,7 @@ RUN apt-get update && apt-get install -y \
 # Copy binaries from builder
 COPY --from=builder /build/target/release/qfc-node /usr/local/bin/qfc-node
 COPY --from=builder /build/target/release/qfc-miner /usr/local/bin/qfc-miner
+COPY --from=builder /build/target/release/qfc-watchdog /usr/local/bin/qfc-watchdog
 
 # Create data directory
 RUN mkdir -p /data /config /models
