@@ -59,6 +59,13 @@ pub mod cf {
     /// Used to look up transactions/receipts by Ethereum-computed hash
     pub const ETH_TX_INDEX: &str = "eth_tx_index";
 
+    /// Ethereum transaction render metadata: internal_blake3_hash -> EthTxMeta
+    /// (borsh). Reverse of `ETH_TX_INDEX` plus the fields lost by QFC's native
+    /// tx form (keccak hash, full-width `v`, EIP-2718 envelope type, EIP-1559
+    /// fees). Written only by the RPC `eth_sendRawTransaction` path; read only
+    /// when rendering `eth_get*` responses. NOT part of any state root.
+    pub const ETH_TX_META: &str = "eth_tx_meta";
+
     /// Miner earnings: miner_address (20 bytes) + block_height (u64 BE) -> MinerEarning
     /// Indexed by miner address for efficient per-miner queries
     pub const MINER_EARNINGS: &str = "miner_earnings";
@@ -93,6 +100,7 @@ pub mod cf {
         CHECKPOINTS,
         WORK_PROOFS,
         ETH_TX_INDEX,
+        ETH_TX_META,
         MINER_EARNINGS,
         TASKS,
         TRAINING_COMMITMENTS,

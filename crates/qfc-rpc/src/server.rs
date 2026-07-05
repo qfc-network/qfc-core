@@ -2,6 +2,7 @@
 
 use crate::error::RpcError;
 use crate::eth::EthApiServer;
+use crate::net::{NetApiServer, Web3ApiServer};
 use crate::qfc::{
     QfcApiServer, RpcAccountRentInfo, RpcAgentBalance, RpcAgentDetailView, RpcAgentInfo,
     RpcAgentWriteResult, RpcBridgeDeposit, RpcBridgeStatus, RpcBridgeWithdrawal, RpcCfHotKeys,
@@ -22,8 +23,8 @@ use crate::qfc::{
 };
 use crate::txpool::{TxPoolApiServer, TxPoolContent, TxPoolStatus};
 use crate::types::{
-    AddressFilter, BlockNumber, BlockTag, CallRequest, LogFilter, RpcBlock, RpcLog, RpcReceipt,
-    RpcTransaction, TopicFilter,
+    AddressFilter, BlockNumber, BlockTag, CallRequest, LogFilter, RpcBlock, RpcFeeHistory, RpcLog,
+    RpcReceipt, RpcTransaction, TopicFilter,
 };
 use jsonrpsee::core::{RpcResult, SubscriptionResult};
 use jsonrpsee::server::{ServerBuilder, ServerHandle};
@@ -34,7 +35,7 @@ use qfc_crypto::{blake3_hash, verify_hash_signature};
 use qfc_mempool::Mempool;
 use qfc_network::NetworkService;
 use qfc_types::{
-    Address, EthTransaction, Hash, Transaction, JAIL_INVALID_INFERENCE_MS,
+    Address, EthTransaction, EthTxMeta, Hash, Transaction, JAIL_INVALID_INFERENCE_MS,
     SLASH_INVALID_INFERENCE_PERCENT, U256,
 };
 use std::net::SocketAddr;
@@ -346,10 +347,18 @@ impl RpcServer {
         // Merge all RPC modules
         let mut eth_module = EthApiServer::into_rpc(self.clone());
         let qfc_module = QfcApiServer::into_rpc(self.clone());
+        let net_module = NetApiServer::into_rpc(self.clone());
+        let web3_module = Web3ApiServer::into_rpc(self.clone());
         let txpool_module = TxPoolApiServer::into_rpc(self);
         eth_module
             .merge(qfc_module)
             .expect("Failed to merge QFC RPC module");
+        eth_module
+            .merge(net_module)
+            .expect("Failed to merge net RPC module");
+        eth_module
+            .merge(web3_module)
+            .expect("Failed to merge web3 RPC module");
         eth_module
             .merge(txpool_module)
             .expect("Failed to merge txpool RPC module");
@@ -370,6 +379,48 @@ impl RpcServer {
                 BlockTag::Earliest => 0,
             },
         }
+    }
+
+    /// Render a block into its RPC DTO, resolving per-transaction Ethereum
+    /// render metadata (canonical keccak hash / full-width `v` / EIP-2718
+    /// envelope / EIP-1559 fees) and computing the block-level logs bloom as
+    /// the OR of every receipt bloom in the block.
+    fn render_block(&self, block: qfc_types::Block, block_hash: Hash, full_tx: bool) -> RpcBlock {
+        let mut eth_metas: Vec<Option<EthTxMeta>> = Vec::with_capacity(block.transactions.len());
+        let mut bloom = qfc_types::Bloom::new();
+        for tx in &block.transactions {
+            let internal = blake3_hash(&tx.to_bytes_without_signature());
+            eth_metas.push(self.chain.get_eth_tx_meta(&internal).ok().flatten());
+            if let Ok(Some(receipt)) = self.chain.get_receipt(&internal) {
+                bloom.accrue_bloom(&receipt.logs_bloom);
+            }
+        }
+        let logs_bloom = Some(format!("0x{}", hex::encode(bloom.0)));
+        RpcBlock::from_block(block, block_hash, full_tx, &eth_metas, logs_bloom)
+    }
+
+    /// Render the transaction at `index` (hex quantity) within `block`, or
+    /// `None` if the index is out of range. Reuses the same Ethereum render
+    /// metadata resolution as block/tx rendering.
+    fn render_tx_at_index(
+        &self,
+        block: qfc_types::Block,
+        block_hash: Hash,
+        index: &str,
+    ) -> Option<RpcTransaction> {
+        let idx_str = index.strip_prefix("0x").unwrap_or(index);
+        let idx = usize::from_str_radix(idx_str, 16).ok()?;
+        let tx = block.transactions.get(idx)?.clone();
+        let internal = blake3_hash(&tx.to_bytes_without_signature());
+        let eth_meta = self.chain.get_eth_tx_meta(&internal).ok().flatten();
+        Some(RpcTransaction::from_tx(
+            tx,
+            internal,
+            block_hash,
+            block.number(),
+            idx as u32,
+            eth_meta.as_ref(),
+        ))
     }
 
     fn parse_address(s: &str) -> Result<Address, RpcError> {
@@ -711,7 +762,7 @@ impl EthApiServer for RpcServer {
         match block {
             Some(b) => {
                 let hash = blake3_hash(&b.header_bytes());
-                Ok(Some(RpcBlock::from_block(b, hash, full_tx)))
+                Ok(Some(self.render_block(b, hash, full_tx)))
             }
             None => Ok(None),
         }
@@ -726,7 +777,7 @@ impl EthApiServer for RpcServer {
             .map_err(|e| RpcError::Internal(e.to_string()))?;
 
         match block {
-            Some(b) => Ok(Some(RpcBlock::from_block(b, hash, full_tx))),
+            Some(b) => Ok(Some(self.render_block(b, hash, full_tx))),
             None => Ok(None),
         }
     }
@@ -740,15 +791,22 @@ impl EthApiServer for RpcServer {
             .translate_eth_hash(&original_hash)
             .map_err(|e| RpcError::Internal(e.to_string()))?;
 
+        // Render metadata (canonical keccak hash, full-width v, envelope type,
+        // EIP-1559 fees) keyed by the internal hash; None for native QFC txs.
+        let eth_meta = self
+            .chain
+            .get_eth_tx_meta(&internal_hash)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
         // Check mempool first (using internal hash)
         if let Some(pooled) = self.mempool.read().get(&internal_hash) {
             let sender_hash = blake3_hash(pooled.tx.signature.as_bytes());
             let sender = Address::from_slice(&sender_hash.as_bytes()[12..32]).unwrap();
-            // Return the original hash that the user queried with
             return Ok(Some(RpcTransaction::from_pending(
                 pooled.tx,
-                original_hash,
+                internal_hash,
                 sender,
+                eth_meta.as_ref(),
             )));
         }
 
@@ -773,16 +831,22 @@ impl EthApiServer for RpcServer {
                     let block_hash = blake3_hash(&block.header_bytes());
                     Ok(Some(RpcTransaction::from_tx(
                         t,
-                        original_hash,
+                        internal_hash,
                         block_hash,
                         block.number(),
                         tx_index as u32,
+                        eth_meta.as_ref(),
                     )))
                 } else {
                     // Not canonical (pending or phantom) — treat as pending.
                     let sender_hash = blake3_hash(t.signature.as_bytes());
                     let sender = Address::from_slice(&sender_hash.as_bytes()[12..32]).unwrap();
-                    Ok(Some(RpcTransaction::from_pending(t, original_hash, sender)))
+                    Ok(Some(RpcTransaction::from_pending(
+                        t,
+                        internal_hash,
+                        sender,
+                        eth_meta.as_ref(),
+                    )))
                 }
             }
             None => Ok(None),
@@ -843,12 +907,23 @@ impl EthApiServer for RpcServer {
                     None
                 };
 
+                // effectiveGasPrice = the price actually paid (tx gas price);
+                // type = the EIP-2718 envelope (from render metadata, else 0).
+                let eth_meta = self
+                    .chain
+                    .get_eth_tx_meta(&internal_hash)
+                    .map_err(|e| RpcError::Internal(e.to_string()))?;
+                let effective_gas_price = tx.as_ref().map(|t| t.gas_price).unwrap_or(U256::ZERO);
+                let tx_type = eth_meta.map(|m| m.tx_type).unwrap_or(0);
+
                 Ok(Some(RpcReceipt::from_receipt(
                     receipt,
                     from,
                     to,
                     block_hash_opt,
                     block_number_opt,
+                    effective_gas_price,
+                    tx_type,
                 )))
             }
             None => Ok(None),
@@ -937,6 +1012,15 @@ impl EthApiServer for RpcServer {
             .store_eth_tx_hash_mapping(&eth_hash, &internal_hash)
         {
             warn!("Failed to store Ethereum tx hash mapping: {}", e);
+        }
+
+        // Store render-only metadata (reverse hash map + full-width v + EIP-2718
+        // envelope type + EIP-1559 fees) so eth_get* responses are wallet-faithful.
+        if let Err(e) = self
+            .chain
+            .store_eth_tx_meta(&internal_hash, &eth_tx.to_meta())
+        {
+            warn!("Failed to store Ethereum tx render metadata: {}", e);
         }
 
         // Add to mempool with nonce validation
@@ -1303,6 +1387,116 @@ impl EthApiServer for RpcServer {
         Ok(result_logs)
     }
 
+    async fn max_priority_fee_per_gas(&self) -> RpcResult<String> {
+        // QFC uses a flat gas model with no priority fee.
+        Ok("0x0".to_string())
+    }
+
+    async fn fee_history(
+        &self,
+        block_count: serde_json::Value,
+        newest_block: BlockNumber,
+        reward_percentiles: Option<Vec<f64>>,
+    ) -> RpcResult<RpcFeeHistory> {
+        // blockCount may arrive as a hex quantity string ("0x5") or a JSON
+        // number depending on the client; accept both.
+        let count = match &block_count {
+            serde_json::Value::String(s) => {
+                let s = s.strip_prefix("0x").unwrap_or(s);
+                u64::from_str_radix(s, 16)
+                    .map_err(|e| RpcError::InvalidParams(format!("invalid blockCount: {}", e)))?
+            }
+            serde_json::Value::Number(n) => n
+                .as_u64()
+                .ok_or_else(|| RpcError::InvalidParams("invalid blockCount".to_string()))?,
+            _ => return Err(RpcError::InvalidParams("invalid blockCount".to_string()).into()),
+        };
+
+        let newest = self.resolve_block_number(Some(newest_block));
+        Ok(RpcFeeHistory::build(
+            count,
+            newest,
+            reward_percentiles.as_deref(),
+        ))
+    }
+
+    async fn syncing(&self) -> RpcResult<serde_json::Value> {
+        match &self.sync_status {
+            Some(provider) if provider.is_syncing() => {
+                let current = self.chain.block_number();
+                let highest = provider.highest_peer_block().max(current);
+                Ok(serde_json::json!({
+                    "startingBlock": "0x0",
+                    "currentBlock": format!("0x{:x}", current),
+                    "highestBlock": format!("0x{:x}", highest),
+                }))
+            }
+            // Caught up (or no provider wired): report not syncing.
+            _ => Ok(serde_json::Value::Bool(false)),
+        }
+    }
+
+    async fn accounts(&self) -> RpcResult<Vec<String>> {
+        // The node holds no unlocked accounts; signing is client-side.
+        Ok(vec![])
+    }
+
+    async fn get_block_transaction_count_by_number(
+        &self,
+        block: BlockNumber,
+    ) -> RpcResult<Option<String>> {
+        let block_num = self.resolve_block_number(Some(block));
+        let block = self
+            .chain
+            .get_block_by_number(block_num)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(block.map(|b| format!("0x{:x}", b.transactions.len())))
+    }
+
+    async fn get_block_transaction_count_by_hash(&self, hash: String) -> RpcResult<Option<String>> {
+        let hash = Self::parse_hash(&hash)?;
+        let block = self
+            .chain
+            .get_block_by_hash(&hash)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(block.map(|b| format!("0x{:x}", b.transactions.len())))
+    }
+
+    async fn get_transaction_by_block_number_and_index(
+        &self,
+        block: BlockNumber,
+        index: String,
+    ) -> RpcResult<Option<RpcTransaction>> {
+        let block_num = self.resolve_block_number(Some(block));
+        let block = self
+            .chain
+            .get_block_by_number(block_num)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        match block {
+            Some(b) => {
+                let block_hash = blake3_hash(&b.header_bytes());
+                Ok(self.render_tx_at_index(b, block_hash, &index))
+            }
+            None => Ok(None),
+        }
+    }
+
+    async fn get_transaction_by_block_hash_and_index(
+        &self,
+        hash: String,
+        index: String,
+    ) -> RpcResult<Option<RpcTransaction>> {
+        let block_hash = Self::parse_hash(&hash)?;
+        let block = self
+            .chain
+            .get_block_by_hash(&block_hash)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        match block {
+            Some(b) => Ok(self.render_tx_at_index(b, block_hash, &index)),
+            None => Ok(None),
+        }
+    }
+
     async fn eth_subscribe(
         &self,
         pending: jsonrpsee::PendingSubscriptionSink,
@@ -1392,6 +1586,29 @@ impl EthApiServer for RpcServer {
         }
 
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl NetApiServer for RpcServer {
+    async fn version(&self) -> RpcResult<String> {
+        // net_version is the network id as a decimal string (chain id).
+        Ok(self.chain_id.to_string())
+    }
+
+    async fn listening(&self) -> RpcResult<bool> {
+        Ok(self.network.is_some())
+    }
+
+    async fn peer_count(&self) -> RpcResult<String> {
+        Ok("0x0".to_string())
+    }
+}
+
+#[async_trait::async_trait]
+impl Web3ApiServer for RpcServer {
+    async fn client_version(&self) -> RpcResult<String> {
+        Ok(format!("qfc-node/v{}", env!("CARGO_PKG_VERSION")))
     }
 }
 
@@ -4818,9 +5035,10 @@ impl TxPoolApiServer for RpcServer {
             let nonce_map = pending.entry(sender_str).or_default();
             for ptx in txs {
                 let nonce_str = format!("{}", ptx.tx.nonce);
+                let eth_meta = self.chain.get_eth_tx_meta(&ptx.hash).ok().flatten();
                 nonce_map.insert(
                     nonce_str,
-                    RpcTransaction::from_pending(ptx.tx, ptx.hash, ptx.sender),
+                    RpcTransaction::from_pending(ptx.tx, ptx.hash, ptx.sender, eth_meta.as_ref()),
                 );
             }
         }

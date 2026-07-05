@@ -4,6 +4,7 @@
 //! (RLP-encoded with secp256k1 signatures) and converting them to QFC's native format.
 
 use crate::{Address, Hash, PublicKey, Signature, Transaction, TransactionType, U256};
+use borsh::{BorshDeserialize, BorshSerialize};
 use k256::ecdsa::{RecoveryId, Signature as K256Signature, VerifyingKey};
 use rlp::Rlp;
 use sha3::{Digest, Keccak256};
@@ -314,6 +315,22 @@ impl EthTransaction {
         })
     }
 
+    /// EIP-2718 envelope type for this transaction: `0` legacy, `1` EIP-2930
+    /// (access list), `2` EIP-1559 (dynamic fee). Derived from the decoded
+    /// form. This is the value Ethereum tooling expects in a transaction's
+    /// `type` field — distinct from QFC's internal [`TransactionType`].
+    pub fn envelope_type(&self) -> u8 {
+        if self.is_eip1559 {
+            2
+        } else if self.v <= 1 {
+            // EIP-2930 signatures carry a bare recovery id (0/1); legacy
+            // signatures always have v >= 27 (27/28 pre-155, or chain*2+35+).
+            1
+        } else {
+            0
+        }
+    }
+
     /// Convert to QFC's native Transaction format
     ///
     /// Note: The signature fields (public_key, signature) will be set to
@@ -341,6 +358,56 @@ impl EthTransaction {
             public_key: PublicKey::ZERO,
             signature: Signature::ZERO,
         }
+    }
+
+    /// Build the render-only [`EthTxMeta`] record for this decoded tx.
+    pub fn to_meta(&self) -> EthTxMeta {
+        EthTxMeta {
+            eth_hash: self.hash,
+            v: self.v,
+            tx_type: self.envelope_type(),
+            max_priority_fee_per_gas: self.max_priority_fee_per_gas,
+            max_fee_per_gas: self.max_fee_per_gas,
+        }
+    }
+}
+
+/// Render-only metadata for an Ethereum-submitted transaction.
+///
+/// QFC stores every transaction in its native [`Transaction`] form and indexes
+/// it by an internal BLAKE3 hash. That form is lossy for Ethereum tooling: the
+/// canonical keccak256 tx hash, the full-width `v`, the EIP-2718 envelope type,
+/// and the EIP-1559 fee fields are not recoverable from it. This record
+/// captures exactly those fields so the JSON-RPC layer can render
+/// wallet-faithful transaction objects.
+///
+/// It is written only by the RPC `eth_sendRawTransaction` path, keyed by the
+/// internal hash, and read only when rendering `eth_get*` responses. It is
+/// NEVER part of consensus, block commit, or any state root.
+#[derive(Clone, Debug, Default, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct EthTxMeta {
+    /// Canonical keccak256 transaction hash (as returned by
+    /// `eth_sendRawTransaction`).
+    pub eth_hash: Hash,
+    /// Full-width signature `v` (EIP-155 legacy v can exceed one byte).
+    pub v: u64,
+    /// EIP-2718 envelope type: 0 legacy, 1 EIP-2930, 2 EIP-1559.
+    pub tx_type: u8,
+    /// EIP-1559 max priority fee per gas (tip), if applicable.
+    pub max_priority_fee_per_gas: Option<U256>,
+    /// EIP-1559 max fee per gas, if applicable.
+    pub max_fee_per_gas: Option<U256>,
+}
+
+impl EthTxMeta {
+    /// Serialize with Borsh for storage.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        borsh::to_vec(self).unwrap_or_default()
+    }
+
+    /// Deserialize from Borsh-encoded storage bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        borsh::from_slice(bytes).ok()
     }
 }
 
