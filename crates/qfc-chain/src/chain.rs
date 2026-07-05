@@ -13,6 +13,7 @@ use qfc_types::{
     SealedBlock, Transaction, ValidatorNode, BLOCK_INTERVAL_MS, FEE_PRODUCER_PERCENT,
     FEE_TREASURY_PERCENT, U256,
 };
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
@@ -651,12 +652,29 @@ impl Chain {
     /// binaries write it in the commit batch; fresh syncs re-write history).
     fn block_hash_lookup(&self) -> qfc_executor::BlockHashLookup {
         let db = self.db.clone();
+        // Every height visited during a walk is cached, so a contract that
+        // queries all 256 window heights costs ONE full walk (≤256 reads)
+        // total instead of Σ1..256 ≈ 33k. The cache is valid because the
+        // closure is built per execution and `start` (the executing block's
+        // parent) is constant within it — guarded anyway by clearing when
+        // `start` changes.
+        let visited: parking_lot::Mutex<(Option<Hash>, HashMap<u64, Hash>)> =
+            parking_lot::Mutex::new((None, HashMap::new()));
         Arc::new(move |start: &Hash, wanted: u64| -> Option<Hash> {
+            let mut guard = visited.lock();
+            if guard.0 != Some(*start) {
+                *guard = (Some(*start), HashMap::new());
+            }
+            if let Some(hash) = guard.1.get(&wanted) {
+                return Some(*hash);
+            }
             let mut cursor = *start;
             loop {
                 let bytes = db.get(cf::BLOCKS_BY_HASH, cursor.as_bytes()).ok()??;
                 let block: Block = borsh::from_slice(&bytes).ok()?;
-                match block.number() {
+                let n = block.number();
+                guard.1.insert(n, cursor);
+                match n {
                     n if n == wanted => return Some(cursor),
                     // Walked past the target (or reached genesis) without
                     // finding it — out of range for this ancestor chain.
