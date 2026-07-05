@@ -494,4 +494,30 @@ mod tests {
         assert_eq!(selected.len(), 3);
         assert_eq!(selected[0].gas_price, U256::from_u64(3_000_000_000));
     }
+
+    /// Import-time eviction (sync.rs, #135) recomputes tx hashes as
+    /// `blake3_hash(&tx.to_bytes_without_signature())` from imported block
+    /// bodies. That must remain the pool's own key space, or evicting txs
+    /// mined by other validators silently misses and zombies accumulate.
+    #[test]
+    fn test_remove_many_by_recomputed_hash() {
+        let pool = Mempool::default_pool();
+        let sender = Address::new([0x11; 20]);
+        let tx0 = create_test_tx(0, 2_000_000_000);
+        let tx1 = create_test_tx(1, 2_000_000_000);
+
+        pool.add(tx0.clone(), sender).unwrap();
+        pool.add(tx1.clone(), sender).unwrap();
+        assert_eq!(pool.size(), 2);
+
+        // Recompute hashes exactly the way the import path does.
+        let hashes: Vec<Hash> = [&tx0, &tx1]
+            .iter()
+            .map(|tx| blake3_hash(&tx.to_bytes_without_signature()))
+            .collect();
+        pool.remove_many(&hashes);
+
+        assert_eq!(pool.size(), 0);
+        assert!(pool.oldest_tx_age().is_none());
+    }
 }
