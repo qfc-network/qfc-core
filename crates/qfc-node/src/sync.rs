@@ -9,7 +9,10 @@ use qfc_network::{NetworkMessage, NetworkService, SyncEvent, SyncRequest, SyncRe
 use qfc_rpc::SyncStatusProvider;
 use qfc_types::{
     Block, Hash, Heartbeat, InferenceProof, SlashingEvidence, ValidatorMessage, Vote, VoteDecision,
-    WorkProof, BLOCK_INTERVAL_MS,
+    WorkProof, BLOCK_INTERVAL_MS, JAIL_CENSORSHIP_MS, JAIL_DOUBLE_SIGN_MS, JAIL_FALSE_VOTE_MS,
+    JAIL_INVALID_BLOCK_MS, JAIL_INVALID_INFERENCE_MS, JAIL_OFFLINE_MS, SLASH_CENSORSHIP_PERCENT,
+    SLASH_DOUBLE_SIGN_PERCENT, SLASH_FALSE_VOTE_PERCENT, SLASH_INVALID_BLOCK_PERCENT,
+    SLASH_INVALID_INFERENCE_PERCENT, SLASH_OFFLINE_PERCENT,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -410,6 +413,15 @@ impl SyncManager {
         loop {
             ticker.tick().await;
 
+            // Backstop for import-time eviction: drop txs older than
+            // `tx_lifetime` that were never mined under this exact hash
+            // (e.g. superseded duplicates). Without this call the pool's
+            // expiry never runs at all (#135).
+            let expired = self.mempool.write().remove_expired();
+            if expired > 0 {
+                debug!("Mempool maintenance: dropped {expired} expired transactions");
+            }
+
             let our_height = self.chain.block_number();
             // Trigger ONLY on fresh verified (status-confirmed,
             // genesis-matching) peer heads — never `highest_peer_block`,
@@ -569,6 +581,26 @@ impl SyncManager {
         }
     }
 
+    /// Evict a just-imported block's transactions from the local mempool.
+    ///
+    /// Production-time eviction (producer.rs) only covers blocks this node
+    /// produced itself. Without import-time eviction every tx mined by
+    /// another validator lingers forever: `select_with_nonce` skips
+    /// stale-nonce txs without removing them and nothing else calls the
+    /// pool's cleanup primitives, so the oldest-tx-age SLI rises
+    /// monotonically (#135).
+    fn evict_imported_txs(&self, block: &Block) {
+        if block.transactions.is_empty() {
+            return;
+        }
+        let hashes: Vec<Hash> = block
+            .transactions
+            .iter()
+            .map(|tx| blake3_hash(&tx.to_bytes_without_signature()))
+            .collect();
+        self.mempool.write().remove_many(&hashes);
+    }
+
     /// Handle an incoming block
     async fn handle_block(&self, data: Vec<u8>) {
         let block: Block = match borsh::from_slice(&data) {
@@ -593,6 +625,7 @@ impl SyncManager {
         match self.chain.import_block(block.clone()).await {
             Ok(_) => {
                 info!("Imported block #{} from network", block_number);
+                self.evict_imported_txs(&block);
                 // Only a VALIDATED height may ratchet highest_peer_block
                 // (review fix 15): pre-validation gossip heights let a bogus
                 // claim drive the catch-up loop forever.
@@ -768,6 +801,7 @@ impl SyncManager {
                             match self_clone.chain.import_block(block.clone()).await {
                                 Ok(_) => {
                                     info!("Imported fetched block #{}", block_number);
+                                    self_clone.evict_imported_txs(&block);
                                     // Try to process pending blocks
                                     self_clone.process_pending_blocks().await;
                                 }
@@ -837,6 +871,7 @@ impl SyncManager {
                 match self.chain.import_block(block.clone()).await {
                     Ok(_) => {
                         info!("Imported pending block #{}", block_number);
+                        self.evict_imported_txs(&block);
                         imported = true;
                         // Early-stored votes for this block may already form
                         // a quorum — re-check now that it is importable.
@@ -1289,14 +1324,25 @@ impl SyncManager {
             return;
         }
 
-        // Determine slash parameters based on offense type
+        // Determine slash parameters based on the constants.rs single source.
         let (slash_percent, jail_duration_ms) = match evidence.offense {
-            qfc_types::SlashableOffense::DoubleSign => (10, 24 * 60 * 60 * 1000), // 10%, 24 hours
-            qfc_types::SlashableOffense::InvalidBlock => (5, 12 * 60 * 60 * 1000), // 5%, 12 hours
-            qfc_types::SlashableOffense::Censorship => (3, 6 * 60 * 60 * 1000),   // 3%, 6 hours
-            qfc_types::SlashableOffense::Offline => (1, 1 * 60 * 60 * 1000),      // 1%, 1 hour
-            qfc_types::SlashableOffense::FalseVote => (2, 2 * 60 * 60 * 1000),    // 2%, 2 hours
-            qfc_types::SlashableOffense::InvalidInference => (5, 6 * 60 * 60 * 1000), // 5%, 6 hours
+            qfc_types::SlashableOffense::DoubleSign => {
+                (SLASH_DOUBLE_SIGN_PERCENT as u8, JAIL_DOUBLE_SIGN_MS)
+            }
+            qfc_types::SlashableOffense::InvalidBlock => {
+                (SLASH_INVALID_BLOCK_PERCENT as u8, JAIL_INVALID_BLOCK_MS)
+            }
+            qfc_types::SlashableOffense::Censorship => {
+                (SLASH_CENSORSHIP_PERCENT as u8, JAIL_CENSORSHIP_MS)
+            }
+            qfc_types::SlashableOffense::Offline => (SLASH_OFFLINE_PERCENT as u8, JAIL_OFFLINE_MS),
+            qfc_types::SlashableOffense::FalseVote => {
+                (SLASH_FALSE_VOTE_PERCENT as u8, JAIL_FALSE_VOTE_MS)
+            }
+            qfc_types::SlashableOffense::InvalidInference => (
+                SLASH_INVALID_INFERENCE_PERCENT as u8,
+                JAIL_INVALID_INFERENCE_MS,
+            ),
             // InvalidTraining is handled by the early-return guard above
             // (A5 absolute-slash path, ADR-0009 D4 + A6) and never reaches here.
             qfc_types::SlashableOffense::InvalidTraining => {
@@ -1624,7 +1670,11 @@ impl SyncManager {
                             agree_count,
                             total_count,
                         );
-                        consensus.slash_validator(&miner, 5, 6 * 60 * 60 * 1000);
+                        consensus.slash_validator(
+                            &miner,
+                            SLASH_INVALID_INFERENCE_PERCENT as u8,
+                            JAIL_INVALID_INFERENCE_MS,
+                        );
                     }
                     qfc_ai_coordinator::ArbitrationOutcome::Inconclusive => {
                         info!(
@@ -1735,6 +1785,7 @@ impl SyncManager {
                             match self.chain.import_block(block.clone()).await {
                                 Ok(_) => {
                                     info!("Synced block #{}", block_number);
+                                    self.evict_imported_txs(&block);
                                 }
                                 Err(qfc_chain::ChainError::BlockAlreadyKnown) => {
                                     debug!("Block #{} already known", block_number);

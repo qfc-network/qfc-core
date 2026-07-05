@@ -33,7 +33,10 @@ use qfc_consensus::NetworkState;
 use qfc_crypto::{blake3_hash, verify_hash_signature};
 use qfc_mempool::Mempool;
 use qfc_network::NetworkService;
-use qfc_types::{Address, EthTransaction, Hash, Transaction, U256};
+use qfc_types::{
+    Address, EthTransaction, Hash, Transaction, JAIL_INVALID_INFERENCE_MS,
+    SLASH_INVALID_INFERENCE_PERCENT, U256,
+};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -757,30 +760,26 @@ impl EthApiServer for RpcServer {
 
         match tx {
             Some(t) => {
-                // Look up block location to determine if tx is confirmed
-                let location = self
+                // Report confirmed ONLY if the tx is canonically at its
+                // recorded location — a stale index row left by a reorg
+                // (phantom) must surface as pending, not falsely confirmed.
+                let canonical = self
                     .chain
-                    .get_transaction_location(&internal_hash)
+                    .canonical_tx_at(&internal_hash)
                     .map_err(|e| RpcError::Internal(e.to_string()))?;
 
-                if let Some((block_height, tx_index)) = location {
-                    // Confirmed: get block hash and return with full block info
-                    let block_hash = self
-                        .chain
-                        .get_block_by_number(block_height)
-                        .map_err(|e| RpcError::Internal(e.to_string()))?
-                        .map(|b| blake3_hash(&b.header_bytes()))
-                        .unwrap_or(Hash::ZERO);
-
+                if let Some((block, tx_index)) = canonical {
+                    // Confirmed: return with full block info.
+                    let block_hash = blake3_hash(&block.header_bytes());
                     Ok(Some(RpcTransaction::from_tx(
                         t,
                         original_hash,
                         block_hash,
-                        block_height,
-                        tx_index,
+                        block.number(),
+                        tx_index as u32,
                     )))
                 } else {
-                    // No location found — treat as pending
+                    // Not canonical (pending or phantom) — treat as pending.
                     let sender_hash = blake3_hash(t.signature.as_bytes());
                     let sender = Address::from_slice(&sender_hash.as_bytes()[12..32]).unwrap();
                     Ok(Some(RpcTransaction::from_pending(t, original_hash, sender)))
@@ -2172,7 +2171,11 @@ impl QfcApiServer for RpcServer {
                                 hex::encode(&expected.as_bytes()[..8]),
                                 hex::encode(&got.as_bytes()[..8]),
                             );
-                            consensus.slash_validator(&proof.validator, 5, 6 * 60 * 60 * 1000);
+                            consensus.slash_validator(
+                                &proof.validator,
+                                SLASH_INVALID_INFERENCE_PERCENT as u8,
+                                JAIL_INVALID_INFERENCE_MS,
+                            );
 
                             // Deliver slashing webhook notification
                             crate::webhook::deliver(
@@ -2188,7 +2191,9 @@ impl QfcApiServer for RpcServer {
                                     spot_checked: Some(true),
                                     timestamp: proof.timestamp,
                                     message: format!(
-                                        "Slashing applied: 5% stake penalty, 6h jail. Reason: spot-check output hash mismatch (task {})",
+                                        "Slashing applied: {}% stake penalty, {}h jail. Reason: spot-check output hash mismatch (task {})",
+                                        SLASH_INVALID_INFERENCE_PERCENT,
+                                        JAIL_INVALID_INFERENCE_MS / (60 * 60 * 1000),
                                         hex::encode(&proof.input_hash.as_bytes()[..8]),
                                     ),
                                 },

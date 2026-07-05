@@ -310,6 +310,47 @@ async fn main() -> Result<()> {
     // Create mempool
     let mempool = Arc::new(RwLock::new(Mempool::new(MempoolConfig::default())));
 
+    // Reorg re-injection: transactions displaced by a reorg (carried by an
+    // abandoned block but absent from the winning branch) would otherwise be
+    // lost forever — the producer purges them on inclusion and importers
+    // never held them. The chain forwards each displaced tx here; a task
+    // re-adds it to the mempool via the same nonce-validated path the network
+    // handler uses, so it can be re-included on the canonical chain (ADR-0013).
+    // Bounded so a reorg storm drops (via try_send in reorg_to) instead of
+    // growing memory; 4096 is far above any realistic single-reorg displaced set.
+    let (reorg_tx, mut reorg_rx) = tokio::sync::mpsc::channel::<qfc_types::Transaction>(4096);
+    chain.set_reorg_tx_sink(reorg_tx);
+    {
+        let chain = chain.clone();
+        let mempool = mempool.clone();
+        tokio::spawn(async move {
+            while let Some(tx) = reorg_rx.recv().await {
+                let tx_hash = qfc_crypto::blake3_hash(&tx.to_bytes_without_signature());
+                // Sender derivation mirrors the network handler (sync.rs).
+                let sender_hash = qfc_crypto::blake3_hash(tx.signature.as_bytes());
+                let sender = match qfc_types::Address::from_slice(&sender_hash.as_bytes()[12..32]) {
+                    Some(addr) => addr,
+                    None => continue,
+                };
+                let state = chain.state();
+                match mempool
+                    .write()
+                    .add_with_nonce_check(tx, sender, Some(state.as_ref()))
+                {
+                    Ok(_) => info!(
+                        "Re-injected reorg-displaced tx {} into mempool",
+                        hex::encode(&tx_hash.as_bytes()[..8])
+                    ),
+                    Err(e) => tracing::debug!(
+                        "Skipped reorg-displaced tx {} (stale/already-included): {}",
+                        hex::encode(&tx_hash.as_bytes()[..8]),
+                        e
+                    ),
+                }
+            }
+        });
+    }
+
     // v2.0: Shared proof pool and task pool for RPC, sync, and block producer
     let proof_pool = Arc::new(RwLock::new(ProofPool::new()));
     let task_pool = Arc::new(RwLock::new(TaskPool::new()));

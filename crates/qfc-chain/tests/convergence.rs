@@ -149,6 +149,46 @@ fn seal_at_slot(chain: &Chain, engines: &[ConsensusEngine], parent: &Block, slot
         .unwrap()
 }
 
+/// Seal a block for `slot` on `parent` carrying `txs`, signed by the slot's
+/// elected leader, with the state root produced by the shared deterministic
+/// transition. Like [`seal_at_slot`] but with a non-empty body.
+fn seal_at_slot_with_txs(
+    chain: &Chain,
+    engines: &[ConsensusEngine],
+    parent: &Block,
+    slot: u64,
+    txs: Vec<Transaction>,
+) -> Block {
+    let leader = engines[0].select_producer(slot).expect("leader");
+    let idx = engines
+        .iter()
+        .position(|e| e.our_address() == Some(leader))
+        .expect("leader engine");
+    let timestamp = slot_timestamp(slot);
+
+    let outcome = chain
+        .execute_at(
+            parent.state_root(),
+            parent.number() + 1,
+            timestamp,
+            &leader,
+            &txs,
+        )
+        .unwrap();
+
+    engines[idx]
+        .produce_block(
+            parent,
+            txs,
+            outcome.receipts,
+            outcome.state_root,
+            outcome.gas_used,
+            vec![],
+            timestamp,
+        )
+        .unwrap()
+}
+
 fn block_hash(block: &Block) -> Hash {
     blake3_hash(&block.header_bytes())
 }
@@ -654,4 +694,139 @@ async fn undelegate_unlock_time_is_block_deterministic() {
         .expect("re-import after delay must be byte-identical");
     assert_eq!(chain_c.state_root(), chain_a.state_root());
     assert_eq!(chain_c.head().unwrap().hash, chain_a.head().unwrap().hash);
+}
+
+/// A funded transfer from validator 0 (holds the genesis balance alloc),
+/// signed and ready to include in a block.
+fn funded_transfer(nonce: u64) -> Transaction {
+    let sender_key = &keys()[0];
+    let recipient = address_from_public_key(&keys()[2].public_key());
+    let gas_price = U256::from_u64(qfc_types::MIN_GAS_PRICE);
+    signed_tx(
+        sender_key,
+        Transaction::transfer(recipient, U256::from_u64(1000), nonce, gas_price),
+    )
+}
+
+/// PHANTOM-RECEIPT / REORG-CLEANUP FIX (ADR-0013).
+///
+/// A tx lands in a block that is briefly canonical, then a strictly longer
+/// competing branch (which never contains the tx) forces a reorg that
+/// abandons it. Afterwards:
+///   * `get_receipt_with_block_info` reports the tx as gone (phantom guard),
+///   * the underlying `RECEIPTS` / `TX_INDEX` / `TRANSACTIONS` rows are purged.
+#[tokio::test]
+async fn reorg_purges_phantom_receipt_of_displaced_tx() {
+    let chain = make_chain();
+    let engines = validator_engines(&chain);
+    let genesis = chain.head().unwrap().block;
+    let base = past_slot_base();
+
+    let tx = funded_transfer(0);
+    let tx_hash = blake3_hash(&tx.to_bytes_without_signature());
+
+    // B1 at height 1 CONTAINS the tx and is (briefly) canonical.
+    let b1 = seal_at_slot_with_txs(&chain, &engines, &genesis, base, vec![tx.clone()]);
+    chain.import_block(b1.clone()).await.unwrap();
+    assert_eq!(chain.block_number(), 1);
+
+    // While B1 is canonical the receipt, location and full receipt view exist.
+    assert!(chain.get_receipt(&tx_hash).unwrap().is_some());
+    assert!(chain.get_transaction_location(&tx_hash).unwrap().is_some());
+    assert!(chain
+        .get_receipt_with_block_info(&tx_hash)
+        .unwrap()
+        .is_some());
+    assert!(chain.canonical_tx_at(&tx_hash).unwrap().is_some());
+
+    // A strictly longer competing branch from genesis, containing NO tx,
+    // forces a reorg that abandons B1 (height 2 > height 1 wins outright).
+    let c1 = seal_at_slot(&chain, &engines, &genesis, base + 2);
+    let c2 = seal_at_slot(&chain, &engines, &c1, base + 3);
+    let _ = chain.import_block(c1.clone()).await.unwrap();
+    chain.import_block(c2.clone()).await.unwrap();
+    assert_eq!(chain.block_number(), 2, "longer branch must win");
+    assert_eq!(chain.head().unwrap().hash, block_hash(&c2));
+
+    // Phantom guard: the receipt view now reports the tx as gone (pending).
+    assert!(
+        chain
+            .get_receipt_with_block_info(&tx_hash)
+            .unwrap()
+            .is_none(),
+        "phantom receipt must not be returned after reorg"
+    );
+    assert!(chain.canonical_tx_at(&tx_hash).unwrap().is_none());
+
+    // The stale rows for the displaced-only tx were purged from the batch.
+    assert!(
+        chain.get_receipt(&tx_hash).unwrap().is_none(),
+        "displaced tx receipt row must be deleted"
+    );
+    assert!(
+        chain.get_transaction_location(&tx_hash).unwrap().is_none(),
+        "displaced tx index row must be deleted"
+    );
+    assert!(
+        chain.get_transaction(&tx_hash).unwrap().is_none(),
+        "displaced tx body row must be deleted"
+    );
+}
+
+/// The reorg forwards the displaced txs (those absent from the winning
+/// branch) to the `reorg_tx_sink` — the observable contract of `reorg_to`'s
+/// displaced-tx return value, which the node consumes to re-inject them.
+/// A tx present on BOTH branches must NOT be forwarded (it stays canonical).
+#[tokio::test]
+async fn reorg_forwards_only_displaced_txs_to_sink() {
+    let chain = make_chain();
+    let engines = validator_engines(&chain);
+    let genesis = chain.head().unwrap().block;
+    let base = past_slot_base();
+
+    let (sink, mut rx) = tokio::sync::mpsc::channel(4096);
+    chain.set_reorg_tx_sink(sink);
+
+    // tx0 (nonce 0) goes only into the abandoned branch → displaced.
+    // tx1 (nonce 1) goes into BOTH branches → must survive, not forwarded.
+    let tx0 = funded_transfer(0);
+    let tx1 = funded_transfer(1);
+    let tx0_hash = blake3_hash(&tx0.to_bytes_without_signature());
+    let tx1_hash = blake3_hash(&tx1.to_bytes_without_signature());
+
+    // Canonical branch: B1 carries [tx0, tx1].
+    let b1 = seal_at_slot_with_txs(
+        &chain,
+        &engines,
+        &genesis,
+        base,
+        vec![tx0.clone(), tx1.clone()],
+    );
+    chain.import_block(b1.clone()).await.unwrap();
+
+    // Competing longer branch from genesis: C1 carries only [tx1], C2 empty.
+    let c1 = seal_at_slot_with_txs(&chain, &engines, &genesis, base + 2, vec![tx1.clone()]);
+    let c2 = seal_at_slot(&chain, &engines, &c1, base + 3);
+    let _ = chain.import_block(c1.clone()).await.unwrap();
+    chain.import_block(c2.clone()).await.unwrap();
+    assert_eq!(chain.block_number(), 2, "longer branch must win");
+
+    // Exactly tx0 is forwarded; tx1 (in both branches) is not.
+    let mut forwarded = Vec::new();
+    while let Ok(tx) = rx.try_recv() {
+        forwarded.push(blake3_hash(&tx.to_bytes_without_signature()));
+    }
+    assert_eq!(
+        forwarded,
+        vec![tx0_hash],
+        "only the displaced tx0 is forwarded"
+    );
+    assert!(
+        !forwarded.contains(&tx1_hash),
+        "tx1 lives on the new branch and must not be forwarded"
+    );
+
+    // And tx1 remains canonically resolvable (its rows were kept / rewritten).
+    assert!(chain.canonical_tx_at(&tx1_hash).unwrap().is_some());
+    assert!(chain.canonical_tx_at(&tx0_hash).unwrap().is_none());
 }

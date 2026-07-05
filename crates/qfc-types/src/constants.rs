@@ -148,6 +148,30 @@ pub const SLASH_OFFLINE_PERCENT: u64 = 1;
 /// Slash percentage for false vote
 pub const SLASH_FALSE_VOTE_PERCENT: u64 = 2;
 
+/// Slash percentage for invalid inference output
+pub const SLASH_INVALID_INFERENCE_PERCENT: u64 = 5;
+
+/// Permanent jail marker
+pub const JAIL_PERMANENT_MS: u64 = u64::MAX;
+
+/// Jail duration for double signing
+pub const JAIL_DOUBLE_SIGN_MS: u64 = JAIL_PERMANENT_MS;
+
+/// Jail duration for invalid block
+pub const JAIL_INVALID_BLOCK_MS: u64 = 12 * 60 * 60 * 1000;
+
+/// Jail duration for censorship
+pub const JAIL_CENSORSHIP_MS: u64 = 6 * 60 * 60 * 1000;
+
+/// Jail duration for offline validator
+pub const JAIL_OFFLINE_MS: u64 = 60 * 60 * 1000;
+
+/// Jail duration for false vote
+pub const JAIL_FALSE_VOTE_MS: u64 = 2 * 60 * 60 * 1000;
+
+/// Jail duration for invalid inference output
+pub const JAIL_INVALID_INFERENCE_MS: u64 = 6 * 60 * 60 * 1000;
+
 /// One QFC in wei (10^18)
 pub const ONE_QFC: u128 = 1_000_000_000_000_000_000;
 
@@ -184,8 +208,8 @@ pub const UNSTAKE_DELAY_SECS: u64 = 7 * 24 * 60 * 60;
 /// Minimum delegation amount (100 QFC)
 pub const MIN_DELEGATION: u128 = 100 * ONE_QFC;
 
-/// Maximum stake percentage per validator (1%)
-pub const MAX_VALIDATOR_STAKE_PERCENT: u64 = 1;
+/// Maximum percentage of total validator stake allowed per validator
+pub const MAX_VALIDATOR_STAKE_PERCENT: u64 = 20;
 
 /// Contract creator fee rebate percentage (5%)
 pub const CONTRACT_CREATOR_FEE_PERCENT: u64 = 5;
@@ -249,6 +273,11 @@ pub fn initial_supply() -> U256 {
 /// Get max supply as U256
 pub fn max_supply() -> U256 {
     U256::from_u128(MAX_SUPPLY)
+}
+
+/// Calculate the maximum total stake (direct + delegated) allowed for one validator.
+pub fn max_validator_stake(total_stake: U256) -> U256 {
+    total_stake * U256::from_u64(MAX_VALIDATOR_STAKE_PERCENT) / U256::from_u64(100)
 }
 
 /// Calculate block reward for a given year (0-indexed)

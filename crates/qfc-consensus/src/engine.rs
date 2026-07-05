@@ -10,7 +10,8 @@ use qfc_types::{
     Address, Block, BlockHeader, DifficultyConfig, DoubleSignEvidence, Epoch, Hash, InferenceProof,
     MiningTask, Receipt, Signature, Transaction, ValidatorCheckpoint, ValidatorNode, Vote,
     WorkProof, BLOCK_INTERVAL_MS, BLOCK_VERSION, DEFAULT_BLOCK_GAS_LIMIT, EPOCH_DURATION_MS,
-    FINALITY_THRESHOLD, MAX_TIMESTAMP_DRIFT_MS, SLASH_DOUBLE_SIGN_PERCENT,
+    FINALITY_THRESHOLD, JAIL_DOUBLE_SIGN_MS, JAIL_PERMANENT_MS, MAX_TIMESTAMP_DRIFT_MS,
+    SLASH_DOUBLE_SIGN_PERCENT,
 };
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -770,10 +771,17 @@ impl ConsensusEngine {
     pub fn slash_validator(&self, address: &Address, slash_percent: u8, jail_duration_ms: u64) {
         let mut validators = self.validators.write();
         if let Some(validator) = validators.iter_mut().find(|v| v.address == *address) {
-            // Reduce stake
-            let slash_amount = validator.stake * qfc_types::U256::from_u64(slash_percent as u64)
+            // Reduce direct stake first, then delegated stake if needed.
+            let slash_amount = validator.total_stake()
+                * qfc_types::U256::from_u64(slash_percent as u64)
                 / qfc_types::U256::from_u64(100);
-            validator.stake = validator.stake.saturating_sub(slash_amount);
+            let direct_slash = slash_amount.min(validator.stake);
+            validator.stake = validator.stake.saturating_sub(direct_slash);
+            let remaining_slash = slash_amount.saturating_sub(direct_slash);
+            if !remaining_slash.is_zero() {
+                validator.delegated_stake =
+                    validator.delegated_stake.saturating_sub(remaining_slash);
+            }
 
             // Reduce reputation significantly
             validator.reputation = (validator.reputation as i32 - 2000).max(0) as u32;
@@ -781,11 +789,15 @@ impl ConsensusEngine {
             // Jail the validator
             if jail_duration_ms > 0 {
                 validator.is_jailed = true;
-                validator.jail_until = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64
-                    + jail_duration_ms;
+                validator.jail_until = if jail_duration_ms == JAIL_PERMANENT_MS {
+                    JAIL_PERMANENT_MS
+                } else {
+                    (SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as u64)
+                        .saturating_add(jail_duration_ms)
+                };
             }
 
             info!(
@@ -1137,7 +1149,7 @@ impl ConsensusEngine {
 
             // Permanent jail
             validator.is_jailed = true;
-            validator.jail_until = u64::MAX;
+            validator.jail_until = JAIL_DOUBLE_SIGN_MS;
 
             // Zero reputation
             validator.reputation = 0;
@@ -1517,6 +1529,23 @@ mod tests {
         assert!(updated[0].reputation < 8000);
         // Should be jailed
         assert!(updated[0].is_jailed);
+    }
+
+    #[test]
+    fn test_slash_validator_reduces_delegated_stake() {
+        let engine = ConsensusEngine::new(ConsensusConfig::default());
+        let mut validators = create_test_validators(1);
+        let address = validators[0].address;
+        validators[0].stake = qfc_types::U256::from_u64(100);
+        validators[0].delegated_stake = qfc_types::U256::from_u64(900);
+
+        engine.update_validators(validators);
+        engine.slash_validator(&address, 50, qfc_types::JAIL_PERMANENT_MS);
+
+        let updated = engine.get_validators();
+        assert_eq!(updated[0].stake, qfc_types::U256::ZERO);
+        assert_eq!(updated[0].delegated_stake, qfc_types::U256::from_u64(500));
+        assert_eq!(updated[0].jail_until, qfc_types::JAIL_PERMANENT_MS);
     }
 
     #[test]
