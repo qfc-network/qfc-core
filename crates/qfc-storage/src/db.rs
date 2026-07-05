@@ -91,6 +91,7 @@ const POINT_LOOKUP_CFS: &[&str] = &[
     cf::CODE,
     cf::TX_INDEX,
     cf::ETH_TX_INDEX,
+    cf::ETH_TX_META,
     cf::BLOCK_HASH_INDEX,
     cf::TASKS,
 ];
