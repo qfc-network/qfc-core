@@ -131,8 +131,19 @@ impl<'a> EvmExecutor<'a> {
         let mut db = self.create_state_db()?;
         let mut evm = self.create_evm(&mut db);
 
-        // Configure transaction
-        let gas_price = RevmU256::from(1_000_000_000u64); // 1 Gwei (matches basefee)
+        // Configure transaction.
+        //
+        // gas_price = 0 makes revm gas-neutral (BUG B fix): revm's
+        // deduct_caller charges `gas_limit * gas_price` = 0, its
+        // balance check requires only `value` (not value + gas), and its
+        // beneficiary reward is 0. All gas accounting (prepay → refund-unused
+        // → pay-producer) is therefore the Executor's single responsibility,
+        // avoiding the previous ~2x double-charge. Paired with basefee = 0 in
+        // create_evm so the EIP-1559 `gas_price >= basefee` check still passes
+        // without needing revm's cfg-gated `disable_base_fee`. `value`
+        // transfers are handled by revm's inner CREATE/CALL logic and are
+        // unaffected. Side-effect: the GASPRICE opcode reads 0 (see ADR-0015).
+        let gas_price = RevmU256::ZERO;
         evm.tx_mut().caller = address_to_revm(sender);
         evm.tx_mut().transact_to = TransactTo::Create(CreateScheme::Create);
         evm.tx_mut().data = Bytes::from(init_code);
@@ -162,8 +173,10 @@ impl<'a> EvmExecutor<'a> {
         let mut db = self.create_state_db()?;
         let mut evm = self.create_evm(&mut db);
 
-        // Configure transaction
-        let gas_price = RevmU256::from(1_000_000_000u64); // 1 Gwei (matches basefee)
+        // Configure transaction. gas_price = 0 makes revm gas-neutral so the
+        // Executor is the single source of gas accounting (BUG B fix — see the
+        // detailed note in `create`). `value` transfer still handled by revm.
+        let gas_price = RevmU256::ZERO;
         evm.tx_mut().caller = address_to_revm(sender);
         evm.tx_mut().transact_to = TransactTo::Call(address_to_revm(to));
         evm.tx_mut().data = Bytes::from(input);
@@ -207,8 +220,10 @@ impl<'a> EvmExecutor<'a> {
 
         let mut evm = self.create_evm(&mut db);
 
-        // Configure as static call
-        let gas_price = RevmU256::from(1_000_000_000u64); // 1 Gwei (matches basefee)
+        // Configure as static call. gas_price = 0 keeps revm gas-neutral
+        // (consistent with create/call); the caller pre-funding above is then
+        // belt-and-suspenders since revm's balance check requires only `value`.
+        let gas_price = RevmU256::ZERO;
         evm.tx_mut().caller = address_to_revm(caller);
         evm.tx_mut().transact_to = TransactTo::Call(address_to_revm(to));
         evm.tx_mut().data = Bytes::from(input);
@@ -239,10 +254,21 @@ impl<'a> EvmExecutor<'a> {
 
         // Configure block environment
         evm.block_mut().number = RevmU256::from(self.block_number);
-        evm.block_mut().timestamp = RevmU256::from(self.block_timestamp);
+        // BUG A fix: `block_timestamp` is the block header timestamp in
+        // milliseconds (consensus slot clock). Solidity `block.timestamp`
+        // and every DeFi deadline (Uniswap `ensure`, permit, timelocks,
+        // vesting, TWAP) expect Unix SECONDS, so convert here — the single
+        // point where the header timestamp enters revm, covering both the
+        // execution path (execute_at) and the eth_call/estimateGas simulate
+        // path. The maturity clocks (unstake/undelegate) divide by 1000
+        // themselves and are untouched.
+        evm.block_mut().timestamp = RevmU256::from(self.block_timestamp / 1000);
         evm.block_mut().coinbase = address_to_revm(&self.block_coinbase);
         evm.block_mut().gas_limit = RevmU256::from(self.block_gas_limit);
-        evm.block_mut().basefee = RevmU256::from(1_000_000_000u64); // 1 Gwei
+        // basefee = 0 so the EIP-1559 `gas_price >= basefee` check passes with
+        // our gas_price = 0 (BUG B). Side-effect: the BASEFEE opcode reads 0
+        // (see ADR-0015).
+        evm.block_mut().basefee = RevmU256::ZERO;
 
         // Configure chain
         evm.cfg_mut().chain_id = self.chain_id;
@@ -556,6 +582,87 @@ mod tests {
             evm_result.error
         );
         assert_eq!(evm_result.output, input);
+    }
+
+    /// BUG A regression: revm's `block.timestamp` (the TIMESTAMP opcode) must
+    /// be Unix SECONDS, not the header's milliseconds. Deploys a contract
+    /// whose constructor stores TIMESTAMP to slot 0, then asserts the stored
+    /// value equals `input_ms / 1000`.
+    #[test]
+    fn test_block_timestamp_is_seconds_not_millis() {
+        let state = create_test_state();
+        let sender = Address::new([0x11; 20]);
+        state
+            .set_balance(&sender, U256::from_u128(10_000_000_000_000_000_000))
+            .unwrap();
+        state.set_nonce(&sender, 0).unwrap();
+
+        // Realistic live-testnet header timestamp in ms (from the bug report).
+        let ts_ms = 1_783_237_135_001u64;
+        let executor = EvmExecutor::new(&state, 9000, 1, ts_ms, Address::ZERO, 30_000_000);
+
+        // init code: constructor runs `TIMESTAMP PUSH1 0 SSTORE` then returns
+        // empty runtime. Bytecode: 42 6000 55 6000 6000 f3
+        let init_code = hex::decode("4260005560006000f3").unwrap();
+        let result = executor
+            .create(&sender, init_code, U256::ZERO, 1_000_000)
+            .unwrap();
+        assert!(result.success, "create failed: {:?}", result.error);
+        let contract = result.contract_address.unwrap();
+
+        // Slot 0 now holds the TIMESTAMP the EVM saw.
+        let stored = state.get_storage(&contract, &U256::ZERO).unwrap();
+        assert_eq!(
+            stored,
+            U256::from_u64(ts_ms / 1000),
+            "EVM block.timestamp must be Unix seconds (input_ms/1000)"
+        );
+        // And it must NOT be the raw milliseconds.
+        assert_ne!(stored, U256::from_u64(ts_ms));
+    }
+
+    /// BUG A regression: a deadline-style guard `require(block.timestamp <=
+    /// deadline)` with a realistic Unix-SECONDS deadline must SUCCEED. Pre-fix
+    /// the EVM saw milliseconds (1_783_237_135_001) which exceeds the deadline
+    /// (2_000_000_000) and every such call reverted (Uniswap `ensure`, permit,
+    /// timelocks). Post-fix the EVM sees seconds (1_783_237_135) which is below
+    /// the deadline, so the call succeeds.
+    #[test]
+    fn test_deadline_guard_succeeds_with_seconds_timestamp() {
+        let state = create_test_state();
+        let sender = Address::new([0x11; 20]);
+        state
+            .set_balance(&sender, U256::from_u128(10_000_000_000_000_000_000))
+            .unwrap();
+        state.set_nonce(&sender, 0).unwrap();
+
+        let ts_ms = 1_783_237_135_001u64; // > 2e9 in ms, < 2e9 in seconds
+        let executor = EvmExecutor::new(&state, 9000, 1, ts_ms, Address::ZERO, 30_000_000);
+
+        // Runtime reverts iff `block.timestamp > 2_000_000_000`:
+        //   PUSH4 0x77359400  (deadline = 2_000_000_000)
+        //   TIMESTAMP; GT      -> (timestamp > deadline)
+        //   PUSH1 0x0b; JUMPI  -> jump to revert if expired
+        //   STOP               -> success path
+        //   JUMPDEST; PUSH1 0 PUSH1 0 REVERT
+        // init code (deployer prefix + runtime):
+        let init_code =
+            hex::decode("601180600b6000396000f363773594004211600b57005b60006000fd").unwrap();
+        let create = executor
+            .create(&sender, init_code, U256::ZERO, 1_000_000)
+            .unwrap();
+        assert!(create.success, "deploy failed: {:?}", create.error);
+        let contract = create.contract_address.unwrap();
+
+        // Call the deadline guard.
+        let call = executor
+            .call(&sender, &contract, Vec::new(), U256::ZERO, 1_000_000)
+            .unwrap();
+        assert!(
+            call.success,
+            "deadline guard must pass with seconds timestamp (pre-fix this reverted): {:?}",
+            call.error
+        );
     }
 
     #[test]
