@@ -5,6 +5,7 @@
 mod error;
 mod eth;
 pub mod metrics;
+mod net;
 mod qfc;
 mod server;
 mod txpool;

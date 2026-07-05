@@ -1,7 +1,8 @@
 //! Ethereum-compatible RPC methods
 
 use crate::types::{
-    BlockNumber, CallRequest, LogFilter, RpcBlock, RpcLog, RpcReceipt, RpcTransaction,
+    BlockNumber, CallRequest, LogFilter, RpcBlock, RpcFeeHistory, RpcLog, RpcReceipt,
+    RpcTransaction,
 };
 use jsonrpsee::core::{RpcResult, SubscriptionResult};
 use jsonrpsee::proc_macros::rpc;
@@ -109,6 +110,54 @@ pub trait EthApi {
     /// Returns logs matching a filter
     #[method(name = "getLogs")]
     async fn get_logs(&self, filter: LogFilter) -> RpcResult<Vec<RpcLog>>;
+
+    /// Returns a suggested priority fee (tip). QFC has no priority fee.
+    #[method(name = "maxPriorityFeePerGas")]
+    async fn max_priority_fee_per_gas(&self) -> RpcResult<String>;
+
+    /// Returns historical gas fee data for EIP-1559 fee estimation.
+    #[method(name = "feeHistory")]
+    async fn fee_history(
+        &self,
+        block_count: serde_json::Value,
+        newest_block: BlockNumber,
+        reward_percentiles: Option<Vec<f64>>,
+    ) -> RpcResult<RpcFeeHistory>;
+
+    /// Returns the node's sync status (`false` when caught up).
+    #[method(name = "syncing")]
+    async fn syncing(&self) -> RpcResult<serde_json::Value>;
+
+    /// Returns the list of addresses owned by the node (always empty).
+    #[method(name = "accounts")]
+    async fn accounts(&self) -> RpcResult<Vec<String>>;
+
+    /// Returns the number of transactions in a block by number.
+    #[method(name = "getBlockTransactionCountByNumber")]
+    async fn get_block_transaction_count_by_number(
+        &self,
+        block: BlockNumber,
+    ) -> RpcResult<Option<String>>;
+
+    /// Returns the number of transactions in a block by hash.
+    #[method(name = "getBlockTransactionCountByHash")]
+    async fn get_block_transaction_count_by_hash(&self, hash: String) -> RpcResult<Option<String>>;
+
+    /// Returns a transaction by block number and index.
+    #[method(name = "getTransactionByBlockNumberAndIndex")]
+    async fn get_transaction_by_block_number_and_index(
+        &self,
+        block: BlockNumber,
+        index: String,
+    ) -> RpcResult<Option<RpcTransaction>>;
+
+    /// Returns a transaction by block hash and index.
+    #[method(name = "getTransactionByBlockHashAndIndex")]
+    async fn get_transaction_by_block_hash_and_index(
+        &self,
+        hash: String,
+        index: String,
+    ) -> RpcResult<Option<RpcTransaction>>;
 
     /// Subscribe to new block headers
     #[subscription(name = "subscribe" => "subscription", unsubscribe = "unsubscribe", item = serde_json::Value)]

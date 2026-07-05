@@ -9,7 +9,7 @@ use qfc_executor::Executor;
 use qfc_state::StateDB;
 use qfc_storage::{cf, encode_block_number, Database, WriteBatch};
 use qfc_types::{
-    block_reward_for_year, Address, Block, BlockBody, BlockHeader, Epoch, Hash, Receipt,
+    block_reward_for_year, Address, Block, BlockBody, BlockHeader, Epoch, EthTxMeta, Hash, Receipt,
     SealedBlock, Transaction, ValidatorNode, BLOCK_INTERVAL_MS, FEE_PRODUCER_PERCENT,
     FEE_TREASURY_PERCENT, U256,
 };
@@ -457,6 +457,31 @@ impl Chain {
             internal_hash.as_bytes(),
         )?;
         Ok(())
+    }
+
+    /// Store render-only Ethereum tx metadata keyed by the internal BLAKE3 hash.
+    ///
+    /// Companion to [`Self::store_eth_tx_hash_mapping`]: that records the
+    /// forward eth->internal hash index used to *find* a tx; this records the
+    /// reverse data needed to *render* it back to a wallet (canonical keccak
+    /// hash, full-width `v`, EIP-2718 envelope type, EIP-1559 fees). Like the
+    /// forward mapping it is written at RPC submission time and is explicitly
+    /// NOT part of the atomic block-commit batch or any state root.
+    pub fn store_eth_tx_meta(&self, internal_hash: &Hash, meta: &EthTxMeta) -> Result<()> {
+        self.db
+            .put(cf::ETH_TX_META, internal_hash.as_bytes(), &meta.to_bytes())?;
+        Ok(())
+    }
+
+    /// Fetch render-only Ethereum tx metadata by internal hash, if present.
+    /// Absent for native QFC transactions (and for eth txs whose submission
+    /// node was a different peer), in which case callers fall back to the
+    /// internal hash and a legacy envelope.
+    pub fn get_eth_tx_meta(&self, internal_hash: &Hash) -> Result<Option<EthTxMeta>> {
+        match self.db.get(cf::ETH_TX_META, internal_hash.as_bytes())? {
+            Some(bytes) => Ok(EthTxMeta::from_bytes(&bytes)),
+            None => Ok(None),
+        }
     }
 
     /// Translate Ethereum hash to internal hash if it exists
