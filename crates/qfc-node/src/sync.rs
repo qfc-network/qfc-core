@@ -9,7 +9,10 @@ use qfc_network::{NetworkMessage, NetworkService, SyncEvent, SyncRequest, SyncRe
 use qfc_rpc::SyncStatusProvider;
 use qfc_types::{
     Block, Hash, Heartbeat, InferenceProof, SlashingEvidence, ValidatorMessage, Vote, VoteDecision,
-    WorkProof, BLOCK_INTERVAL_MS,
+    WorkProof, BLOCK_INTERVAL_MS, JAIL_CENSORSHIP_MS, JAIL_DOUBLE_SIGN_MS, JAIL_FALSE_VOTE_MS,
+    JAIL_INVALID_BLOCK_MS, JAIL_INVALID_INFERENCE_MS, JAIL_OFFLINE_MS, SLASH_CENSORSHIP_PERCENT,
+    SLASH_DOUBLE_SIGN_PERCENT, SLASH_FALSE_VOTE_PERCENT, SLASH_INVALID_BLOCK_PERCENT,
+    SLASH_INVALID_INFERENCE_PERCENT, SLASH_OFFLINE_PERCENT,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -1289,14 +1292,25 @@ impl SyncManager {
             return;
         }
 
-        // Determine slash parameters based on offense type
+        // Determine slash parameters based on the constants.rs single source.
         let (slash_percent, jail_duration_ms) = match evidence.offense {
-            qfc_types::SlashableOffense::DoubleSign => (10, 24 * 60 * 60 * 1000), // 10%, 24 hours
-            qfc_types::SlashableOffense::InvalidBlock => (5, 12 * 60 * 60 * 1000), // 5%, 12 hours
-            qfc_types::SlashableOffense::Censorship => (3, 6 * 60 * 60 * 1000),   // 3%, 6 hours
-            qfc_types::SlashableOffense::Offline => (1, 1 * 60 * 60 * 1000),      // 1%, 1 hour
-            qfc_types::SlashableOffense::FalseVote => (2, 2 * 60 * 60 * 1000),    // 2%, 2 hours
-            qfc_types::SlashableOffense::InvalidInference => (5, 6 * 60 * 60 * 1000), // 5%, 6 hours
+            qfc_types::SlashableOffense::DoubleSign => {
+                (SLASH_DOUBLE_SIGN_PERCENT as u8, JAIL_DOUBLE_SIGN_MS)
+            }
+            qfc_types::SlashableOffense::InvalidBlock => {
+                (SLASH_INVALID_BLOCK_PERCENT as u8, JAIL_INVALID_BLOCK_MS)
+            }
+            qfc_types::SlashableOffense::Censorship => {
+                (SLASH_CENSORSHIP_PERCENT as u8, JAIL_CENSORSHIP_MS)
+            }
+            qfc_types::SlashableOffense::Offline => (SLASH_OFFLINE_PERCENT as u8, JAIL_OFFLINE_MS),
+            qfc_types::SlashableOffense::FalseVote => {
+                (SLASH_FALSE_VOTE_PERCENT as u8, JAIL_FALSE_VOTE_MS)
+            }
+            qfc_types::SlashableOffense::InvalidInference => (
+                SLASH_INVALID_INFERENCE_PERCENT as u8,
+                JAIL_INVALID_INFERENCE_MS,
+            ),
             // InvalidTraining is handled by the early-return guard above
             // (A5 absolute-slash path, ADR-0009 D4 + A6) and never reaches here.
             qfc_types::SlashableOffense::InvalidTraining => {
@@ -1624,7 +1638,11 @@ impl SyncManager {
                             agree_count,
                             total_count,
                         );
-                        consensus.slash_validator(&miner, 5, 6 * 60 * 60 * 1000);
+                        consensus.slash_validator(
+                            &miner,
+                            SLASH_INVALID_INFERENCE_PERCENT as u8,
+                            JAIL_INVALID_INFERENCE_MS,
+                        );
                     }
                     qfc_ai_coordinator::ArbitrationOutcome::Inconclusive => {
                         info!(

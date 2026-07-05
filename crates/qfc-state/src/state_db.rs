@@ -461,6 +461,37 @@ impl StateDB {
         self.get_stake(address)
     }
 
+    /// Get total delegated stake pointing to a validator.
+    pub fn get_total_delegated_to(&self, validator: &Address) -> Result<U256> {
+        let trie = self.trie.read();
+        let mut total = U256::ZERO;
+
+        for bytes in trie.values()? {
+            let account = Account::from_bytes(&bytes)
+                .map_err(|e| StateError::Serialization(e.to_string()))?;
+            if account.get_delegated_to() == Some(*validator) {
+                total = total.saturating_add(account.get_delegated_amount());
+            }
+        }
+
+        Ok(total)
+    }
+
+    /// Get all direct and delegated validator stake tracked in account state.
+    pub fn get_total_stake(&self) -> Result<U256> {
+        let trie = self.trie.read();
+        let mut total = U256::ZERO;
+
+        for bytes in trie.values()? {
+            let account = Account::from_bytes(&bytes)
+                .map_err(|e| StateError::Serialization(e.to_string()))?;
+            total = total.saturating_add(account.get_stake());
+            total = total.saturating_add(account.get_delegated_amount());
+        }
+
+        Ok(total)
+    }
+
     // ============ Undelegation Methods ============
 
     /// Store a pending undelegation record
@@ -822,6 +853,36 @@ mod tests {
 
         let (_, amount) = state.get_delegation(&delegator).unwrap();
         assert_eq!(amount, U256::from_u64(1500));
+    }
+
+    #[test]
+    fn test_stake_totals_include_delegations() {
+        let state = create_test_state();
+        let validator = Address::new([0x22; 20]);
+        let other_validator = Address::new([0x33; 20]);
+        let delegator_a = Address::new([0x44; 20]);
+        let delegator_b = Address::new([0x55; 20]);
+        let delegator_c = Address::new([0x66; 20]);
+
+        state.set_stake(&validator, U256::from_u64(1_000)).unwrap();
+        state
+            .set_stake(&other_validator, U256::from_u64(2_000))
+            .unwrap();
+        state
+            .set_delegation(&delegator_a, &validator, U256::from_u64(300))
+            .unwrap();
+        state
+            .set_delegation(&delegator_b, &validator, U256::from_u64(700))
+            .unwrap();
+        state
+            .set_delegation(&delegator_c, &other_validator, U256::from_u64(500))
+            .unwrap();
+
+        assert_eq!(
+            state.get_total_delegated_to(&validator).unwrap(),
+            U256::from_u64(1_000)
+        );
+        assert_eq!(state.get_total_stake().unwrap(), U256::from_u64(4_500));
     }
 
     #[test]
