@@ -77,6 +77,15 @@ pub struct Executor {
     block_timestamp: u64,
     /// Block gas limit
     block_gas_limit: u64,
+    /// Hash of the executing block's parent (set during execution).
+    /// Drives PREVRANDAO and anchors the BLOCKHASH ancestor walk (ADR-0017).
+    parent_hash: qfc_types::Hash,
+    /// BLOCKHASH resolver walking the executing block's own ancestor chain
+    /// (see [`crate::BlockHashLookup`]). Installed by the chain layer.
+    block_hash_lookup: Option<crate::BlockHashLookup>,
+    /// ADR-0017 hardfork gate. Production always uses
+    /// [`qfc_types::EVM_OPCODE_ACTIVATION_HEIGHT`]; overridable ONLY in tests.
+    evm_opcode_activation_height: u64,
 }
 
 impl Executor {
@@ -87,6 +96,9 @@ impl Executor {
             block_number: 0,
             block_timestamp: 0,
             block_gas_limit: qfc_types::DEFAULT_BLOCK_GAS_LIMIT,
+            parent_hash: qfc_types::Hash::ZERO,
+            block_hash_lookup: None,
+            evm_opcode_activation_height: qfc_types::EVM_OPCODE_ACTIVATION_HEIGHT,
         }
     }
 
@@ -130,11 +142,37 @@ impl Executor {
         Ok(())
     }
 
-    /// Set block context for EVM execution
-    pub fn set_block_context(&mut self, block_number: u64, block_timestamp: u64, gas_limit: u64) {
+    /// Set block context for EVM execution.
+    ///
+    /// `parent_hash` is the hash of the EXECUTING block's parent — required
+    /// post-activation (ADR-0017) for PREVRANDAO and as the BLOCKHASH
+    /// ancestor-walk anchor.
+    pub fn set_block_context(
+        &mut self,
+        block_number: u64,
+        block_timestamp: u64,
+        gas_limit: u64,
+        parent_hash: qfc_types::Hash,
+    ) {
         self.block_number = block_number;
         self.block_timestamp = block_timestamp;
         self.block_gas_limit = gas_limit;
+        self.parent_hash = parent_hash;
+    }
+
+    /// Install the BLOCKHASH resolver (see [`crate::BlockHashLookup`]).
+    /// Consensus paths MUST install one — without it, post-activation
+    /// BLOCKHASH silently reads zero.
+    pub fn set_block_hash_lookup(&mut self, lookup: crate::BlockHashLookup) {
+        self.block_hash_lookup = Some(lookup);
+    }
+
+    /// Test-only override of the ADR-0017 activation height. Production
+    /// code must NEVER call this — a per-node activation height is a silent
+    /// consensus fork.
+    #[doc(hidden)]
+    pub fn set_evm_opcode_activation_height(&mut self, height: u64) {
+        self.evm_opcode_activation_height = height;
     }
 
     /// Validate a transaction before execution
@@ -439,7 +477,10 @@ impl Executor {
             self.block_timestamp,
             *block_producer,
             self.block_gas_limit,
-        );
+            self.parent_hash,
+            self.block_hash_lookup.clone(),
+        )
+        .with_activation_height(self.evm_opcode_activation_height);
 
         let result = evm_executor.create(sender, tx.data.clone(), tx.value, tx.gas_limit)?;
 
@@ -498,7 +539,10 @@ impl Executor {
             self.block_timestamp,
             *block_producer,
             self.block_gas_limit,
-        );
+            self.parent_hash,
+            self.block_hash_lookup.clone(),
+        )
+        .with_activation_height(self.evm_opcode_activation_height);
 
         let result = evm_executor.call(sender, &to, tx.data.clone(), tx.value, tx.gas_limit)?;
 
