@@ -15,7 +15,7 @@ use qfc_types::{
 };
 use std::collections::HashSet;
 use std::sync::Arc;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::Sender;
 use tracing::{debug, info, warn};
 
 /// Maximum reorg depth: a fork whose common ancestor is deeper than this
@@ -81,7 +81,7 @@ pub struct Chain {
     /// on the winning branch is sent here so the node can re-inject it into
     /// the mempool — otherwise a deploy/transfer orphaned by a fork is lost
     /// forever (phantom-receipt / reorg-cleanup fix, ADR-0013).
-    reorg_tx_sink: RwLock<Option<UnboundedSender<Transaction>>>,
+    reorg_tx_sink: RwLock<Option<Sender<Transaction>>>,
 }
 
 impl Chain {
@@ -524,7 +524,7 @@ impl Chain {
     /// Install the sink that receives transactions displaced by a reorg
     /// (see [`Self::reorg_tx_sink`]). The node wires this to a task that
     /// re-injects them into the mempool.
-    pub fn set_reorg_tx_sink(&self, sink: UnboundedSender<Transaction>) {
+    pub fn set_reorg_tx_sink(&self, sink: Sender<Transaction>) {
         *self.reorg_tx_sink.write() = Some(sink);
     }
 
@@ -959,11 +959,14 @@ impl Chain {
         }
 
         // Forward displaced txs for mempool re-injection (best effort: a
-        // missing/closed sink just means no re-injection is wired).
+        // missing/closed sink just means no re-injection is wired). The
+        // channel is bounded; under a reorg storm `try_send` drops rather
+        // than growing memory — a dropped tx just isn't re-proposed by this
+        // node (peers still hold it, and the client can resubmit).
         if !displaced.is_empty() {
             if let Some(sink) = self.reorg_tx_sink.read().as_ref() {
                 for tx in &displaced {
-                    let _ = sink.send(tx.clone());
+                    let _ = sink.try_send(tx.clone());
                 }
             }
         }

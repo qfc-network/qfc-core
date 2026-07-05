@@ -784,7 +784,7 @@ async fn reorg_forwards_only_displaced_txs_to_sink() {
     let genesis = chain.head().unwrap().block;
     let base = past_slot_base();
 
-    let (sink, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (sink, mut rx) = tokio::sync::mpsc::channel(4096);
     chain.set_reorg_tx_sink(sink);
 
     // tx0 (nonce 0) goes only into the abandoned branch → displaced.

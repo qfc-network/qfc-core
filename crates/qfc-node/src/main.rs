@@ -316,7 +316,9 @@ async fn main() -> Result<()> {
     // never held them. The chain forwards each displaced tx here; a task
     // re-adds it to the mempool via the same nonce-validated path the network
     // handler uses, so it can be re-included on the canonical chain (ADR-0013).
-    let (reorg_tx, mut reorg_rx) = tokio::sync::mpsc::unbounded_channel::<qfc_types::Transaction>();
+    // Bounded so a reorg storm drops (via try_send in reorg_to) instead of
+    // growing memory; 4096 is far above any realistic single-reorg displaced set.
+    let (reorg_tx, mut reorg_rx) = tokio::sync::mpsc::channel::<qfc_types::Transaction>(4096);
     chain.set_reorg_tx_sink(reorg_tx);
     {
         let chain = chain.clone();
