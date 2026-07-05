@@ -13,6 +13,7 @@ use qfc_types::{
     SealedBlock, Transaction, ValidatorNode, BLOCK_INTERVAL_MS, FEE_PRODUCER_PERCENT,
     FEE_TREASURY_PERCENT, U256,
 };
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
@@ -40,6 +41,12 @@ pub struct ChainConfig {
     pub chain_id: u64,
     /// Genesis configuration
     pub genesis: GenesisConfig,
+    /// ADR-0017 hardfork gate for the EVM opcode fixes (BLOCKHASH /
+    /// EXTCODEHASH / PREVRANDAO). This is a CONSENSUS CONSTANT: every node
+    /// must use [`qfc_types::EVM_OPCODE_ACTIVATION_HEIGHT`] (the default) —
+    /// a per-node value is a silent consensus fork. Overridable ONLY so
+    /// tests can exercise post-activation semantics on short chains.
+    pub evm_opcode_activation_height: u64,
 }
 
 impl Default for ChainConfig {
@@ -47,6 +54,7 @@ impl Default for ChainConfig {
         Self {
             chain_id: qfc_types::DEFAULT_CHAIN_ID,
             genesis: GenesisConfig::testnet(),
+            evm_opcode_activation_height: qfc_types::EVM_OPCODE_ACTIVATION_HEIGHT,
         }
     }
 }
@@ -568,6 +576,7 @@ impl Chain {
     pub fn execute_at(
         &self,
         parent_state_root: Hash,
+        parent_hash: Hash,
         block_number: u64,
         timestamp_ms: u64,
         producer: &Address,
@@ -580,12 +589,17 @@ impl Chain {
         // (undelegation `unlock_at`) see the block's own values instead of
         // zeros or the local wall clock. A local instance keeps this method
         // `&self` and race-free against concurrent executions.
+        // `parent_hash` (the executing block's parent) anchors the ADR-0017
+        // opcode context: PREVRANDAO and the BLOCKHASH ancestor walk.
         let mut executor = Executor::new(self.config.chain_id);
         executor.set_block_context(
             block_number,
             timestamp_ms,
             qfc_types::DEFAULT_BLOCK_GAS_LIMIT,
+            parent_hash,
         );
+        executor.set_block_hash_lookup(self.block_hash_lookup());
+        executor.set_evm_opcode_activation_height(self.config.evm_opcode_activation_height);
 
         // 1. Mature undelegations — maturity clock is the BLOCK timestamp,
         //    never the local wall clock (D12).
@@ -614,11 +628,61 @@ impl Chain {
     ) -> Result<ExecutionOutcome> {
         self.execute_at(
             parent_state_root,
+            block.parent_hash(),
             block.number(),
             block.timestamp(),
             &block.producer(),
             &block.transactions,
         )
+    }
+
+    /// Build the BLOCKHASH resolver for the EVM (ADR-0017): resolves
+    /// `wanted` by walking parent hashes from `start` down through the
+    /// HASH-KEYED block store (`cf::BLOCKS_BY_HASH`) — deliberately NEVER
+    /// through the canonical number index, which during `reorg_to`'s branch
+    /// re-execution still holds the OLD branch (the atomic batch swaps it
+    /// only after the whole branch re-executed). Walking the executing
+    /// block's own ancestor chain gives the correct hashes on every path:
+    /// produce, import, reorg re-execution and simulation.
+    ///
+    /// The walk is lazy (only runs when a contract actually executes
+    /// BLOCKHASH) and bounded by the opcode's 256-block window plus the
+    /// executor-side range check. Every block within that window of a
+    /// post-activation block is present in `BLOCKS_BY_HASH` (all recent
+    /// binaries write it in the commit batch; fresh syncs re-write history).
+    fn block_hash_lookup(&self) -> qfc_executor::BlockHashLookup {
+        let db = self.db.clone();
+        // Every height visited during a walk is cached, so a contract that
+        // queries all 256 window heights costs ONE full walk (≤256 reads)
+        // total instead of Σ1..256 ≈ 33k. The cache is valid because the
+        // closure is built per execution and `start` (the executing block's
+        // parent) is constant within it — guarded anyway by clearing when
+        // `start` changes.
+        let visited: parking_lot::Mutex<(Option<Hash>, HashMap<u64, Hash>)> =
+            parking_lot::Mutex::new((None, HashMap::new()));
+        Arc::new(move |start: &Hash, wanted: u64| -> Option<Hash> {
+            let mut guard = visited.lock();
+            if guard.0 != Some(*start) {
+                *guard = (Some(*start), HashMap::new());
+            }
+            if let Some(hash) = guard.1.get(&wanted) {
+                return Some(*hash);
+            }
+            let mut cursor = *start;
+            loop {
+                let bytes = db.get(cf::BLOCKS_BY_HASH, cursor.as_bytes()).ok()??;
+                let block: Block = borsh::from_slice(&bytes).ok()?;
+                let n = block.number();
+                guard.1.insert(n, cursor);
+                match n {
+                    n if n == wanted => return Some(cursor),
+                    // Walked past the target (or reached genesis) without
+                    // finding it — out of range for this ancestor chain.
+                    n if n < wanted || n == 0 => return None,
+                    _ => cursor = block.parent_hash(),
+                }
+            }
+        })
     }
 
     /// Total transaction fees: Σ gas_used × gas_price.
@@ -1324,7 +1388,12 @@ impl Chain {
         // checks state.get_code() and silently returns empty output if code is not
         // found — breaking eth_call for deployed contracts.
         let block_number = self.block_number();
-        let block_timestamp = self.head().map(|b| b.block.timestamp()).unwrap_or(0);
+        let head = self.head();
+        let block_timestamp = head.as_ref().map(|b| b.block.timestamp()).unwrap_or(0);
+        // ADR-0017 context for simulation: anchor the BLOCKHASH walk /
+        // PREVRANDAO at the current head, matching an eth_call executed in
+        // the head block's context.
+        let parent_hash = head.as_ref().map(|b| b.hash).unwrap_or(Hash::ZERO);
 
         // Simulate on a SCRATCH state at the current root — never
         // snapshot/revert the shared live instance, which raced concurrent
@@ -1345,7 +1414,10 @@ impl Chain {
             block_timestamp,
             Address::ZERO,
             qfc_types::DEFAULT_BLOCK_GAS_LIMIT,
-        );
+            parent_hash,
+            Some(self.block_hash_lookup()),
+        )
+        .with_activation_height(self.config.evm_opcode_activation_height);
 
         let result = if let Some(to_addr) = to {
             if value.is_zero() {

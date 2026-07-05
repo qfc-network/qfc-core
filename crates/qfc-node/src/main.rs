@@ -303,6 +303,7 @@ async fn main() -> Result<()> {
     let chain_config = ChainConfig {
         chain_id: args.chain_id,
         genesis,
+        evm_opcode_activation_height: qfc_types::EVM_OPCODE_ACTIVATION_HEIGHT,
     };
     let chain = Arc::new(Chain::new(db.clone(), chain_config, consensus.clone())?);
     info!("Chain initialized at block {}", chain.block_number());
@@ -922,6 +923,7 @@ mod tests {
             ChainConfig {
                 chain_id: 9000,
                 genesis: GenesisConfig::dev(),
+                ..Default::default()
             },
             consensus,
         )
@@ -956,6 +958,7 @@ mod tests {
             ChainConfig {
                 chain_id: 9000,
                 genesis: GenesisConfig::dev(),
+                ..Default::default()
             },
             consensus,
         )

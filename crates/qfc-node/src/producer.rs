@@ -382,6 +382,7 @@ impl BlockProducer {
         // root (same code path import runs — D7). No live-state mutation.
         let outcome = match self.chain.execute_at(
             parent_block.state_root(),
+            parent.hash,
             block_number,
             timestamp,
             &our_address,
